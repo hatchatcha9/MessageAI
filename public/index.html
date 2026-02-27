@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MessageAI - SMS Simulator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .phone {
+            width: 400px;
+            height: 750px;
+            background: #000;
+            border-radius: 40px;
+            padding: 15px;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        .phone-screen {
+            width: 100%;
+            height: 100%;
+            background: #f2f2f7;
+            border-radius: 30px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .phone-header {
+            background: #f2f2f7;
+            padding: 15px 20px;
+            border-bottom: 1px solid #d1d1d6;
+        }
+
+        .contact-info {
+            text-align: center;
+        }
+
+        .contact-name {
+            font-weight: 600;
+            font-size: 16px;
+            color: #000;
+        }
+
+        .contact-number {
+            font-size: 12px;
+            color: #8e8e93;
+        }
+
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .message {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 18px;
+            font-size: 14px;
+            line-height: 1.5;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .message.sent {
+            align-self: flex-end;
+            background: #007aff;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.received {
+            align-self: flex-start;
+            background: #e9e9eb;
+            color: #000;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.typing {
+            align-self: flex-start;
+            background: #e9e9eb;
+            color: #8e8e93;
+            font-style: italic;
+        }
+
+        .input-container {
+            padding: 10px 15px;
+            background: #f2f2f7;
+            border-top: 1px solid #d1d1d6;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .message-input {
+            flex: 1;
+            border: none;
+            background: #fff;
+            border-radius: 20px;
+            padding: 10px 15px;
+            font-size: 15px;
+            outline: none;
+            border: 1px solid #d1d1d6;
+        }
+
+        .send-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: #007aff;
+            border: none;
+            color: white;
+            font-size: 18px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .send-btn:hover {
+            background: #0056b3;
+        }
+
+        .send-btn:disabled {
+            background: #b4d7ff;
+            cursor: not-allowed;
+        }
+
+        .controls {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .control-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .clear-btn {
+            background: #ff3b30;
+            color: white;
+        }
+
+        .info-panel {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: #2c2c2e;
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            max-width: 280px;
+        }
+
+        .info-panel h3 {
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .info-panel p {
+            font-size: 13px;
+            color: #aeaeb2;
+            margin-bottom: 8px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #48484a;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #30d158;
+        }
+
+        .status-dot.error {
+            background: #ff3b30;
+        }
+
+        .status-text {
+            font-size: 12px;
+        }
+
+        @media (max-width: 800px) {
+            .info-panel, .controls {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="info-panel">
+        <h3>MessageAI Simulator</h3>
+        <p>This simulates SMS messaging. When Twilio is set up, this same backend will handle real texts.</p>
+        <p>Try: "Hey Claude, I want some mexican food"</p>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span class="status-text" id="statusText">Connected</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="control-btn clear-btn" onclick="clearConversation()">Clear Chat</button>
+    </div>
+
+    <div class="phone">
+        <div class="phone-screen">
+            <div class="phone-header">
+                <div class="contact-info">
+                    <div class="contact-name">MessageAI</div>
+                    <div class="contact-number">+1 (555) AI-HELP</div>
+                </div>
+            </div>
+
+            <div class="messages-container" id="messagesContainer">
+                <div class="message received">Hey! I'm MessageAI. I can help you find food, make recommendations, and more. What are you in the mood for?</div>
+            </div>
+
+            <div class="input-container">
+                <input type="text" class="message-input" id="messageInput" placeholder="Text message" onkeypress="handleKeyPress(event)">
+                <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const messagesContainer = document.getElementById('messagesContainer');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+
+        // Simulated phone number for this session
+        const phoneNumber = '+1' + Math.floor(Math.random() * 9000000000 + 1000000000);
+
+        function addMessage(text, type) {
+            const message = document.createElement('div');
+            message.className = `message ${type}`;
+            message.textContent = text;
+            messagesContainer.appendChild(message);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            return message;
+        }
+
+        function setLoading(loading) {
+            sendBtn.disabled = loading;
+            messageInput.disabled = loading;
+        }
+
+        async function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text) return;
+
+            // Add user message
+            addMessage(text, 'sent');
+            messageInput.value = '';
+
+            // Show typing indicator
+            const typingIndicator = addMessage('typing...', 'typing');
+            setLoading(true);
+
+            try {
+                const response = await fetch('/api/message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phoneNumber, message: text })
+                });
+
+                const data = await response.json();
+
+                // Remove typing indicator
+                typingIndicator.remove();
+
+                // Add AI response
+                addMessage(data.response, 'received');
+
+                statusDot.className = 'status-dot';
+                statusText.textContent = 'Connected';
+            } catch (error) {
+                typingIndicator.remove();
+                addMessage('Error: Could not reach server', 'received');
+                statusDot.className = 'status-dot error';
+                statusText.textContent = 'Connection error';
+            }
+
+            setLoading(false);
+            messageInput.focus();
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        async function clearConversation() {
+            try {
+                await fetch('/api/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phoneNumber })
+                });
+
+                // Clear UI
+                messagesContainer.innerHTML = '';
+                addMessage("Hey! I'm MessageAI. I can help you find food, make recommendations, and more. What are you in the mood for?", 'received');
+            } catch (error) {
+                console.error('Error clearing conversation:', error);
+            }
+        }
+
+        // Focus input on load
+        messageInput.focus();
+    </script>
+</body>
+</html>

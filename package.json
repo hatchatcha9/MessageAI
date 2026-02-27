@@ -1,0 +1,23 @@
+{
+  "name": "messageai",
+  "version": "1.0.0",
+  "description": "An SMS-based AI assistant that can order food, make recommendations, and execute tasks - all via text message.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "playwright": "^1.40.0",
+    "twilio": "^5.12.2"
+  }
+}

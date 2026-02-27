@@ -1,0 +1,24 @@
+node_modules/
+.env
+*.log
+.DS_Store
+*.db
+
+# Browser automation data (contains session cookies, login state)
+browser-data/
+
+# Debug screenshots (may contain sensitive info)
+screenshots/
+
+# Any backup files
+*.bak
+*.backup
+
+# IDE/Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
