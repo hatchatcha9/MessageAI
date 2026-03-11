@@ -1,12 +1,16 @@
 /**
  * DoorDash Browser Automation Module
  * Uses Playwright to automate real orders on DoorDash
+ * Restaurant search uses the internal HTTP API (no browser needed).
  */
 
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const { exec } = require('child_process');
+
+// API module for search (bypasses Cloudflare CAPTCHA)
+const doordashApi = require('./doordash-api');
 
 // Configuration
 const DOORDASH_URL = 'https://www.doordash.com';
@@ -245,16 +249,40 @@ async function launchBrowser(headless = HEADLESS) {
         fs.mkdirSync(BROWSER_DATA_DIR, { recursive: true });
     }
 
-    // Launch browser with persistent context to save login session
-    context = await chromium.launchPersistentContext(BROWSER_DATA_DIR, {
-        headless,
-        viewport: { width: 1280, height: 720 },
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        // Add human-like settings
+    // Use real Chrome with a dedicated MessageAI profile (separate from your normal Chrome)
+    // This avoids both DoorDash bot detection AND profile locking conflicts
+    const CHROME_INSTALLED = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+    const BOT_PROFILE_DIR = 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile';
+
+    if (!fs.existsSync(BOT_PROFILE_DIR)) {
+        fs.mkdirSync(BOT_PROFILE_DIR, { recursive: true });
+    }
+
+    const launchOptions = {
+        headless: false,
+        channel: CHROME_INSTALLED ? 'chrome' : undefined,
         locale: 'en-US',
-        timezoneId: 'America/Chicago',
-        geolocation: { latitude: 29.7604, longitude: -95.3698 }, // Houston, TX
-        permissions: ['geolocation']
+        timezoneId: 'America/Denver',
+        // Hide automation flags so DoorDash/Cloudflare doesn't detect bot
+        args: [
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-infobars',
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+    };
+
+    if (!CHROME_INSTALLED) {
+        launchOptions.viewport = { width: 1280, height: 720 };
+        launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    }
+
+    console.log(`[DoorDash] Launching ${CHROME_INSTALLED ? 'real Chrome' : 'bundled Chromium'} with dedicated MessageAI profile`);
+    context = await chromium.launchPersistentContext(BOT_PROFILE_DIR, launchOptions);
+
+    // Remove webdriver property so sites can't detect automation
+    await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
     page = context.pages()[0] || await context.newPage();
@@ -800,6 +828,33 @@ async function login(email, password) {
 
             // Wait for login to complete - must end up on doordash.com (not identity.doordash.com)
             console.log('[DoorDash] Waiting for login to complete...');
+
+            // Check for CAPTCHA and wait for user to solve it
+            await delay(2000);
+            const captchaSelectors = [
+                'iframe[src*="challenges.cloudflare.com"]',
+                'iframe[src*="recaptcha"]',
+                'iframe[title*="captcha" i]',
+                'iframe[title*="challenge" i]',
+                '[id*="captcha" i]',
+                '[class*="captcha" i]',
+                '[class*="challenge" i]'
+            ];
+            let captchaFound = false;
+            for (const sel of captchaSelectors) {
+                try {
+                    const el = await page.$(sel);
+                    if (el && await el.isVisible()) {
+                        captchaFound = true;
+                        break;
+                    }
+                } catch (e) {}
+            }
+            if (captchaFound) {
+                console.log('[DoorDash] CAPTCHA detected - waiting 60 seconds for user to solve it...');
+                await delay(60000);
+                console.log('[DoorDash] Continuing after CAPTCHA wait...');
+            }
 
             // Wait for redirect back to doordash.com (not identity server)
             try {
@@ -1980,15 +2035,33 @@ async function checkoutCurrentCart() {
 
 /**
  * Search for restaurants near an address (returns list of real restaurants)
- * SIMPLIFIED VERSION - just search using the search bar
+ * Tries the internal HTTP API first (no browser, no CAPTCHA).
+ * Falls back to browser automation if API fails.
  */
 async function searchRestaurantsNearAddress(credentials, address, query = '') {
     const { email, password } = credentials;
 
+    console.log(`[DoorDash] === STARTING SEARCH ===`);
+    console.log(`[DoorDash] Query: ${query || 'all'}`);
+    console.log(`[DoorDash] Address: ${address}`);
+
+    // Try HTTP API first - no browser, no CAPTCHA
     try {
-        console.log(`[DoorDash] === STARTING SEARCH ===`);
-        console.log(`[DoorDash] Query: ${query || 'all'}`);
-        console.log(`[DoorDash] Address: ${address}`);
+        console.log('[DoorDash] Attempting search via internal API (no browser)...');
+        const apiResult = await doordashApi.searchRestaurantsNearAddress(credentials, address, query);
+        if (apiResult.success && apiResult.restaurants.length > 0) {
+            console.log('[DoorDash] API search succeeded!');
+            return apiResult;
+        }
+        console.log('[DoorDash] API search returned no results, falling back to browser...');
+        console.log('[DoorDash] API error:', apiResult.error);
+    } catch (apiError) {
+        console.log('[DoorDash] API search threw error, falling back to browser:', apiError.message);
+    }
+
+    // Fall back to browser automation
+    try {
+        console.log(`[DoorDash] === BROWSER SEARCH FALLBACK ===`);
 
         // Step 1: Make sure browser is open
         if (!page || !context) {
@@ -2003,9 +2076,11 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('1-loaded-homepage');
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
-        // Step 3: Check if logged in by looking for "Account" or "Orders" in the page
+        // Step 3: Check if logged in - look for sign-in prompt to confirm NOT logged in
         const pageContent = await page.content();
-        const isLoggedIn = pageContent.includes('/account') || pageContent.includes('/orders');
+        const isLoggedIn = !pageContent.includes('Sign in or Sign up') &&
+                           !pageContent.includes('sign-in') &&
+                           (pageContent.includes('/account') || pageContent.includes('/orders'));
         console.log('[DoorDash] Logged in:', isLoggedIn);
 
         if (!isLoggedIn) {
@@ -2023,73 +2098,62 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             await takeScreenshot('2-after-login');
         }
 
-        // Step 4: Find and click the search bar
-        console.log('[DoorDash] Looking for search bar...');
-        await takeScreenshot('3-before-search');
-
-        // The search bar should be at the top - try to find any input
-        let searchFound = false;
-
-        // First try: Look for visible input with placeholder containing "search"
+        // Step 4: Enter delivery address if the address input is showing instead of search
         const allInputs = await page.$$('input');
-        console.log(`[DoorDash] Found ${allInputs.length} input elements`);
-
+        let addressInputFound = false;
         for (const input of allInputs) {
             try {
                 const placeholder = await input.getAttribute('placeholder');
                 const isVisible = await input.isVisible();
-                console.log(`[DoorDash] Input placeholder: "${placeholder}", visible: ${isVisible}`);
+                if (isVisible && placeholder && placeholder.toLowerCase().includes('address')) {
+                    console.log('[DoorDash] Address input found - entering delivery address...');
+                    await input.click();
+                    await delay(500);
+                    await input.fill(address);
+                    await delay(2000);
+                    // Pick first autocomplete suggestion
+                    const suggestion = await page.$('[role="option"], [data-anchor-id="AddressSuggestion"]');
+                    if (suggestion) {
+                        await suggestion.click();
+                        console.log('[DoorDash] Selected address suggestion');
+                    } else {
+                        await page.keyboard.press('Enter');
+                    }
+                    await delay(3000);
+                    await takeScreenshot('3b-address-set');
+                    addressInputFound = true;
+                    break;
+                }
+            } catch (e) { continue; }
+        }
 
+        // Step 5: Find and click the search bar
+        console.log('[DoorDash] Looking for search bar...');
+        await takeScreenshot('3-before-search');
+
+        let searchFound = false;
+        const freshInputs = await page.$$('input');
+        console.log(`[DoorDash] Found ${freshInputs.length} input elements`);
+
+        for (const input of freshInputs) {
+            try {
+                const placeholder = await input.getAttribute('placeholder');
+                const isVisible = await input.isVisible();
+                console.log(`[DoorDash] Input placeholder: "${placeholder}", visible: ${isVisible}`);
                 if (isVisible && placeholder && placeholder.toLowerCase().includes('search')) {
-                    console.log('[DoorDash] Found search input by placeholder!');
+                    console.log('[DoorDash] Found search input!');
                     await input.click();
                     await delay(500);
                     await input.fill(query);
                     await takeScreenshot('4-typed-query');
                     await delay(500);
                     await page.keyboard.press('Enter');
-                    console.log('[DoorDash] Pressed Enter');
                     searchFound = true;
                     break;
                 }
-            } catch (e) {
-                continue;
-            }
+            } catch (e) { continue; }
         }
 
-        // Second try: Click on anything that looks like a search area
-        if (!searchFound) {
-            console.log('[DoorDash] Trying to click search area...');
-            const searchClickTargets = [
-                'input',
-                '[class*="search" i]',
-                '[class*="Search" i]',
-                '[placeholder*="search" i]'
-            ];
-
-            for (const selector of searchClickTargets) {
-                try {
-                    const el = await page.$(selector);
-                    if (el && await el.isVisible()) {
-                        await el.click();
-                        await delay(1000);
-                        await takeScreenshot('4-clicked-search-area');
-
-                        // Now try typing
-                        await page.keyboard.type(query);
-                        await delay(500);
-                        await page.keyboard.press('Enter');
-                        console.log('[DoorDash] Typed and pressed Enter');
-                        searchFound = true;
-                        break;
-                    }
-                } catch (e) {
-                    continue;
-                }
-            }
-        }
-
-        // Third try: Just use keyboard shortcut or direct URL
         if (!searchFound) {
             console.log('[DoorDash] Using direct search URL...');
             const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
@@ -2122,9 +2186,9 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
 
     } catch (error) {
-        console.error('[DoorDash] Search error:', error.message);
+        console.error('[DoorDash] Browser search error:', error.message);
         console.error('[DoorDash] Stack:', error.stack);
-        await takeScreenshot('error-' + Date.now());
+        try { await takeScreenshot('error-' + Date.now()); } catch (e) {}
 
         return { success: false, error: error.message, restaurants: [] };
     }
@@ -2870,7 +2934,55 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
             // First scroll to top
             await page.evaluate(() => window.scrollTo(0, 0));
-            await delay(800);
+            await delay(300);
+
+            // Click on sidebar menu categories to load items (DoorDash lazy-loads sections)
+            console.log('[DoorDash] Clicking sidebar categories to load menu items...');
+
+            // Use page.evaluate to find and click sidebar links - more reliable
+            const clickedCategories = await page.evaluate(() => {
+                const clicked = [];
+                const categoriesToFind = ['light entrees', 'most ordered', 'entrees', 'salads'];
+
+                // Find all links/buttons in the page
+                const allLinks = document.querySelectorAll('a, button, [role="button"], [role="tab"]');
+
+                for (const link of allLinks) {
+                    const text = link.textContent?.toLowerCase()?.trim() || '';
+                    const rect = link.getBoundingClientRect();
+
+                    // Check if this is a sidebar link (left side of page, reasonable size)
+                    if (rect.left < 200 && rect.width > 30 && rect.width < 250 && rect.height > 15 && rect.height < 60) {
+                        for (const cat of categoriesToFind) {
+                            if (text === cat || text.includes(cat)) {
+                                link.click();
+                                clicked.push(text);
+                                break;
+                            }
+                        }
+                    }
+                }
+                return clicked;
+            });
+
+            console.log(`[DoorDash] Clicked sidebar categories: ${JSON.stringify(clickedCategories)}`);
+            await delay(1000);
+
+            // Scroll through the ENTIRE page to trigger lazy loading of all sections
+            console.log('[DoorDash] Scrolling through page to load all items...');
+            const totalHeight = await page.evaluate(() => document.body.scrollHeight);
+            for (let scrollPos = 0; scrollPos < totalHeight; scrollPos += 500) {
+                await page.evaluate((pos) => window.scrollTo(0, pos), scrollPos);
+                await delay(200);
+            }
+
+            // Take a screenshot after loading
+            await takeScreenshot('after-scroll-load');
+
+            // Now scroll back to top to start searching
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await delay(500);
+            console.log('[DoorDash] All items loaded, starting search...');
 
             // Scroll through the ENTIRE page looking for the item
             // Get page height first
@@ -2881,6 +2993,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log(`[DoorDash] Page height: ${pageHeight}, will scroll ${scrollSteps} times`);
 
             for (let scrollAttempt = 0; scrollAttempt < scrollSteps && !clicked; scrollAttempt++) {
+                // Periodically screenshot during scroll to show search progress
+                if (scrollAttempt % 4 === 0) {
+                    await takeScreenshot(`searching-scroll-${scrollAttempt}`);
+                }
+
                 // Try to find and click the item at current scroll position
                 const result = await page.evaluate((name) => {
                     const lowerName = name.toLowerCase().trim();
@@ -2932,10 +3049,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         console.log('[FindItem] Found title match:', directText || fullText.substring(0, 40));
                         cardEl.scrollIntoView({ behavior: 'instant', block: 'center' });
 
+                        // Get coordinates AFTER scroll so they're accurate
+                        const cardRect = cardEl.getBoundingClientRect();
                         return {
                             found: true,
                             strategy: 'title-match',
-                            text: directText || fullText.substring(0, 40)
+                            text: directText || fullText.substring(0, 40),
+                            x: cardRect.left + cardRect.width / 2,
+                            y: cardRect.top + cardRect.height / 2
                         };
                     }
 
@@ -2966,10 +3087,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         console.log('[FindItem] Found card match:', firstLine.substring(0, 40));
                         card.scrollIntoView({ behavior: 'instant', block: 'center' });
 
+                        // Get coordinates AFTER scroll so they're accurate
+                        const cardRect = card.getBoundingClientRect();
                         return {
                             found: true,
                             strategy: 'card-match',
-                            text: firstLine.substring(0, 40)
+                            text: firstLine.substring(0, 40),
+                            x: cardRect.left + cardRect.width / 2,
+                            y: cardRect.top + cardRect.height / 2
                         };
                     }
 
@@ -2978,83 +3103,15 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
                 if (result.found) {
                     console.log(`[DoorDash] Found "${searchName}" via ${result.strategy}: ${result.text}`);
+                    console.log(`[DoorDash] Card center: (${result.x?.toFixed(0)}, ${result.y?.toFixed(0)})`);
                     await delay(400);
-                    await takeScreenshot('found-item-before-click');
+                    await takeScreenshot(`found-item-scroll-${scrollAttempt}`);
 
-                    // Get the element's click coordinates (don't click inside evaluate - React needs native clicks)
-                    const clickCoords = await page.evaluate((name) => {
-                        const lowerName = name.toLowerCase().trim();
-
-                        // Try title match first
-                        const titleElements = document.querySelectorAll('h1, h2, h3, h4, h5, span, div');
-                        for (const titleEl of titleElements) {
-                            let directText = '';
-                            for (const node of titleEl.childNodes) {
-                                if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
-                            }
-                            directText = directText.trim().toLowerCase();
-                            const fullText = titleEl.textContent?.trim()?.toLowerCase() || '';
-
-                            const isMatch = directText === lowerName || directText.startsWith(lowerName) ||
-                                           fullText === lowerName || (fullText.startsWith(lowerName) && fullText.length < lowerName.length + 30);
-
-                            if (!isMatch) continue;
-
-                            const rect = titleEl.getBoundingClientRect();
-                            if (rect.top < 0 || rect.top > window.innerHeight) continue;
-                            if (rect.left < 150) continue;
-
-                            // Find clickable parent
-                            let clickTarget = titleEl;
-                            for (let i = 0; i < 5; i++) {
-                                const parent = clickTarget.parentElement;
-                                if (!parent) break;
-                                const pRect = parent.getBoundingClientRect();
-                                if (pRect.width > 100 && pRect.width < 500 && pRect.height > 60 && pRect.height < 400) {
-                                    clickTarget = parent;
-                                }
-                                if (pRect.width > 600) break;
-                            }
-
-                            const targetRect = clickTarget.getBoundingClientRect();
-                            console.log('[FindItem] Found title match at', targetRect.left, targetRect.top);
-                            return {
-                                found: true,
-                                x: targetRect.left + targetRect.width / 2,
-                                y: targetRect.top + targetRect.height / 2,
-                                text: directText || fullText.substring(0, 30)
-                            };
-                        }
-
-                        // Try card match
-                        const cards = document.querySelectorAll('article, [role="button"], [class*="MenuItem"], [class*="ItemCard"], button, a');
-                        for (const card of cards) {
-                            const lines = (card.textContent || '').split('\n').map(l => l.trim()).filter(l => l);
-                            const firstLine = lines[0]?.toLowerCase() || '';
-
-                            if (firstLine !== lowerName && !firstLine.startsWith(lowerName)) continue;
-                            if (!(card.textContent || '').match(/\$\d+/)) continue;
-
-                            const rect = card.getBoundingClientRect();
-                            if (rect.width < 100 || rect.width > 450 || rect.height < 50 || rect.height > 350) continue;
-                            if (rect.left < 150 || rect.top < 0 || rect.top > window.innerHeight) continue;
-
-                            console.log('[FindItem] Found card match at', rect.left, rect.top);
-                            return {
-                                found: true,
-                                x: rect.left + rect.width / 2,
-                                y: rect.top + rect.height / 2,
-                                text: firstLine.substring(0, 30)
-                            };
-                        }
-
-                        return { found: false };
-                    }, searchName);
-
-                    if (clickCoords.found) {
-                        console.log(`[DoorDash] Clicking at (${clickCoords.x}, ${clickCoords.y}) for: ${clickCoords.text}`);
-                        // Use Playwright's native mouse click instead of JS click for React compatibility
-                        await page.mouse.click(clickCoords.x, clickCoords.y);
+                    // Click directly at the card's center coordinates from scrollIntoView
+                    // (avoids re-searching with locator which lands on text span instead of card)
+                    if (result.x && result.y) {
+                        console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
+                        await page.mouse.click(result.x, result.y);
                         clicked = true;
                         break;
                     }
@@ -3075,7 +3132,25 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         if (!clicked) {
             console.log('[DoorDash] Name-based search failed, trying position-based at each scroll position...');
 
-            await page.evaluate(() => window.scrollTo(0, 0));
+            // Scroll past "Order it again" section first
+            await page.evaluate(() => {
+                const targetSections = ['most ordered', 'featured items', 'entrees', 'popular items'];
+                const allElements = document.querySelectorAll('h1, h2, h3, h4, span, div');
+                for (const el of allElements) {
+                    const text = el.textContent?.toLowerCase()?.trim() || '';
+                    for (const section of targetSections) {
+                        if (text === section || (text.startsWith(section) && text.length < section.length + 10)) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.top > 50) {
+                                window.scrollBy(0, rect.top - 50);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // Default scroll past Order it again section
+                window.scrollBy(0, 400);
+            });
             await delay(500);
 
             // Scroll and collect all visible items
@@ -3098,6 +3173,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                                 const name = text.split('\n')[0]?.trim()?.substring(0, 50) || text.substring(0, 50);
                                 results.push({
                                     name,
+                                    fullText: text.toLowerCase(),
                                     x: rect.left + rect.width / 2,
                                     y: rect.top + rect.height / 2,
                                     scrollY: window.scrollY
@@ -3141,16 +3217,29 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             return { success: false, error: 'Could not open item. Please try selecting again.' };
         }
 
-        await delay(2000);
+        await delay(2500);
+        await takeScreenshot('after-item-click');
 
         // Check if a modal/dialog opened
-        await takeScreenshot('after-item-click');
-        const modalOpened = await page.$('[role="dialog"], [data-testid*="modal"], [class*="Modal"], [class*="modal"], [aria-modal="true"]');
+        let modalOpened = await page.$('[role="dialog"], [data-testid*="modal"], [class*="Modal"], [class*="modal"], [aria-modal="true"]');
+
+        // If no modal yet, wait a bit longer and check again
+        if (!modalOpened) {
+            console.log('[DoorDash] No modal yet, waiting longer...');
+            await delay(2000);
+            await takeScreenshot('after-item-click-retry');
+            modalOpened = await page.$('[role="dialog"], [data-testid*="modal"], [class*="Modal"], [class*="modal"], [aria-modal="true"]');
+        }
 
         if (modalOpened) {
             console.log('[DoorDash] Item modal opened');
             await takeScreenshot('item-modal');
             await delay(1000);
+
+            // Clear any pre-selected options from previous orders
+            // DoorDash remembers your last customizations - we want fresh options
+            await clearPreSelectedOptions();
+            await delay(500);
 
             // Check for required options that need user input
             const requiredOptions = await extractRequiredOptions();
@@ -3222,20 +3311,29 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 };
             }
 
-            // Try one more time to click add button
-            console.log('[DoorDash] Trying to click add button again...');
+            // Modal still open with no detected required options — check if add button says "Make X required selection"
             await takeScreenshot('modal-still-open');
-            const allButtons = await page.$$('[role="dialog"] button');
-            for (const btn of allButtons.reverse()) {
-                try {
-                    const text = await btn.textContent();
-                    if (text.includes('Add') || text.includes('$')) {
-                        console.log(`[DoorDash] Clicking: ${text.substring(0, 30)}`);
-                        await btn.click();
-                        await delay(1500);
-                        break;
+            const addBtnText = await page.evaluate(() => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                if (!modal) return '';
+                const btns = modal.querySelectorAll('button');
+                for (const btn of btns) {
+                    const t = btn.textContent?.trim() || '';
+                    if (t.toLowerCase().includes('required selection') || t.toLowerCase().includes('make')) {
+                        return t;
                     }
-                } catch (e) {}
+                }
+                return '';
+            });
+
+            if (addBtnText) {
+                // Button still says "Make X required selection" — extract options once more and surface them
+                console.log(`[DoorDash] Add button says "${addBtnText.substring(0, 50)}" — surfacing options to user`);
+                const finalOptions = await extractRequiredOptions();
+                if (finalOptions.length > 0) {
+                    stopDebugScreenshots();
+                    return { success: false, needsOptions: true, requiredOptions: finalOptions, message: 'Please select required options' };
+                }
             }
 
             stopDebugScreenshots();
@@ -3413,73 +3511,138 @@ async function extractRequiredOptions() {
 
         await takeScreenshot('options-extracted');
 
-        // If no groups found with the structured approach, try clicking on section headers to expand
+        // If structured approach found nothing, dump modal HTML for debugging and try broader extraction
         if (optionGroups.length === 0) {
-            console.log('[DoorDash] No groups found, trying to expand collapsed sections...');
+            console.log('[DoorDash] Structured extraction found 0 groups — dumping modal HTML and trying broad extraction...');
 
-            // Click on sections that say "Required" to expand them
-            await page.evaluate(() => {
+            // Dump modal HTML to file for inspection
+            const modalHtml = await page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                if (!modal) return;
-
-                const clickables = modal.querySelectorAll('div, button, [role="button"]');
-                for (const el of clickables) {
-                    const text = el.textContent?.toLowerCase() || '';
-                    if (text.includes('required') && text.includes('select') && text.length < 100) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.height > 30 && rect.height < 80) {
-                            el.click();
-                        }
-                    }
-                }
+                return modal ? modal.innerHTML.substring(0, 30000) : 'NO MODAL FOUND';
             });
+            const htmlPath = path.join(BROWSER_DATA_DIR, 'modal-debug.html');
+            fs.writeFileSync(htmlPath, modalHtml);
+            console.log(`[DoorDash] Modal HTML saved to: ${htmlPath}`);
 
-            await delay(1500);
-            await takeScreenshot('sections-expanded');
-
-            // Try extraction again with simpler approach - just find protein options
-            const simpleOptions = await page.evaluate(() => {
+            // Broad extraction: find ALL radiogroups and groups with "Required" anywhere
+            const broadGroups = await page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return [];
 
-                const options = [];
+                const groups = [];
                 const seen = new Set();
 
-                // Look for food item names that are likely protein/main choices
-                const foodWords = ['pork', 'chicken', 'steak', 'beef', 'shrimp', 'veggie',
-                                   'carnitas', 'barbacoa', 'fish', 'tofu'];
+                // Strategy A: Find [role="radiogroup"] elements — the most reliable indicator
+                const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                for (const rg of radioGroups) {
+                    const fullText = rg.textContent?.toLowerCase() || '';
+                    // Skip if it looks optional
+                    if (fullText.includes('optional')) continue;
 
-                const allElements = modal.querySelectorAll('div, span, label');
-                for (const el of allElements) {
-                    const text = el.textContent?.trim() || '';
-                    const lower = text.toLowerCase();
-
-                    if (foodWords.some(w => lower.includes(w)) &&
-                        text.length > 5 && text.length < 60 &&
-                        !seen.has(lower)) {
-
-                        // Clean up
-                        let clean = text.replace(/Includes customization/gi, '').trim();
-                        clean = clean.split(/\d+\s*cal/i)[0].trim();
-
-                        if (clean.length > 3) {
-                            seen.add(lower);
-                            options.push(clean);
+                    // Find the group's label/name (sibling or nearby heading)
+                    let groupName = '';
+                    const prev = rg.previousElementSibling;
+                    if (prev) groupName = prev.textContent?.trim() || '';
+                    if (!groupName || groupName.length > 50) {
+                        // Try parent's first heading
+                        const parent = rg.parentElement;
+                        if (parent) {
+                            const heading = parent.querySelector('h1,h2,h3,h4,h5,span,p');
+                            if (heading) groupName = heading.textContent?.trim()?.split('\n')[0] || '';
                         }
+                    }
+                    if (!groupName) groupName = 'Choose an option';
+                    // Trim noise from name
+                    groupName = groupName.split(/required|select|choose|pick|\d+\s*cal/i)[0].trim();
+                    if (groupName.length > 40) groupName = groupName.substring(0, 40);
+                    if (!groupName) continue;
+                    if (seen.has(groupName.toLowerCase())) continue;
+
+                    // Extract options: radios, checkboxes, list items inside this group
+                    const optEls = rg.querySelectorAll('[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], li, label');
+                    const options = [];
+                    const optSeen = new Set();
+                    for (const opt of optEls) {
+                        let txt = opt.getAttribute('aria-label') || opt.textContent?.trim() || '';
+                        // Clean price and calorie info for display
+                        txt = txt.split(/\d{2,4}\s*cal/i)[0].trim();
+                        txt = txt.replace(/\s*\(\+?\$[\d.]+\)\s*/g, match => match); // keep price suffix
+                        if (txt.length < 2 || txt.length > 80) continue;
+                        if (/^[\d$+\s]+$/.test(txt)) continue; // skip pure numbers/prices
+                        if (optSeen.has(txt.toLowerCase())) continue;
+                        optSeen.add(txt.toLowerCase());
+                        options.push(txt);
+                    }
+                    if (options.length === 0) continue;
+
+                    const isSelected = rg.querySelector('[aria-checked="true"], input:checked') !== null;
+                    seen.add(groupName.toLowerCase());
+                    groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
+                }
+
+                // Strategy B: Look for divs that contain "Required" text (looser than before)
+                if (groups.length === 0) {
+                    const allDivs = modal.querySelectorAll('div, section, fieldset');
+                    for (const div of allDivs) {
+                        const ownText = Array.from(div.childNodes)
+                            .filter(n => n.nodeType === Node.TEXT_NODE)
+                            .map(n => n.textContent.trim()).join(' ').toLowerCase();
+                        const divText = div.textContent?.toLowerCase() || '';
+
+                        // Must mention "required" somewhere in it
+                        if (!divText.includes('required')) continue;
+                        const isOptional = divText.includes('optional');
+                        if (isOptional) continue;
+
+                        const rect = div.getBoundingClientRect();
+                        if (rect.height < 60 || rect.height > 600 || rect.width < 200) continue;
+
+                        // Get a name from first short text element
+                        let groupName = '';
+                        const children = div.querySelectorAll('span, p, h1, h2, h3, h4, h5, div');
+                        for (const ch of children) {
+                            const t = ch.textContent?.trim() || '';
+                            if (t.length > 2 && t.length < 40 && !t.toLowerCase().includes('required') &&
+                                !t.toLowerCase().includes('select') && !t.toLowerCase().includes('optional')) {
+                                groupName = t;
+                                break;
+                            }
+                        }
+                        if (!groupName || seen.has(groupName.toLowerCase())) continue;
+
+                        // Extract options from radio/checkbox inputs or li elements
+                        const optEls = div.querySelectorAll('[role="radio"], [role="checkbox"], input[type="radio"], li, label');
+                        const options = [];
+                        const optSeen = new Set();
+                        for (const opt of optEls) {
+                            let txt = opt.getAttribute('aria-label') || opt.textContent?.trim() || '';
+                            txt = txt.split(/\d{2,4}\s*cal/i)[0].trim();
+                            if (txt.length < 2 || txt.length > 80) continue;
+                            if (/^[\d$+\s]+$/.test(txt)) continue;
+                            if (optSeen.has(txt.toLowerCase())) continue;
+                            optSeen.add(txt.toLowerCase());
+                            options.push(txt);
+                        }
+                        if (options.length === 0) continue;
+
+                        const isSelected = div.querySelector('[aria-checked="true"], input:checked') !== null;
+                        seen.add(groupName.toLowerCase());
+                        groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
                     }
                 }
 
-                return options;
+                return groups;
             });
 
-            if (simpleOptions.length > 0) {
-                return [{
-                    name: 'Choose Your Protein',
-                    options: simpleOptions.slice(0, 8),
-                    required: true,
-                    hasSelection: false
-                }];
+            if (broadGroups.length > 0) {
+                console.log(`[DoorDash] Broad extraction found ${broadGroups.length} groups`);
+                broadGroups.forEach(g => console.log(`  - ${g.name}: [${g.options.slice(0,3).join(', ')}...]`));
+                const unselected = broadGroups.filter(g => !g.hasSelection);
+                return unselected.length > 0 ? unselected : broadGroups;
             }
+
+            console.log('[DoorDash] No required options found — item may not need options');
+            return [];
         }
 
         // Filter to only unselected groups
@@ -3586,6 +3749,69 @@ async function extractRequiredOptionsOld() {
 }
 
 /**
+ * Clear pre-selected options from previous orders
+ * DoorDash remembers your last customizations - this resets them to show all options fresh
+ */
+async function clearPreSelectedOptions() {
+    try {
+        console.log('[DoorDash] Checking for pre-selected options from previous orders...');
+
+        const cleared = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return { found: false };
+
+            let clearedCount = 0;
+
+            // Strategy 1: Look for "Customize" or "Edit" buttons that reset options
+            const buttons = modal.querySelectorAll('button, [role="button"], a');
+            for (const btn of buttons) {
+                const text = btn.textContent?.toLowerCase()?.trim() || '';
+                if (text === 'customize' || text === 'edit' || text === 'change' ||
+                    text.includes('customize item') || text.includes('edit item')) {
+                    console.log('[ClearOptions] Found customize button:', text);
+                    btn.click();
+                    return { found: true, action: 'customize-button', text };
+                }
+            }
+
+            // Strategy 2: Just log pre-selected options (don't click them — causes modal disruption)
+            const selectedRadios = modal.querySelectorAll('[role="radio"][aria-checked="true"]');
+            if (selectedRadios.length > 0) {
+                console.log('[ClearOptions] Found', selectedRadios.length, 'pre-selected options (leaving them — will be overridden by user selection)');
+            }
+
+            // Strategy 3: Look for "Includes customization" text which indicates saved options
+            const allText = modal.textContent?.toLowerCase() || '';
+            if (allText.includes('includes customization') || allText.includes('last ordered')) {
+                // Find and click any element that might expand options
+                const expandable = modal.querySelectorAll('[aria-expanded="false"], [class*="expand"], [class*="collapse"]');
+                for (const el of expandable) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 20) {
+                        el.click();
+                        clearedCount++;
+                    }
+                }
+                return { found: true, action: 'expanded-sections', count: clearedCount };
+            }
+
+            return { found: false };
+        });
+
+        if (cleared.found) {
+            console.log(`[DoorDash] Cleared pre-selected options: ${JSON.stringify(cleared)}`);
+            await delay(800); // Wait for UI to update after clearing
+            await takeScreenshot('after-clear-preselected');
+        } else {
+            console.log('[DoorDash] No pre-selected options found');
+        }
+
+    } catch (error) {
+        console.error('[DoorDash] Clear pre-selected options error:', error.message);
+    }
+}
+
+/**
  * Auto-select the first option in each required group
  */
 async function autoSelectFirstOptions() {
@@ -3625,8 +3851,22 @@ async function autoSelectAllRequiredOptions() {
         console.log('[DoorDash] Auto-selecting remaining required options...');
         await takeScreenshot('before-auto-select-all');
 
+        // First, scroll through the modal to make sure all sections are loaded
+        await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (modal) {
+                // Scroll to bottom and back to trigger lazy loading
+                modal.scrollTop = modal.scrollHeight;
+            }
+        });
+        await delay(300);
+        await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (modal) modal.scrollTop = 0;
+        });
+        await delay(300);
+
         // Find unselected radio buttons and get their coordinates
-        // Use native Playwright clicks instead of JS clicks
         const unselectedOptions = await page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return [];
@@ -3634,64 +3874,103 @@ async function autoSelectAllRequiredOptions() {
             const options = [];
 
             // Find all radio buttons in the modal
-            const radios = modal.querySelectorAll('[role="radio"]');
+            const radios = Array.from(modal.querySelectorAll('[role="radio"]'));
             console.log('[AutoSelect] Found', radios.length, 'radio buttons in modal');
 
-            // Group radios by their section (look for section headers like "Tortillas", "Beans")
-            // A section is identified by finding a parent with a header containing "Required"
-            const sections = new Map(); // sectionElement -> { hasSelection: bool, radios: [] }
+            if (radios.length === 0) return [];
 
-            for (const radio of radios) {
-                // Find the section container (parent that contains "Required" text)
-                let sectionEl = null;
-                let parent = radio.parentElement;
-                for (let i = 0; i < 10 && parent && parent !== modal; i++) {
-                    const text = parent.textContent || '';
-                    // Section containers typically have "Required" in their text
-                    if (text.includes('Required') && parent.offsetHeight > 40 && parent.offsetHeight < 600) {
-                        sectionEl = parent;
-                        break;
+            // Group radios by finding their radiogroup parent or by proximity
+            // DoorDash uses [role="radiogroup"] for option groups
+            const radioGroups = modal.querySelectorAll('[role="radiogroup"]');
+            console.log('[AutoSelect] Found', radioGroups.length, 'radiogroups');
+
+            if (radioGroups.length > 0) {
+                // Use radiogroups for grouping
+                for (const group of radioGroups) {
+                    const groupRadios = group.querySelectorAll('[role="radio"]');
+                    let hasSelection = false;
+                    let firstUnselected = null;
+
+                    for (const radio of groupRadios) {
+                        const isChecked = radio.getAttribute('aria-checked') === 'true';
+                        if (isChecked) {
+                            hasSelection = true;
+                            break;
+                        }
+                        if (!firstUnselected) {
+                            firstUnselected = radio;
+                        }
                     }
-                    parent = parent.parentElement;
+
+                    if (!hasSelection && firstUnselected) {
+                        const rect = firstUnselected.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            const text = firstUnselected.textContent?.trim()?.substring(0, 50) || 'unknown';
+                            console.log('[AutoSelect] Will click (radiogroup):', text);
+                            options.push({
+                                x: rect.left + rect.width / 2,
+                                y: rect.top + rect.height / 2,
+                                text: text,
+                                needsScroll: rect.top < 0 || rect.top > window.innerHeight
+                            });
+                        }
+                    }
                 }
+            } else {
+                // Fallback: group by vertical position (radios close together are in same group)
+                // Sort radios by vertical position
+                radios.sort((a, b) => {
+                    const rectA = a.getBoundingClientRect();
+                    const rectB = b.getBoundingClientRect();
+                    return rectA.top - rectB.top;
+                });
 
-                if (!sectionEl) sectionEl = modal; // fallback to modal as section
+                // Group radios that are within 150px vertically of each other
+                const groups = [];
+                let currentGroup = [];
+                let lastTop = -1000;
 
-                if (!sections.has(sectionEl)) {
-                    sections.set(sectionEl, { hasSelection: false, radios: [] });
+                for (const radio of radios) {
+                    const rect = radio.getBoundingClientRect();
+                    if (rect.top - lastTop > 150 && currentGroup.length > 0) {
+                        groups.push(currentGroup);
+                        currentGroup = [];
+                    }
+                    currentGroup.push(radio);
+                    lastTop = rect.top;
                 }
+                if (currentGroup.length > 0) groups.push(currentGroup);
 
-                const isChecked = radio.getAttribute('aria-checked') === 'true';
-                if (isChecked) {
-                    sections.get(sectionEl).hasSelection = true;
-                }
-                sections.get(sectionEl).radios.push({ el: radio, checked: isChecked });
-            }
+                console.log('[AutoSelect] Grouped into', groups.length, 'groups by position');
 
-            console.log('[AutoSelect] Found', sections.size, 'sections');
+                // For each group, check if it has a selection
+                for (const group of groups) {
+                    let hasSelection = false;
+                    let firstUnselected = null;
 
-            // For each section without a selection, get the first unchecked radio's coordinates
-            for (const [sectionEl, data] of sections) {
-                if (data.hasSelection) {
-                    console.log('[AutoSelect] Section already has selection, skipping');
-                    continue;
-                }
+                    for (const radio of group) {
+                        const isChecked = radio.getAttribute('aria-checked') === 'true';
+                        if (isChecked) {
+                            hasSelection = true;
+                            break;
+                        }
+                        if (!firstUnselected) {
+                            firstUnselected = radio;
+                        }
+                    }
 
-                // Find first unchecked radio in this section
-                for (const radioData of data.radios) {
-                    if (radioData.checked) continue;
-
-                    const rect = radioData.el.getBoundingClientRect();
-                    // Must be visible
-                    if (rect.width > 0 && rect.height > 0 && rect.top > 0 && rect.top < window.innerHeight + 100) {
-                        const text = radioData.el.textContent?.trim()?.substring(0, 50) || 'unknown';
-                        console.log('[AutoSelect] Will click:', text, 'at', rect.left, rect.top);
-                        options.push({
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                            text: text
-                        });
-                        break; // Only one per section
+                    if (!hasSelection && firstUnselected) {
+                        const rect = firstUnselected.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            const text = firstUnselected.textContent?.trim()?.substring(0, 50) || 'unknown';
+                            console.log('[AutoSelect] Will click (position group):', text);
+                            options.push({
+                                x: rect.left + rect.width / 2,
+                                y: rect.top + rect.height / 2,
+                                text: text,
+                                needsScroll: rect.top < 0 || rect.top > window.innerHeight
+                            });
+                        }
                     }
                 }
             }
@@ -3703,6 +3982,44 @@ async function autoSelectAllRequiredOptions() {
 
         // Click each unselected option using native Playwright clicks
         for (const opt of unselectedOptions) {
+            // If element needs scrolling, scroll it into view first
+            if (opt.needsScroll) {
+                console.log(`[DoorDash] Scrolling to option: "${opt.text}"`);
+                await page.evaluate((optText) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return;
+
+                    const radios = modal.querySelectorAll('[role="radio"]');
+                    for (const radio of radios) {
+                        if (radio.textContent?.includes(optText.substring(0, 20))) {
+                            radio.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            break;
+                        }
+                    }
+                }, opt.text);
+                await delay(500);
+
+                // Re-get coordinates after scroll
+                const newCoords = await page.evaluate((optText) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return null;
+
+                    const radios = modal.querySelectorAll('[role="radio"]');
+                    for (const radio of radios) {
+                        if (radio.textContent?.includes(optText.substring(0, 20))) {
+                            const rect = radio.getBoundingClientRect();
+                            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+                        }
+                    }
+                    return null;
+                }, opt.text);
+
+                if (newCoords) {
+                    opt.x = newCoords.x;
+                    opt.y = newCoords.y;
+                }
+            }
+
             console.log(`[DoorDash] Auto-clicking: "${opt.text}" at (${opt.x}, ${opt.y})`);
             await page.mouse.click(opt.x, opt.y);
             await delay(400);
@@ -4180,9 +4497,44 @@ function getUserFriendlyError(error) {
     return errorMessages[error] || errorMessages[DoorDashErrors.UNKNOWN];
 }
 
+/**
+ * Open browser for manual login - user logs in themselves, session is saved
+ */
+async function openForManualLogin() {
+    try {
+        if (!page || !context) {
+            await launchBrowser(false); // always non-headless for manual login
+        }
+
+        await page.goto(`${DOORDASH_URL}/consumer/login`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        console.log('[DoorDash] Browser opened for manual login. Waiting up to 3 minutes...');
+
+        // Poll every 3 seconds for up to 3 minutes
+        const timeout = 3 * 60 * 1000;
+        const start = Date.now();
+
+        while (Date.now() - start < timeout) {
+            await delay(3000);
+            const content = await page.content().catch(() => '');
+            const url = page.url();
+            if ((content.includes('href="/account"') || content.includes('/orders')) && !url.includes('/login')) {
+                console.log('[DoorDash] Manual login successful! Session saved.');
+                updateSessionState({ loggedIn: true });
+                return { success: true };
+            }
+        }
+
+        return { success: false, error: 'Timed out waiting for login' };
+    } catch (error) {
+        console.error('[DoorDash] Manual login error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
 module.exports = {
     launchBrowser,
     closeBrowser,
+    openForManualLogin,
     login,
     setAddress,
     searchRestaurant,
