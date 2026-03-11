@@ -106,9 +106,13 @@ db.exec(`
 try {
     db.exec(`ALTER TABLE users ADD COLUMN doordash_credentials_encrypted TEXT`);
     console.log('[DB] Added doordash_credentials_encrypted column');
-} catch (e) {
-    // Column already exists, ignore
-}
+} catch (e) {}
+
+// Migration: Add order tracking columns
+try { db.exec(`ALTER TABLE orders ADD COLUMN doordash_order_id TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE orders ADD COLUMN tracking_url TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE orders ADD COLUMN last_known_status TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE orders ADD COLUMN phone_number TEXT`); } catch (e) {}
 
 // Create DoorDash cache table for real restaurant/menu data
 db.exec(`
@@ -341,6 +345,36 @@ function updateOrderStatus(orderId, status) {
     db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, orderId);
 }
 
+function saveOrderTrackingInfo(orderId, { doordashOrderId, trackingUrl, phoneNumber } = {}) {
+    db.prepare(`
+        UPDATE orders SET doordash_order_id = ?, tracking_url = ?, phone_number = ? WHERE id = ?
+    `).run(doordashOrderId || null, trackingUrl || null, phoneNumber || null, orderId);
+}
+
+function updateOrderLastStatus(orderId, status) {
+    db.prepare('UPDATE orders SET last_known_status = ? WHERE id = ?').run(status, orderId);
+}
+
+function getActiveOrders() {
+    return db.prepare(`
+        SELECT o.*, u.phone_number as user_phone
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        WHERE o.status NOT IN ('delivered', 'cancelled')
+        AND o.placed_at > datetime('now', '-4 hours')
+        ORDER BY o.placed_at DESC
+    `).all();
+}
+
+function getLatestActiveOrderForUser(userId) {
+    return db.prepare(`
+        SELECT * FROM orders
+        WHERE user_id = ?
+        AND status NOT IN ('delivered', 'cancelled')
+        ORDER BY placed_at DESC LIMIT 1
+    `).get(userId);
+}
+
 // DoorDash credential functions
 function setDoorDashCredentials(userId, email, password) {
     // Store email and password as encrypted JSON
@@ -469,6 +503,10 @@ module.exports = {
     getOrder,
     getUserOrders,
     updateOrderStatus,
+    saveOrderTrackingInfo,
+    updateOrderLastStatus,
+    getActiveOrders,
+    getLatestActiveOrderForUser,
     setDoorDashCredentials,
     getDoorDashCredentials,
     hasDoorDashCredentials,

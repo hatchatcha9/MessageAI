@@ -12,6 +12,7 @@ const restaurants = [
         distance: '0.8 mi',
         priceLevel: '$$',
         menu: [
+            // Entrees
             { id: 'burrito', name: 'Burrito', price: 10.95, description: 'Choice of protein, rice, beans, salsa, and toppings in a flour tortilla',
               requiredOptions: { protein: ['Chicken', 'Steak (+$2)', 'Carnitas', 'Barbacoa (+$2)', 'Sofritas', 'Veggie'] } },
             { id: 'bowl', name: 'Burrito Bowl', price: 10.95, description: 'All the burrito fillings without the tortilla',
@@ -20,8 +21,19 @@ const restaurants = [
               requiredOptions: { protein: ['Chicken', 'Steak (+$2)', 'Carnitas', 'Barbacoa (+$2)', 'Sofritas', 'Veggie'] } },
             { id: 'quesadilla', name: 'Quesadilla', price: 11.95, description: 'Grilled flour tortilla with cheese and protein',
               requiredOptions: { protein: ['Chicken', 'Steak (+$2)', 'Carnitas', 'Barbacoa (+$2)', 'Sofritas', 'Veggie'] } },
+            { id: 'salad', name: 'Salad', price: 10.95, description: 'Romaine lettuce base with protein, beans, salsa, and dressing',
+              requiredOptions: { protein: ['Chicken', 'Steak (+$2)', 'Carnitas', 'Barbacoa (+$2)', 'Sofritas', 'Veggie'] } },
+            { id: 'kids-quesadilla', name: 'Kids Quesadilla', price: 6.50, description: 'Smaller cheese quesadilla with a side of beans or rice' },
+            { id: 'lifestyle-bowl', name: 'Whole30 Salad Bowl', price: 11.95, description: 'Supergreens, cauliflower rice, carnitas, fajita veggies, guac, salsa' },
+            { id: 'double-protein', name: 'Double Protein Bowl', price: 14.95, description: 'Burrito bowl with double your choice of protein',
+              requiredOptions: { protein: ['Chicken', 'Steak (+$2)', 'Carnitas', 'Barbacoa (+$2)', 'Sofritas'] } },
+            // Appetizers
             { id: 'chips-guac', name: 'Chips & Guacamole', price: 5.95, description: 'Fresh tortilla chips with hand-mashed guac' },
             { id: 'chips-salsa', name: 'Chips & Salsa', price: 2.95, description: 'Fresh tortilla chips with your choice of salsa' },
+            { id: 'chips-queso', name: 'Chips & Queso Blanco', price: 5.45, description: 'Tortilla chips with creamy house-made queso' },
+            // Drinks & Dessert
+            { id: 'agua-fresca', name: 'Agua Fresca', price: 3.25, description: 'Hibiscus or watermelon fresh fruit drink' },
+            { id: 'churro', name: 'Churro', price: 2.25, description: 'Crispy cinnamon-sugar churro' },
         ]
     },
     {
@@ -34,12 +46,25 @@ const restaurants = [
         distance: '0.5 mi',
         priceLevel: '$',
         menu: [
-            { id: 'crunchwrap', name: 'Crunchwrap Supreme', price: 5.49, description: 'Seasoned beef, nacho cheese, lettuce, tomato, sour cream in a grilled tortilla' },
-            { id: 'chalupa', name: 'Chalupa Supreme', price: 4.49, description: 'Fried chalupa shell with beef, cheese, lettuce, tomato, sour cream' },
+            // Entrees
+            { id: 'crunchwrap', name: 'Crunchwrap Supreme', price: 5.49, description: 'Seasoned beef, nacho cheese, lettuce, tomato, sour cream in a grilled tortilla',
+              requiredOptions: { protein: ['Beef', 'Chicken', 'Steak (+$1)'] } },
+            { id: 'chalupa', name: 'Chalupa Supreme', price: 4.49, description: 'Fried chalupa shell with beef, cheese, lettuce, tomato, sour cream',
+              requiredOptions: { protein: ['Beef', 'Chicken', 'Steak (+$1)'] } },
             { id: 'burrito-supreme', name: 'Burrito Supreme', price: 4.99, description: 'Seasoned beef, beans, rice, cheese, sour cream, lettuce, tomato' },
             { id: 'mexican-pizza', name: 'Mexican Pizza', price: 5.49, description: 'Two crispy shells with beef, beans, pizza sauce, cheese, tomatoes' },
-            { id: 'nachos-bellgrande', name: 'Nachos BellGrande', price: 5.99, description: 'Chips with beef, beans, nacho cheese, sour cream, tomatoes' },
+            { id: 'gordita-crunch', name: 'Cheesy Gordita Crunch', price: 5.49, description: 'Crunchy taco inside a soft cheesy flatbread with beef and three-cheese blend' },
+            { id: 'doritos-taco', name: 'Doritos Locos Taco', price: 2.29, description: 'Classic taco in a Nacho Cheese Doritos shell' },
+            { id: 'quesarito', name: 'Quesarito', price: 4.99, description: 'Burrito wrapped in a quesadilla with beef, rice, chipotle sauce, sour cream' },
+            { id: 'power-bowl', name: 'Power Menu Bowl', price: 6.99, description: 'Grilled chicken, rice, black beans, guacamole, sour cream, pico, cheese' },
+            { id: 'bean-burrito', name: 'Bean & Cheese Burrito', price: 2.49, description: 'Seasoned beans, cheddar cheese, onion, red sauce' },
             { id: 'taco-12pack', name: 'Taco 12-Pack', price: 15.99, description: '12 crunchy tacos for sharing' },
+            // Appetizers
+            { id: 'nachos-bellgrande', name: 'Nachos BellGrande', price: 5.99, description: 'Chips with beef, beans, nacho cheese, sour cream, tomatoes' },
+            { id: 'nachos-chips', name: 'Chips & Nacho Cheese', price: 1.99, description: 'Crispy chips with warm nacho cheese sauce' },
+            // Dessert
+            { id: 'cinnabon-delights', name: 'Cinnabon Delights (4pc)', price: 1.99, description: 'Warm donut holes filled with Cinnabon frosting, rolled in cinnamon sugar' },
+            { id: 'churro-tb', name: 'Churro', price: 1.49, description: 'Warm cinnamon sugar churro' },
         ]
     },
     {
@@ -52,12 +77,27 @@ const restaurants = [
         distance: '1.2 mi',
         priceLevel: '$$',
         menu: [
+            // Plates
+            { id: 'plate-2', name: '2-Entree Plate', price: 11.50, description: 'Choose 2 entrees and 1 side' },
+            { id: 'plate-3', name: '3-Entree Plate', price: 13.50, description: 'Choose 3 entrees and 1 side' },
+            { id: 'bowl-panda', name: 'Bowl (1 Entree)', price: 9.40, description: 'Choose 1 entree and 1 side' },
+            // Entrees
             { id: 'orange-chicken', name: 'Orange Chicken', price: 9.99, description: 'Crispy chicken wok-tossed in sweet and spicy orange sauce' },
             { id: 'beijing-beef', name: 'Beijing Beef', price: 9.99, description: 'Crispy beef with bell peppers in sweet-tangy sauce' },
             { id: 'kung-pao', name: 'Kung Pao Chicken', price: 9.99, description: 'Chicken with peanuts, peppers in spicy Sichuan sauce' },
+            { id: 'broccoli-beef', name: 'Broccoli Beef', price: 9.99, description: 'Tender beef and broccoli in a savory ginger soy sauce' },
+            { id: 'honey-walnut-shrimp', name: 'Honey Walnut Shrimp', price: 11.99, description: 'Crispy shrimp with honey sauce and glazed walnuts' },
+            { id: 'sweetfire-chicken', name: 'SweetFire Chicken Breast', price: 9.99, description: 'Crispy white meat chicken with pineapple, red bell peppers in sweet chili sauce' },
+            { id: 'mushroom-chicken', name: 'Mushroom Chicken', price: 9.99, description: 'Light ginger soy sauce with mushrooms and zucchini' },
+            { id: 'black-pepper-steak', name: 'Black Pepper Sirloin Steak', price: 11.99, description: 'Sirloin steak with baby broccoli in bold black pepper sauce' },
+            // Sides
             { id: 'chow-mein', name: 'Chow Mein', price: 4.50, description: 'Stir-fried noodles with cabbage, celery, onions' },
             { id: 'fried-rice', name: 'Fried Rice', price: 4.50, description: 'Wok-fired rice with egg, peas, carrots' },
-            { id: 'plate', name: '2-Entree Plate', price: 11.50, description: 'Choose 2 entrees and 1 side' },
+            // Appetizers
+            { id: 'spring-rolls', name: 'Chicken Egg Roll (2pc)', price: 2.99, description: 'Cabbage, carrots, green onions, chicken in a crispy shell' },
+            { id: 'rangoon', name: 'Cream Cheese Rangoon (3pc)', price: 2.49, description: 'Crispy wonton filled with cream cheese' },
+            // Dessert
+            { id: 'fortune-cookie', name: 'Fortune Cookie', price: 0.99, description: 'Classic fortune cookie' },
         ]
     },
     {
@@ -70,12 +110,29 @@ const restaurants = [
         distance: '0.3 mi',
         priceLevel: '$',
         menu: [
+            // Burgers
             { id: 'big-mac', name: 'Big Mac', price: 6.49, description: 'Two beef patties, special sauce, lettuce, cheese, pickles, onions' },
+            { id: 'big-mac-meal', name: 'Big Mac Meal', price: 10.99, description: 'Big Mac, medium fries, and medium drink',
+              requiredOptions: { drink: ['Coke', 'Diet Coke', 'Sprite', 'Dr. Pepper', 'Sweet Tea', 'Orange Juice'] } },
             { id: 'quarter-pounder', name: 'Quarter Pounder with Cheese', price: 6.99, description: 'Quarter pound beef patty with cheese, onions, pickles' },
+            { id: 'double-qpc', name: 'Double Quarter Pounder with Cheese', price: 8.99, description: 'Two quarter pound beef patties with cheese' },
+            { id: 'mcdouble', name: 'McDouble', price: 3.19, description: 'Two beef patties with cheese, pickles, onions, ketchup, mustard' },
+            { id: 'double-cheeseburger', name: 'Double Cheeseburger', price: 3.79, description: 'Two beef patties with two slices of cheese' },
+            // Chicken
+            { id: 'crispy-chicken', name: 'Crispy Chicken Sandwich', price: 5.49, description: 'Crispy chicken fillet with crinkle-cut pickles on a toasted bun' },
+            { id: 'mcchicken', name: 'McChicken', price: 2.49, description: 'Crispy chicken patty with mayo and shredded lettuce' },
             { id: 'mcnuggets-10', name: '10 Piece McNuggets', price: 6.49, description: 'Crispy chicken nuggets with your choice of sauce' },
+            { id: 'mcnuggets-20', name: '20 Piece McNuggets', price: 10.99, description: '20 crispy chicken nuggets — great for sharing' },
+            // Breakfast
+            { id: 'egg-mcmuffin', name: 'Egg McMuffin', price: 4.49, description: 'Freshly cracked egg, Canadian bacon, American cheese on an English muffin' },
+            // Sides
             { id: 'fries-large', name: 'Large Fries', price: 3.99, description: 'Golden crispy fries' },
-            { id: 'mcflurry', name: 'McFlurry', price: 4.49, description: 'Soft serve with your choice of candy mix-in' },
-            { id: 'big-mac-meal', name: 'Big Mac Meal', price: 10.99, description: 'Big Mac, medium fries, and medium drink' },
+            // Appetizers
+            { id: 'mozzarella-sticks', name: 'Mozzarella Sticks (4pc)', price: 3.99, description: 'Crispy breaded mozzarella with marinara dipping sauce' },
+            // Dessert
+            { id: 'mcflurry', name: 'McFlurry', price: 4.49, description: 'Soft serve with your choice of candy mix-in (Oreo or M&M)' },
+            { id: 'hot-fudge-sundae', name: 'Hot Fudge Sundae', price: 2.49, description: 'Vanilla soft serve topped with hot fudge sauce' },
+            { id: 'apple-pie', name: 'Baked Apple Pie', price: 1.79, description: 'Warm flaky pastry filled with cinnamon apple filling' },
         ]
     },
     {
@@ -88,12 +145,32 @@ const restaurants = [
         distance: '1.5 mi',
         priceLevel: '$$',
         menu: [
-            { id: 'pepperoni-large', name: 'Large Pepperoni Pizza', price: 15.99, description: 'Classic pepperoni on hand-tossed crust' },
-            { id: 'supreme-large', name: 'Large Supreme Pizza', price: 18.99, description: 'Pepperoni, sausage, peppers, onions, mushrooms' },
-            { id: 'cheese-large', name: 'Large Cheese Pizza', price: 13.99, description: 'Mozzarella cheese on hand-tossed crust' },
+            // Pizzas
+            { id: 'pepperoni-large', name: 'Large Pepperoni Pizza', price: 15.99, description: 'Classic pepperoni on hand-tossed crust',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'supreme-large', name: 'Large Supreme Pizza', price: 18.99, description: 'Pepperoni, sausage, peppers, onions, mushrooms',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'cheese-large', name: 'Large Cheese Pizza', price: 13.99, description: 'Mozzarella cheese on hand-tossed crust',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'meat-lovers', name: 'Large Meat Lovers Pizza', price: 19.99, description: 'Pepperoni, ham, pork, beef, Italian sausage, bacon',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'bbq-chicken', name: 'Large BBQ Chicken Pizza', price: 18.99, description: 'Grilled chicken, red onions, BBQ sauce, smoked cheddar',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'stuffed-crust', name: 'Large Stuffed Crust Pepperoni', price: 18.99, description: 'Pepperoni pizza with cheese-stuffed crust',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy'] } },
+            { id: 'veggie-large', name: 'Large Veggie Lovers Pizza', price: 17.99, description: 'Mushrooms, peppers, onions, olives, tomatoes',
+              requiredOptions: { crust: ['Hand-Tossed', 'Pan', 'Thin & Crispy', 'Stuffed Crust (+$2)'] } },
+            { id: 'personal-pepperoni', name: 'Personal Pepperoni Pizza', price: 7.99, description: 'Individual-sized pepperoni pizza — perfect for one' },
+            // Pasta
+            { id: 'pasta-marinara', name: 'Meaty Marinara Pasta', price: 10.99, description: 'Penne pasta with Italian sausage and beef in marinara sauce' },
+            // Appetizers
             { id: 'wings-8', name: 'Bone-In Wings (8pc)', price: 10.99, description: 'Traditional wings with your choice of sauce' },
+            { id: 'boneless-wings', name: 'Boneless Wings (8pc)', price: 9.99, description: 'Crispy boneless wings with your choice of sauce' },
             { id: 'breadsticks', name: 'Breadsticks (5pc)', price: 5.99, description: 'Baked breadsticks with marinara dipping sauce' },
+            { id: 'mozzarella-sticks-ph', name: 'Mozzarella Sticks (6pc)', price: 7.99, description: 'Crispy breaded mozzarella with marinara' },
+            // Dessert
             { id: 'cookie', name: 'Ultimate Hershey\'s Cookie', price: 6.99, description: 'Warm chocolate chip cookie for sharing' },
+            { id: 'cinnabon-rolls', name: 'Cinnabon Mini Rolls (6pc)', price: 7.99, description: 'Warm mini cinnamon rolls with cream cheese frosting' },
         ]
     },
     {
@@ -106,12 +183,32 @@ const restaurants = [
         distance: '0.6 mi',
         priceLevel: '$',
         menu: [
-            { id: 'italian-bmt', name: 'Italian B.M.T. Footlong', price: 9.99, description: 'Genoa salami, spicy pepperoni, Black Forest ham' },
-            { id: 'turkey', name: 'Turkey Breast Footlong', price: 9.49, description: 'Sliced turkey breast with your choice of veggies' },
-            { id: 'meatball', name: 'Meatball Marinara Footlong', price: 8.99, description: 'Italian meatballs in marinara sauce with cheese' },
-            { id: 'steak-cheese', name: 'Steak & Cheese Footlong', price: 10.99, description: 'Shaved steak with melted cheese' },
-            { id: 'veggie', name: 'Veggie Delite Footlong', price: 7.49, description: 'Fresh veggies on freshly baked bread' },
-            { id: 'cookies', name: 'Cookies (3)', price: 2.49, description: 'Three freshly baked cookies' },
+            // Footlongs
+            { id: 'italian-bmt', name: 'Italian B.M.T. Footlong', price: 9.99, description: 'Genoa salami, spicy pepperoni, Black Forest ham',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'turkey', name: 'Turkey Breast Footlong', price: 9.49, description: 'Sliced turkey breast with your choice of veggies',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'meatball', name: 'Meatball Marinara Footlong', price: 8.99, description: 'Italian meatballs in marinara sauce with cheese',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'steak-cheese', name: 'Steak & Cheese Footlong', price: 10.99, description: 'Shaved steak with melted cheese',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'buffalo-chicken', name: 'Buffalo Chicken Footlong', price: 10.49, description: 'Rotisserie chicken, buffalo sauce, ranch, and your choice of veggies',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'chicken-teriyaki', name: 'Chicken Teriyaki Footlong', price: 10.49, description: 'Tender chicken strips glazed with sweet teriyaki sauce',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'tuna', name: 'Tuna Footlong', price: 9.49, description: 'Tuna mixed with mayo on freshly baked bread',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'spicy-italian', name: 'Spicy Italian Footlong', price: 8.99, description: 'Pepperoni and salami with your choice of veggies',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'rotisserie-chicken', name: 'Rotisserie-Style Chicken Footlong', price: 10.99, description: 'Pulled rotisserie chicken on freshly baked bread',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            { id: 'veggie', name: 'Veggie Delite Footlong', price: 7.49, description: 'Fresh veggies on freshly baked bread',
+              requiredOptions: { bread: ['Italian', 'Honey Oat', 'Multigrain', '9-Grain Wheat', 'Flatbread'] } },
+            // Appetizers
+            { id: 'soup', name: 'Broccoli Cheddar Soup', price: 4.99, description: 'Creamy broccoli cheddar soup in a bread bowl' },
+            // Dessert
+            { id: 'cookies', name: 'Cookies (3)', price: 2.49, description: 'Three freshly baked cookies — chocolate chip, oatmeal raisin, or white chip macadamia' },
+            { id: 'brownie', name: 'Double Chocolate Brownie', price: 1.79, description: 'Rich, fudgy double chocolate brownie' },
         ]
     },
     {
@@ -124,12 +221,24 @@ const restaurants = [
         distance: '1.0 mi',
         priceLevel: '$$',
         menu: [
+            // Entrees
             { id: 'chicken-meal', name: '2pc Chicken Meal', price: 9.99, description: 'Fire-grilled chicken with beans, rice, tortillas' },
+            { id: 'chicken-meal-3', name: '3pc Chicken Meal', price: 12.49, description: '3 pieces of fire-grilled chicken with beans, rice, tortillas' },
             { id: 'burrito-pollo', name: 'Classic Chicken Burrito', price: 8.49, description: 'Grilled chicken, rice, beans, cheese, salsa in flour tortilla' },
+            { id: 'burrito-avocado', name: 'Double Chicken Avocado Burrito', price: 10.99, description: 'Double chicken, avocado, rice, beans, cheese, pico in a flour tortilla' },
             { id: 'tacos-chicken', name: 'Chicken Tacos (3)', price: 8.99, description: 'Fire-grilled chicken in soft tortillas with cilantro and onion' },
+            { id: 'street-tacos', name: 'Street Tacos (3)', price: 9.49, description: 'Tender chicken thigh in mini corn tortillas with cilantro, onion, salsa verde' },
             { id: 'bowl-pollo', name: 'Pollo Bowl', price: 9.49, description: 'Rice bowl with fire-grilled chicken and fresh toppings' },
             { id: 'quesadilla-pollo', name: 'Chicken Quesadilla', price: 8.99, description: 'Grilled flour tortilla with chicken and melted cheese' },
+            { id: 'nachos-chicken', name: 'Chicken Nachos', price: 9.99, description: 'Tortilla chips topped with grilled chicken, cheese, pico, jalapeños, sour cream' },
+            { id: 'tostada-salad', name: 'Tostada Salad', price: 9.49, description: 'Crispy tostada shell with chicken, beans, cheese, pico, sour cream, avocado' },
             { id: 'family-meal', name: 'Family Meal (8pc)', price: 29.99, description: '8 pieces of chicken with large sides and tortillas' },
+            // Appetizers
+            { id: 'chips-guac-epl', name: 'Chips & Guacamole', price: 4.49, description: 'Crispy tortilla chips with fresh guacamole' },
+            { id: 'chicken-soup', name: 'Chicken Tortilla Soup', price: 6.99, description: 'Hearty chicken soup with tortilla strips, cheese, sour cream' },
+            // Dessert
+            { id: 'churro-epl', name: 'Churro', price: 1.99, description: 'Crispy cinnamon-sugar churro' },
+            { id: 'flan', name: 'Caramel Flan', price: 2.99, description: 'Creamy caramel custard, a classic Mexican dessert' },
         ]
     }
 ];
@@ -181,12 +290,25 @@ function formatRestaurantList(restaurants) {
 }
 
 // Format menu for SMS display
-function formatMenu(restaurant) {
+function formatMenu(restaurant, budget = null) {
     let text = `══════════════════\n`;
     text += `  ${restaurant.name.toUpperCase()}\n`;
+    if (budget) text += `  Under $${budget.toFixed(2)}\n`;
     text += `══════════════════\n\n`;
-    text += restaurant.menu.map((item, i) =>
-        `${i + 1}. ${item.name.toUpperCase()}\n   $${item.price.toFixed(2)} · ${item.description}`
+
+    // When budget is set, only show items at or under the budget
+    const menuItems = budget
+        ? restaurant.menu.filter(item => item.price <= budget)
+        : restaurant.menu;
+
+    if (menuItems.length === 0) {
+        text += `No items available under $${budget.toFixed(2)} at this restaurant.`;
+        return text;
+    }
+
+    // Re-number from 1 but keep original index for ADD_ITEM_NUM lookup
+    text += menuItems.map((item, i) =>
+        `${restaurant.menu.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${item.price.toFixed(2)} · ${item.description}`
     ).join('\n\n');
     return text;
 }

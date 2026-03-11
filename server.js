@@ -2,9 +2,19 @@ require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk').default;
 const path = require('path');
+const fs = require('fs');
 const db = require('./db');
 const restaurants = require('./restaurants');
 const doordash = require('./doordash');
+
+const CRASH_LOG = 'C:/Users/hatch/Projects/MessageAI/crash.log';
+process.on('uncaughtException', (err) => {
+    fs.appendFileSync(CRASH_LOG, `\n[${new Date().toISOString()}] UncaughtException:\n${err?.stack || err}\n`);
+    process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    fs.appendFileSync(CRASH_LOG, `\n[${new Date().toISOString()}] UnhandledRejection:\n${reason?.stack || reason}\n`);
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,66 +30,44 @@ app.use(express.urlencoded({ extended: true })); // For Twilio webhook
 app.use(express.static('public'));
 
 // Twilio Configuration
-const TWILIO_ENABLED = process.env.TWILIO_ENABLED === 'true';
-let twilioClient = null;
-let twilioPhoneNumber = null;
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_PHONE = process.env.TWILIO_PHONE;
+const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 
-if (TWILIO_ENABLED) {
-    const twilio = require('twilio');
-    twilioClient = twilio(
-        process.env.TWILIO_ACCOUNT_SID,
-        process.env.TWILIO_AUTH_TOKEN
-    );
-    twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
-    console.log(`[Twilio] Enabled with phone number: ${twilioPhoneNumber}`);
+if (TWILIO_ACCOUNT_SID && TWILIO_PHONE) {
+    console.log(`[Twilio] Enabled — sending from ${TWILIO_PHONE}`);
 } else {
-    console.log('[Twilio] Disabled - using web simulator only');
+    console.log('[Twilio] Disabled - missing TWILIO_ACCOUNT_SID or TWILIO_PHONE in .env');
 }
 
 // Send SMS via Twilio
 async function sendSMS(to, message) {
-    if (!TWILIO_ENABLED || !twilioClient) {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE) {
         console.log(`[SMS Disabled] Would send to ${to}: ${message.substring(0, 50)}...`);
         return false;
     }
 
     try {
-        // Twilio SMS has a 1600 character limit, split if needed
-        const maxLength = 1500;
-        const messages = [];
+        const credentials = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+        const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Authorization': `Basic ${credentials}`
+            },
+            body: new URLSearchParams({ From: TWILIO_PHONE, To: to, Body: message })
+        });
 
-        if (message.length <= maxLength) {
-            messages.push(message);
+        const result = await response.json();
+
+        if (response.ok) {
+            console.log(`[Twilio] Sent to ${to}, sid: ${result.sid}`);
+            return true;
         } else {
-            // Split into multiple messages
-            let remaining = message;
-            while (remaining.length > 0) {
-                if (remaining.length <= maxLength) {
-                    messages.push(remaining);
-                    break;
-                }
-                // Find a good break point
-                let breakPoint = remaining.lastIndexOf('\n', maxLength);
-                if (breakPoint < maxLength / 2) {
-                    breakPoint = remaining.lastIndexOf(' ', maxLength);
-                }
-                if (breakPoint < maxLength / 2) {
-                    breakPoint = maxLength;
-                }
-                messages.push(remaining.substring(0, breakPoint));
-                remaining = remaining.substring(breakPoint).trim();
-            }
+            console.error('[Twilio] Send failed:', result.message || JSON.stringify(result));
+            return false;
         }
-
-        for (const msg of messages) {
-            await twilioClient.messages.create({
-                body: msg,
-                from: twilioPhoneNumber,
-                to: to
-            });
-            console.log(`[Twilio] Sent SMS to ${to}: ${msg.substring(0, 50)}...`);
-        }
-        return true;
     } catch (error) {
         console.error('[Twilio] Error sending SMS:', error.message);
         return false;
@@ -125,15 +113,46 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
 
     // DoorDash menu - include actual menu items from the restaurant
     if (doordashMenu && doordashMenu.length > 0 && currentRestaurant) {
-        context += `\n\nCURRENT RESTAURANT: ${currentRestaurant.name}`;
-        context += `\nMENU ITEMS (SHOW ALL OF THESE TO THE USER - minimum 10 items):`;
-        // Show up to 20 items to ensure user sees at least 10
-        const menuToShow = doordashMenu.slice(0, 20);
-        menuToShow.forEach((item, i) => {
-            context += `\n${i + 1}. ${item.name} - $${item.price?.toFixed(2) || '?.??'}`;
+        context += `\n\n=== CURRENT RESTAURANT: ${currentRestaurant.name} ===`;
+        // Filter by budget if set — only show affordable items to Claude
+        const budgetFilter = preferences.budget || null;
+        const allMenuItems = doordashMenu.slice(0, 20);
+        const menuToShow = budgetFilter
+            ? allMenuItems.filter(item => (item.price || 0) <= budgetFilter)
+            : allMenuItems;
+        if (budgetFilter) {
+            context += `\n\n*** MENU UNDER $${budgetFilter.toFixed(2)} (budget filter active — DO NOT suggest items over this price) ***`;
+        } else {
+            context += `\n\n*** ACTUAL MENU FROM DOORDASH (USE ONLY THESE ITEMS - DO NOT MAKE UP OTHER ITEMS) ***`;
+        }
+        // Use original index so ADD_ITEM_NUM maps correctly
+        menuToShow.forEach((item) => {
+            const originalIndex = doordashMenu.indexOf(item) + 1;
+            context += `\n${originalIndex}. ${item.name} - $${item.price?.toFixed(2) || '?.??'}`;
         });
-        context += `\n\nIMPORTANT: When showing the menu, list ALL ${menuToShow.length} items above. Do not truncate or summarize.`;
-        context += `\nWhen user says a number, use [ADD_ITEM_NUM: number] to add that item.`;
+        context += `\n*** END OF MENU ***`;
+        context += `\n\nCRITICAL RULES FOR MENU:`;
+        context += `\n- ONLY show the ${menuToShow.length} items listed above. These are the ACTUAL items from DoorDash.`;
+        context += `\n- DO NOT invent, fabricate, or add any menu items that are not in the list above.`;
+        context += `\n- DO NOT create categories like "Burritos", "Bowls", "Tacos" with made-up items.`;
+        context += `\n- Copy the menu items EXACTLY as shown above with their exact names and prices.`;
+        context += `\n- When user says a NUMBER, use [ADD_ITEM_NUM: that exact number].`;
+        context += `\n- When user says an ITEM NAME (like "tres leches"), find the EXACT matching item in the menu above and use its number.`;
+        context += `\n- DOUBLE CHECK: Before using [ADD_ITEM_NUM: X], verify that item X in the menu above matches what the user asked for.`;
+        context += `\n- Example: If user says "tres leches" and menu shows "13. Tres Leches - $4.99", use [ADD_ITEM_NUM: 13]`;
+    }
+
+    // Budget mode
+    if (preferences.budget) {
+        context += `\n\nBudget: $${preferences.budget.toFixed(2)} per order - focus on items under this price`;
+    }
+
+    // Scheduled order
+    if (preferences.scheduledOrder) {
+        const { time, restaurantId } = preferences.scheduledOrder;
+        const [h, m] = time.split(':').map(Number);
+        const timeDisplay = `${h > 12 ? h - 12 : (h || 12)}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+        context += `\n\nScheduled order: set for ${timeDisplay} today`;
     }
 
     // Pending item awaiting options
@@ -197,7 +216,33 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
     [CHECK_DOORDASH]
     Triggers: "is doordash set up?", "check doordash", "doordash status"
 
-12. QUICK ORDER - When user specifies restaurant + item + options:
+12. ORDER STATUS - Check on current order:
+    [ORDER_STATUS]
+    Triggers: "where's my food", "where's my order", "order status", "how long until", "is my food here yet"
+
+13. SCHEDULE ORDER - Schedule an order for later:
+    [SCHEDULE_ORDER: HH:MM]
+    Triggers: "order at 6pm", "schedule for 7:30", "set order for 8pm tonight"
+    IMPORTANT: Convert to 24-hour format (6pm → 18:00, 7:30pm → 19:30, 12pm → 12:00, midnight → 00:00)
+    Only use after user has items in cart.
+
+14. CANCEL SCHEDULE - Cancel a scheduled order:
+    [CANCEL_SCHEDULE]
+    Triggers: "cancel schedule", "don't schedule", "cancel scheduled order"
+
+15. BUDGET MODE - Set a spending limit per item:
+    [SAVE_BUDGET: amount]
+    Triggers: "something under $15", "keep it under $20", "budget $10", "cheap options", "what's cheap", "budget mode", "on a budget", "what's affordable"
+    IMPORTANT: You MUST use this command. Do NOT just describe cheap options in text.
+    If user says "budget mode" without a number, ask "What's your budget?" then use [SAVE_BUDGET: X] when they reply.
+    If user says "under $X", extract X and use [SAVE_BUDGET: X] [SEARCH: ...]
+    Example: "something under $15" → [SAVE_BUDGET: 15] [SEARCH: food]
+
+16. CLEAR BUDGET - Remove budget limit:
+    [CLEAR_BUDGET]
+    Triggers: "no budget", "remove budget", "clear budget", "money is no object", "price doesn't matter"
+
+17. QUICK ORDER - When user specifies restaurant + item + options:
     [QUICK_ORDER: restaurant | item | protein]
     Examples:
     - "chicken burrito from chipotle" → [QUICK_ORDER: chipotle | burrito | chicken]
@@ -215,11 +260,15 @@ CRITICAL RULES:
 - When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number]
 - When user says an item NAME, use [ADD_ITEM_NUM: number] with the matching number
 - NEVER use [SHOW_MENU] - the system shows it automatically after selecting
+- ALWAYS include [SELECT: number] in the SAME message when the user picks a restaurant. The menu will be appended automatically - do NOT say "let me get the menu" or "loading the menu". Just briefly acknowledge their choice (1 short sentence) and include the command. The menu will appear below your message automatically.
+- ALWAYS use [SAVE_BUDGET: X] when user mentions a price limit, budget, or "cheap/affordable". NEVER just talk about it in text without the command.
 
 NATURAL LANGUAGE - Understand these phrases:
 - "I'm hungry" / "feed me" / "get me food" → Ask what cuisine or suggest based on history
 - "something quick" / "fast food" → Search for fastest delivery options
-- "something cheap" → Search for $ restaurants
+- "something cheap" / "under $X" / "budget mode" → Use [SAVE_BUDGET: X] then [SEARCH: ...]
+- "where's my food" / "order status" → Use [ORDER_STATUS]
+- "order at Xpm" / "schedule for X" → Use [SCHEDULE_ORDER: HH:MM]
 - "surprise me" → Pick something from their order history or a popular option
 - "my usual" / "same as last time" / "reorder" → Use [REORDER]
 - "what's good?" / "any recommendations?" → Suggest based on their history
@@ -233,11 +282,57 @@ PERSONALITY:
 - Acknowledge their choice briefly, then use the command`;
 }
 
+// Get human-readable order status based on time elapsed
+function getOrderStatusText(order) {
+    const minutesAgo = Math.floor((Date.now() - new Date(order.placed_at).getTime()) / 60000);
+    const name = order.restaurant_name;
+
+    if (order.status === 'delivered') return `Your ${name} order has been delivered!`;
+    if (order.status === 'cancelled') return `Your ${name} order was cancelled.`;
+
+    if (minutesAgo < 5) {
+        return `Order received at ${name}!\nThe restaurant just got your order.`;
+    } else if (minutesAgo < 20) {
+        return `${name} is preparing your food.\nOrdered ${minutesAgo} min ago.`;
+    } else if (minutesAgo < 35) {
+        return `Your driver picked up your order from ${name}!\nOn the way to you now.`;
+    } else if (minutesAgo < 50) {
+        return `Almost there! Your ${name} order is close.\nPlaced ${minutesAgo} min ago.`;
+    } else {
+        db.updateOrderStatus(order.id, 'delivered');
+        return `Your ${name} order should have arrived by now.\nIf you haven't received it, check the DoorDash app.`;
+    }
+}
+
 // Process commands from AI response
 async function processCommands(response, user, phoneNumber) {
     let cleanResponse = response;
     let actions = [];
     let additionalContext = '';
+
+    // Budget — must run BEFORE search so the saved budget is visible to the search handler
+    const budgetMatch = response.match(/\[SAVE_BUDGET:\s*(\d+(?:\.\d+)?)\]/i);
+    if (budgetMatch) {
+        const budget = parseFloat(budgetMatch[1]);
+        const prefs = db.getUserPreferences(user.id);
+        prefs.budget = budget;
+        db.setUserPreferences(user.id, prefs);
+        cleanResponse = cleanResponse.replace(budgetMatch[0], '').trim();
+        // Only show confirmation when no search is also happening (search results make it obvious)
+        if (!response.match(/\[SEARCH:/i)) {
+            additionalContext = `\n\nBudget set to $${budget.toFixed(2)}! Items over your budget will be flagged on menus.`;
+        }
+        actions.push({ type: 'budget_set', amount: budget });
+    }
+
+    if (response.includes('[CLEAR_BUDGET]')) {
+        const prefs = db.getUserPreferences(user.id);
+        prefs.budget = null;
+        db.setUserPreferences(user.id, prefs);
+        cleanResponse = cleanResponse.replace('[CLEAR_BUDGET]', '').trim();
+        additionalContext = `\n\nBudget cleared! All menu items will show again.`;
+        actions.push({ type: 'budget_cleared' });
+    }
 
     // Search restaurants - uses real DoorDash if credentials available
     const searchMatch = response.match(/\[SEARCH:\s*(.+?)\]/i);
@@ -290,6 +385,8 @@ async function processCommands(response, user, phoneNumber) {
                 }
 
             } catch (error) {
+                const fs = require('fs');
+                fs.appendFileSync('C:/Users/hatch/Projects/MessageAI/doordash_error.log', `\n[${new Date().toISOString()}] DoorDash search error:\n${error?.stack || error}\n`);
                 console.error('[Search] DoorDash search error:', error);
                 // Fall back to mock data
                 additionalContext = `\n\nDoorDash search failed. Here are some options:\n\n`;
@@ -319,7 +416,7 @@ async function processCommands(response, user, phoneNumber) {
                 prefs.lastSearchResults = null;
                 prefs.lastSearchSource = 'mock';
                 db.setUserPreferences(user.id, prefs);
-                additionalContext = `\n\n${restaurants.formatMenu(exactMatch)}\n\nWhat would you like? (Reply with item number)`;
+                additionalContext = `\n\n${restaurants.formatMenu(exactMatch, prefs.budget || null)}\n\nWhat would you like? (Reply with item number)`;
                 actions.push({ type: 'select_restaurant', restaurant: exactMatch.name });
             } else {
                 // No exact match, do cuisine search
@@ -354,7 +451,7 @@ async function processCommands(response, user, phoneNumber) {
             const prefs = db.getUserPreferences(user.id);
             prefs.currentRestaurant = restaurantId;
             db.setUserPreferences(user.id, prefs);
-            additionalContext = `\n\n${restaurants.formatMenu(restaurant)}\n\nWhat would you like to order? (Reply with item number)`;
+            additionalContext = `\n\n${restaurants.formatMenu(restaurant, prefs.budget || null)}\n\nWhat would you like to order? (Reply with item number)`;
             actions.push({ type: 'select_restaurant', restaurant: restaurant.name });
         }
     }
@@ -410,9 +507,33 @@ async function processCommands(response, user, phoneNumber) {
                                 db.cacheRestaurantMenu(user.id, restaurantId, menuItems);
                             }
 
-                            // Don't add raw menu here - the AI already formats it nicely
-                            // Just clear the "Loading..." message
-                            additionalContext = '';
+                            // Replace AI filler text with just the menu
+                            if (menuItems && menuItems.length > 0) {
+                                const userPrefs = db.getUserPreferences(user.id);
+                                const budget = userPrefs.budget || null;
+                                const displayItems = budget
+                                    ? menuItems.filter(item => (parseFloat(item.price) || 0) <= budget)
+                                    : menuItems;
+
+                                let menuText = `══════════════════\n`;
+                                menuText += `  ${restaurantName.toUpperCase()}\n`;
+                                if (budget) menuText += `  Under $${budget.toFixed(2)}\n`;
+                                menuText += `══════════════════\n\n`;
+
+                                if (displayItems.length === 0) {
+                                    menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
+                                } else {
+                                    // Use original index so ADD_ITEM_NUM still maps correctly
+                                    menuText += displayItems.map(item =>
+                                        `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
+                                    ).join('\n\n');
+                                }
+                                menuText += `\n\nWhat would you like? (Reply with item number)`;
+                                cleanResponse = menuText;
+                                additionalContext = '';
+                            } else {
+                                additionalContext = '';
+                            }
                             actions.push({ type: 'select_restaurant_doordash', restaurant: restaurantName, menuItemCount: menuItems.length });
 
                             console.log(`[DoorDash] Selected restaurant: ${restaurantName}`);
@@ -434,7 +555,8 @@ async function processCommands(response, user, phoneNumber) {
                     prefs.currentRestaurant = restaurantId;
                     prefs.currentRestaurantSource = 'mock';
                     db.setUserPreferences(user.id, prefs);
-                    additionalContext = `\n\n${restaurants.formatMenu(restaurant)}\n\nWhat would you like? (Reply with item number)`;
+                    cleanResponse = `${restaurants.formatMenu(restaurant, prefs.budget || null)}\n\nWhat would you like? (Reply with item number)`;
+                    additionalContext = '';
                     actions.push({ type: 'select_restaurant', restaurant: restaurant.name });
                     console.log(`[DB] Selected restaurant: ${restaurant.name}`);
                 } else {
@@ -453,7 +575,7 @@ async function processCommands(response, user, phoneNumber) {
 
         if (prefs.currentRestaurant) {
             const restaurant = restaurants.getRestaurant(prefs.currentRestaurant);
-            additionalContext = `\n\n${restaurants.formatMenu(restaurant)}`;
+            additionalContext = `\n\n${restaurants.formatMenu(restaurant, prefs.budget || null)}`;
             actions.push({ type: 'show_menu' });
         } else {
             additionalContext = `\n\nNo restaurant selected. What cuisine are you in the mood for?`;
@@ -486,9 +608,18 @@ async function processCommands(response, user, phoneNumber) {
     let pendingItem = null;
 
     for (const match of addNumMatches) {
-        const num = parseInt(match[1]) - 1;
+        const requestedNum = parseInt(match[1]);
+        const num = requestedNum - 1; // Convert to 0-based index
         const prefs = db.getUserPreferences(user.id);
         cleanResponse = cleanResponse.replace(match[0], '').trim();
+
+        // Log what Claude requested
+        const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
+        const menuItem = currentRestaurant?.menu?.[num];
+        console.log(`[ADD_ITEM_NUM] Claude requested item #${requestedNum}, index ${num}, which is: "${menuItem?.name || 'NOT FOUND'}"`);
+        if (currentRestaurant?.menu) {
+            console.log(`[ADD_ITEM_NUM] Menu has ${currentRestaurant.menu.length} items`);
+        }
 
         if (prefs.currentRestaurant) {
             // Check if using DoorDash or mock data
@@ -960,7 +1091,24 @@ async function processCommands(response, user, phoneNumber) {
                             }
                         });
 
-                        db.createOrder(user.id, prefs.currentRestaurant, restaurantName, cart.items[prefs.currentRestaurant] || [], subtotal.toFixed(2));
+                        // Estimate fees (DoorDash typical: delivery $2.99, service ~15%, tax ~8%)
+                        const deliveryFee = 2.99;
+                        const serviceFee = subtotal * 0.15;
+                        const tax = subtotal * 0.08;
+                        const total = subtotal + deliveryFee + serviceFee + tax;
+
+                        // Get user address
+                        const userAddress = db.getUserAddress(user.id) || 'Address on file';
+
+                        db.createOrder(
+                            user.id,
+                            prefs.currentRestaurant,
+                            restaurantName,
+                            cart.items[prefs.currentRestaurant] || [],
+                            userAddress,
+                            subtotal.toFixed(2),
+                            total.toFixed(2)
+                        );
                         db.clearCart(user.id);
                         prefs.currentRestaurant = null;
                         prefs.currentRestaurantSource = null;
@@ -1362,6 +1510,79 @@ async function processCommands(response, user, phoneNumber) {
         }
     }
 
+    // Order status
+    if (response.includes('[ORDER_STATUS]')) {
+        cleanResponse = cleanResponse.replace('[ORDER_STATUS]', '').trim();
+        const latestOrder = db.getLatestActiveOrderForUser(user.id);
+
+        if (!latestOrder) {
+            // Check if they have any recent delivered order
+            const recentOrders = db.getUserOrders(user.id, 1);
+            if (recentOrders.length > 0 && recentOrders[0].status === 'delivered') {
+                additionalContext = `\n\nYour last order from ${recentOrders[0].restaurant_name} was delivered. Want to order again?`;
+            } else {
+                additionalContext = `\n\nNo active orders right now. Want to order something?`;
+            }
+        } else {
+            additionalContext = `\n\n${getOrderStatusText(latestOrder)}`;
+        }
+        actions.push({ type: 'order_status' });
+    }
+
+    // Schedule order
+    const scheduleMatch = response.match(/\[SCHEDULE_ORDER:\s*(\d{1,2}):(\d{2})\]/i);
+    if (scheduleMatch) {
+        const hours = parseInt(scheduleMatch[1]);
+        const minutes = parseInt(scheduleMatch[2]);
+        const cart = db.getCart(user.id);
+        const prefs = db.getUserPreferences(user.id);
+        const address = db.getUserAddress(user.id);
+        cleanResponse = cleanResponse.replace(scheduleMatch[0], '').trim();
+
+        const restaurantIds = Object.keys(cart.items || {});
+        if (restaurantIds.length === 0) {
+            additionalContext = `\n\nYour cart is empty! Add items first, then I can schedule the order.`;
+        } else if (!address) {
+            additionalContext = `\n\nI need your delivery address before scheduling. What's your address?`;
+        } else {
+            const scheduledOrder = {
+                time: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
+                cart: cart.items,
+                restaurantId: prefs.currentRestaurant,
+                restaurantSource: prefs.currentRestaurantSource,
+                address,
+                phoneNumber
+            };
+            prefs.scheduledOrder = scheduledOrder;
+            db.setUserPreferences(user.id, prefs);
+
+            const h = hours;
+            const timeDisplay = `${h > 12 ? h - 12 : (h || 12)}:${String(minutes).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+            additionalContext = `\n\nOrder scheduled for ${timeDisplay}! I'll place it automatically.\n\nSay "cancel schedule" if you change your mind.`;
+            actions.push({ type: 'order_scheduled', time: scheduledOrder.time });
+        }
+    }
+
+    // Cancel schedule
+    if (response.includes('[CANCEL_SCHEDULE]')) {
+        const prefs = db.getUserPreferences(user.id);
+        cleanResponse = cleanResponse.replace('[CANCEL_SCHEDULE]', '').trim();
+
+        if (prefs.scheduledOrder) {
+            const { time } = prefs.scheduledOrder;
+            const [h, m] = time.split(':').map(Number);
+            const timeDisplay = `${h > 12 ? h - 12 : (h || 12)}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+            prefs.scheduledOrder = null;
+            db.setUserPreferences(user.id, prefs);
+            additionalContext = `\n\nScheduled order for ${timeDisplay} cancelled.`;
+        } else {
+            additionalContext = `\n\nNo scheduled order to cancel.`;
+        }
+        actions.push({ type: 'cancel_schedule' });
+    }
+
+    // (budget handled at top of processCommands, before search)
+
     // Clear history
     if (response.includes('[CLEAR_HISTORY]')) {
         db.clearConversationHistory(user.id);
@@ -1446,52 +1667,39 @@ app.post('/api/message', async (req, res) => {
     res.json({ response, actions });
 });
 
-// Twilio Webhook - receives incoming SMS from Twilio
+// Twilio Webhook - receives inbound SMS
+// Twilio sends form-encoded: From, To, Body
 app.post('/api/twilio/webhook', async (req, res) => {
-    // Twilio sends: Body (message), From (phone number), To (your Twilio number)
-    const message = req.body.Body;
-    const from = req.body.From;
+    const message = req.body?.Body;
+    const from = req.body?.From;
 
     if (!message || !from) {
-        console.log('[Twilio Webhook] Invalid request - missing Body or From');
-        return res.status(400).send('Bad request');
+        console.log('[Twilio Webhook] Missing Body or From');
+        return res.sendStatus(200);
     }
 
     console.log(`[Twilio] Incoming SMS from ${from}: ${message}`);
 
     try {
-        // Process the message
         const { response, actions } = await handleMessage(from, message);
-
         console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 100)}...`);
-
-        // Send the response via SMS
         await sendSMS(from, response);
-
-        // Respond to Twilio with empty TwiML (we're sending response separately)
-        res.type('text/xml');
-        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
-
+        res.sendStatus(200);
     } catch (error) {
         console.error('[Twilio Webhook] Error:', error);
-
-        // Send error message to user
         await sendSMS(from, 'Sorry, something went wrong. Please try again.');
-
-        res.type('text/xml');
-        res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+        res.sendStatus(200);
     }
-});
-
-// Twilio Status Callback - optional, for tracking message delivery
-app.post('/api/twilio/status', (req, res) => {
-    const { MessageSid, MessageStatus, To } = req.body;
-    console.log(`[Twilio Status] Message ${MessageSid} to ${To}: ${MessageStatus}`);
-    res.sendStatus(200);
 });
 
 // Get user profile endpoint
 app.get('/api/user/:phoneNumber', (req, res) => {
+    // Restrict to localhost only — this endpoint is for local debugging
+    const ip = req.ip || req.connection.remoteAddress || '';
+    if (!ip.includes('127.0.0.1') && !ip.includes('::1') && !ip.includes('localhost')) {
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const user = db.getUserByPhone(req.params.phoneNumber);
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
@@ -1544,10 +1752,155 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Manual DoorDash login - opens browser for user to log in themselves
+app.post('/api/doordash/manual-login', async (req, res) => {
+    console.log('[Manual Login] Opening browser for manual DoorDash login...');
+    res.json({ message: 'Browser opening - log into DoorDash in the window that appears. You have 3 minutes.' });
+    const result = await doordash.openForManualLogin();
+    if (result.success) {
+        console.log('[Manual Login] Success - session saved.');
+    } else {
+        console.log('[Manual Login] Failed:', result.error);
+    }
+});
+
 // Cleanup expired sessions periodically
 setInterval(() => {
     db.deleteExpiredSessions();
 }, 60 * 60 * 1000);
+
+// Proactive order status SMS updates (every 2 minutes)
+async function pollOrderStatuses() {
+    try {
+        const activeOrders = db.getActiveOrders();
+        for (const order of activeOrders) {
+            const minutesAgo = Math.floor((Date.now() - new Date(order.placed_at).getTime()) / 60000);
+
+            let newStatus;
+            if (minutesAgo < 5) newStatus = 'placed';
+            else if (minutesAgo < 20) newStatus = 'preparing';
+            else if (minutesAgo < 35) newStatus = 'picked_up';
+            else if (minutesAgo < 50) newStatus = 'on_the_way';
+            else newStatus = 'delivered';
+
+            if (newStatus === order.last_known_status) continue;
+
+            db.updateOrderLastStatus(order.id, newStatus);
+            if (newStatus === 'delivered') {
+                db.updateOrderStatus(order.id, 'delivered');
+            }
+
+            const phone = order.user_phone;
+            if (!phone) continue;
+
+            let message;
+            switch (newStatus) {
+                case 'preparing':
+                    message = `${order.restaurant_name} is preparing your order!`;
+                    break;
+                case 'picked_up':
+                    message = `Your driver picked up your order from ${order.restaurant_name}! On the way!`;
+                    break;
+                case 'on_the_way':
+                    message = `Almost there! Your ${order.restaurant_name} order is almost at your door.`;
+                    break;
+                case 'delivered':
+                    message = `Your ${order.restaurant_name} order has been delivered! Enjoy your food!`;
+                    break;
+            }
+
+            if (message) {
+                console.log(`[StatusPoll] Sending update to ${phone}: ${newStatus}`);
+                await sendSMS(phone, message);
+            }
+        }
+    } catch (err) {
+        console.error('[StatusPoll] Error:', err.message);
+    }
+}
+
+setInterval(pollOrderStatuses, 2 * 60 * 1000);
+
+// Scheduled order execution (every minute)
+async function checkScheduledOrders() {
+    try {
+        const now = new Date();
+        const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+        const usersWithScheduled = db.db.prepare(`
+            SELECT * FROM users
+            WHERE preferences LIKE '%scheduledOrder%'
+            AND last_active > datetime('now', '-24 hours')
+        `).all();
+
+        for (const userRow of usersWithScheduled) {
+            try {
+                const prefs = JSON.parse(userRow.preferences || '{}');
+                if (!prefs.scheduledOrder) continue;
+
+                const { time, cart, restaurantId, restaurantSource, address, phoneNumber: userPhone } = prefs.scheduledOrder;
+                if (time !== currentTime) continue;
+
+                console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
+
+                // Clear scheduled order first to prevent double-execution
+                prefs.scheduledOrder = null;
+                db.db.prepare('UPDATE users SET preferences = ? WHERE id = ?').run(JSON.stringify(prefs), userRow.id);
+
+                const phone = userPhone || userRow.phone_number;
+                await sendSMS(phone, `Placing your scheduled order now!`);
+
+                // Create order record from snapshot
+                const restaurantIds = Object.keys(cart || {});
+                if (restaurantIds.length === 0) continue;
+
+                const creds = db.getDoorDashCredentials(userRow.id);
+
+                if (creds && restaurantSource !== 'mock') {
+                    // DoorDash order — attempt automation
+                    const orderItems = [];
+                    restaurantIds.forEach(rid => {
+                        (cart[rid] || []).forEach(item => {
+                            orderItems.push({ restaurant: rid, name: item.name, options: item.selectedOptions || {}, quantity: item.quantity || 1 });
+                        });
+                    });
+
+                    const result = await doordash.placeFullOrder(creds, {
+                        restaurantName: restaurantIds[0],
+                        items: orderItems,
+                        address,
+                        tipPercent: 15
+                    });
+
+                    if (result.success) {
+                        await sendSMS(phone, `Scheduled order placed! ETA: ${result.eta || '30-45 min'}`);
+                    } else {
+                        await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
+                    }
+                } else {
+                    // Mock order — just create DB record
+                    let subtotal = 0;
+                    restaurantIds.forEach(rid => {
+                        const restaurant = restaurants.getRestaurant(rid);
+                        (cart[rid] || []).forEach(item => { subtotal += (item.price || 0) * (item.quantity || 1); });
+                        if (restaurant) {
+                            const totals = restaurants.calculateOrderTotal(cart[rid], restaurant);
+                            db.createOrder(userRow.id, rid, restaurant.name, cart[rid], address, parseFloat(totals.subtotal), parseFloat(totals.total));
+                        }
+                    });
+
+                    await sendSMS(phone, `Your scheduled order has been placed!`);
+                }
+            } catch (err) {
+                console.error(`[Scheduler] Error for user ${userRow.id}:`, err.message);
+            }
+        }
+    } catch (err) {
+        console.error('[Scheduler] Error:', err.message);
+    }
+}
+
+setInterval(checkScheduledOrders, 60 * 1000);
 
 // Start server
 app.listen(PORT, () => {

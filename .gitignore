@@ -1,11 +1,23 @@
 node_modules/
 .env
 *.log
+crash.log
 .DS_Store
 *.db
 
 # Browser automation data (contains session cookies, login state)
 browser-data/
+
+# DoorDash session cookies — contains live auth tokens
+doordash-session.json
+*-session.json
+
+# Debug/capture files — may contain API responses with sensitive data
+api-capture.json
+capture-api.js
+parse-capture.js
+parse-capture2.js
+debug-*.png
 
 # Debug screenshots (may contain sensitive info)
 screenshots/
