@@ -2,8 +2,9 @@ const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const path = require('path');
 
-// Initialize database
-const db = new Database(path.join(__dirname, 'messageai.db'));
+// Initialize database — use DB_PATH env var for production (persistent volume)
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'messageai.db');
+const db = new Database(DB_PATH);
 
 // Encryption key - in production, use a key management service
 // For now, we'll generate one and store it in .env
@@ -113,6 +114,7 @@ try { db.exec(`ALTER TABLE orders ADD COLUMN doordash_order_id TEXT`); } catch (
 try { db.exec(`ALTER TABLE orders ADD COLUMN tracking_url TEXT`); } catch (e) {}
 try { db.exec(`ALTER TABLE orders ADD COLUMN last_known_status TEXT`); } catch (e) {}
 try { db.exec(`ALTER TABLE orders ADD COLUMN phone_number TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE orders ADD COLUMN restaurant_url TEXT`); } catch (e) {}
 
 // Create DoorDash cache table for real restaurant/menu data
 db.exec(`
@@ -309,11 +311,11 @@ function removeFromCart(userId, restaurantId, itemId) {
 }
 
 // Order functions
-function createOrder(userId, restaurantId, restaurantName, items, address, subtotal, total) {
+function createOrder(userId, restaurantId, restaurantName, items, address, subtotal, total, restaurantUrl = null, trackingUrl = null) {
     const result = db.prepare(`
-        INSERT INTO orders (user_id, restaurant_id, restaurant_name, items, address, subtotal, total)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(userId, restaurantId, restaurantName, JSON.stringify(items), address, subtotal, total);
+        INSERT INTO orders (user_id, restaurant_id, restaurant_name, items, address, subtotal, total, restaurant_url, tracking_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(userId, restaurantId, restaurantName, JSON.stringify(items), address, subtotal, total, restaurantUrl, trackingUrl);
 
     // Clear cart after order
     clearCart(userId);

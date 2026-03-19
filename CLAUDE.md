@@ -1,0 +1,104 @@
+# MessageAI — Claude Session Brief
+
+## What This App Is
+SMS-based AI food ordering assistant. Users text a phone number, talk to Claude, and it finds nearby restaurants on DoorDash, shows menus, and places real orders via browser automation (Playwright).
+
+## How to Run
+```bash
+cd /c/Users/hatch/Projects/MessageAI
+"/c/Program Files/nodejs/node.exe" server.js
+```
+Then start Cloudflare tunnel in a second terminal:
+```bash
+"/c/Program Files (x86)/cloudflared/cloudflared" tunnel --url http://localhost:3000
+```
+Update Twilio webhook with the new tunnel URL:
+```bash
+curl -X POST "https://api.twilio.com/2010-04-01/Accounts/$TWILIO_ACCOUNT_SID/IncomingPhoneNumbers/$TWILIO_PHONE_SID.json" \
+  -u "$TWILIO_ACCOUNT_SID:$TWILIO_AUTH_TOKEN" \
+  -d "SmsUrl=https%3A%2F%2F[NEW_URL]%2Fapi%2Ftwilio%2Fwebhook"
+```
+Test via browser at http://localhost:3000 (SMS simulator UI).
+
+## Key Config
+- **Node**: `C:\Program Files\nodejs\node.exe` (v24) — always use full path in bash
+- **Twilio number**: (801) 346-2263 / +18013462263
+- **DB**: better-sqlite3 (messageai.db), AES-256 encrypted
+- **DoorDash account**: testclaudemail762@gmail.com / S@ltcode8!
+- **User address**: 12447 S Deer Cove Draper Utah 84020
+- **User phone**: +18018006072
+
+## Architecture
+| File | Purpose |
+|------|---------|
+| `server.js` | Main server — Express, Claude AI, all command processing |
+| `doordash.js` | Browser automation (Playwright) — menu scraping, adding items, checkout |
+| `doordash-api.js` | Cookie-based HTTP search (no CAPTCHA) — used first, falls back to browser |
+| `restaurants.js` | Cart formatting and order total helpers only (no mock data) |
+| `db.js` | SQLite with AES-256 encryption |
+| `public/index.html` | SMS simulator UI |
+| `public/privacy.html` | Privacy policy (also hosted at hatchatcha9.github.io/messageai-legal/) |
+| `public/terms.html` | Terms & conditions (also hosted at hatchatcha9.github.io/messageai-legal/) |
+
+## Commands Claude Understands (in server.js system prompt)
+`[SEARCH: query]` `[SELECT: N]` `[ADD_ITEM_NUM: N]` `[SELECT_OPTION: N]` `[SELECT_OPTIONS_TEXT: text]`
+`[SHOW_CART]` `[CLEAR_CART]` `[REMOVE_ITEM: name]` `[PLACE_ORDER]` `[SAVE_ADDRESS: address]`
+`[MY_ORDERS]` `[REORDER]` `[SETUP_DOORDASH: email | password]` `[CHECK_DOORDASH]`
+`[ORDER_STATUS]` `[SCHEDULE_ORDER: HH:MM]` `[CANCEL_SCHEDULE]`
+`[SAVE_BUDGET: amount]` `[CLEAR_BUDGET]`
+
+## What Was Fixed (2026-03-12 session)
+1. **Mock restaurant data removed** — server.js no longer references getRestaurant/formatMenu, only DoorDash
+2. **REMOVE_ITEM command added** — `[REMOVE_ITEM: name]` does name-based lookup and removes one item
+3. **Cart display in buildSystemPrompt** — fixed `cart.items?.length` (was object not array)
+4. **Legacy pendingItem handler removed** — old mock-era dead code in SELECT_OPTION
+5. **Multi-item + options bug** — when item 1 needs options, loop now breaks and queues item 2
+6. **SELECT_OPTIONS_TEXT / SELECT_OPTION reordered** — now run BEFORE ADD_ITEM_NUM so pending options resolve first
+7. **SELECT_OPTIONS_TEXT always strips command** — no longer leaks raw `[SELECT_OPTIONS_TEXT: ...]` into response
+8. **No-modal item add** — simple items (drinks etc.) get added directly without a modal; treated as success
+9. **Claude hallucinating cart** — added CRITICAL RULE: never describe cart contents yourself
+10. **Missing closing brace in PLACE_ORDER** — pre-existing syntax error fixed
+11. **Post-cart-clear search** — Claude now uses [SEARCH:] after clearing cart instead of plain text
+
+## A2P 10DLC Status
+- Campaign resubmitted 2026-03-12 after fixing:
+  - Privacy/Terms URLs now real: https://hatchatcha9.github.io/messageai-legal/
+  - Removed incorrect "lending" and "age-gated" checkboxes
+  - Updated opt-in language and sample messages
+- Awaiting approval
+
+## Known Working
+- Real DoorDash ordering works end-to-end (orders go to 12447 S Deer Cove)
+- Budget filtering (`under $15`) filters menu display
+- Scheduled orders fire automatically
+- Order status polling (real DoorDash status + time-based fallback)
+
+## What Was Fixed (2026-03-13 session)
+1. **SELECT_OPTIONS_TEXT phrase matching** — old code split on all whitespace+commas into individual words, causing "teri" to match BOTH protein groups before "kalua" got a chance. Fixed to split on commas only, then match positionally: phrase[0]→group[0], phrase[1]→group[1], etc. (`server.js` ~line 522)
+2. **applyOptionSelections text matching** — changed from `text.includes(option)` to score-based matching: exact(3) > startsWith+space(2) > startsWith(1), no includes fallback. Prevents "SUB - White Rice" matching "White Rice". (`doordash.js`)
+3. **applyOptionSelections atomic click** — rewrote to do find+scroll+click all inside a single `page.evaluate` call. Eliminates the async gap between evaluate and `page.mouse.click` where DoorDash's modal could shift and cause misses. Uses `dispatchEvent(mousedown/mouseup/click)` + `.click()` for React compatibility. Also added group-index fallback: `radiogroup[groupIndex] → radio[optionIndex]`. (`doordash.js` ~line 4036)
+
+## What Was Fixed (2026-03-15 session)
+1. **Restaurant name cleanup** — `extractRestaurantList` in doordash.js now strips `4.8(50+)•0.6 mi•21 min` appended after restaurant names
+2. **CLEAR_CART ordering** — moved before SEARCH in processCommands so SEARCH's additionalContext (live results) isn't overwritten by CLEAR_CART's "Cart cleared!" message
+3. **Cart duplication** — Claude was reproducing old dirty search results from conversation history. Fixed by: (a) clearing conversation history, (b) adding CRITICAL RULE to not write search lists or cart content, (c) stripping ══/──/bullet-price patterns from cleanResponse before appending additionalContext
+4. **Browser cart sync** — added `clearBrowserCart()` to doordash.js (clicks decrement buttons until empty), called on both `[CLEAR_CART]` command and `/api/clear` endpoint
+5. **doordash-api.js HTTP search** — BLOCKED by DoorDash WAF (GraphQL 403, REST 404) — browser fallback always used now
+
+## Confirmed Working (2026-03-15)
+- Options flow end-to-end: Mo' Bettahs → Mini 2 Choice → "Teri Chicken, Kalua Pig, Macaroni Salad, White Rice, Teri Sauce" → adds correctly ✅
+- REMOVE_ITEM: works correctly ✅
+- Multi-item + options: Mini-2 Choice + drink both added, both tracked in actions array ✅
+- Clean cart display: shows once, no duplication ✅
+
+## What Was Fixed (2026-03-15 session, part 2)
+1. **Checkbox topping selection** — Five Guys uses checkboxes (multi-select) not radio buttons. Fixed `applyOptionSelections` to use `page.mouse.click(x, y)` instead of JS `element.click()`. Screenshots confirm checkboxes are now being checked.
+2. **Multi-select overflow phrases** — `SELECT_OPTIONS_TEXT` now maps overflow phrases (more phrases than groups) to the last group. "Lettuce, Tomato, Pickle, Ketchup" creates 4 selections for group 0 instead of just 1.
+3. **Cart stripping regex** — New regex strips `══ YOUR CART/ORDER ══` blocks Claude generates; now uses broader pattern matching `YOUR CART|YOUR ORDER|🛒` inside the block.
+4. **Checkout button detection** — Rewrote `checkoutCurrentCart()` to search for checkout buttons by `data-anchor-id` and text anywhere on the page (including right sidebar). Fallback uses `/cart/` URL instead of broken `/checkout/`.
+
+## Confirmed Working (2026-03-15 part 2)
+- **Full end-to-end order placed** ✅ — Five Guys, Little Cheeseburger + Coke, checkout through DoorDash successfully
+- Checkbox topping selection (Lettuce, Tomato, Pickle, Ketchup all checked) ✅
+- Cart shows once, no duplication ✅
+- Checkout placed real order to 12447 S Deer Cove ✅

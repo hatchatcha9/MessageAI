@@ -1,0 +1,11 @@
+node_modules
+.env
+messageai.db
+browser-data
+crash.log
+doordash_error.log
+*.png
+*.log
+doordash-session.json
+tmp_resp.json
+api-capture.json

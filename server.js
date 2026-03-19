@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk').default;
+const twilio = require('twilio');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
@@ -41,6 +42,13 @@ if (TWILIO_ACCOUNT_SID && TWILIO_PHONE) {
     console.log('[Twilio] Disabled - missing TWILIO_ACCOUNT_SID or TWILIO_PHONE in .env');
 }
 
+const SMS_MAX_CHARS = 1550; // Twilio API limit is 1600; stay under to be safe
+
+function truncateSMS(text) {
+    if (text.length <= SMS_MAX_CHARS) return text;
+    return text.substring(0, SMS_MAX_CHARS - 30).trimEnd() + '\n\n...(reply "more" for rest)';
+}
+
 // Send SMS via Twilio
 async function sendSMS(to, message) {
     if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE) {
@@ -48,28 +56,18 @@ async function sendSMS(to, message) {
         return false;
     }
 
+    const body = truncateSMS(message);
+    if (body.length !== message.length) {
+        console.warn(`[Twilio] Message truncated: ${message.length} → ${body.length} chars`);
+    }
+
     try {
-        const credentials = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-        const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Authorization': `Basic ${credentials}`
-            },
-            body: new URLSearchParams({ From: TWILIO_PHONE, To: to, Body: message })
-        });
-
-        const result = await response.json();
-
-        if (response.ok) {
-            console.log(`[Twilio] Sent to ${to}, sid: ${result.sid}`);
-            return true;
-        } else {
-            console.error('[Twilio] Send failed:', result.message || JSON.stringify(result));
-            return false;
-        }
+        const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+        const result = await client.messages.create({ from: TWILIO_PHONE, to, body });
+        console.log(`[Twilio] Sent to ${to} (${body.length} chars), sid: ${result.sid}`);
+        return true;
     } catch (error) {
-        console.error('[Twilio] Error sending SMS:', error.message);
+        console.error('[Twilio] Send failed:', error.message);
         return false;
     }
 }
@@ -104,11 +102,19 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
     }
 
     // Cart info
-    if (cart.items?.length > 0 && currentRestaurant) {
+    const cartEntries = Object.entries(cart.items || {});
+    if (cartEntries.length > 0 && currentRestaurant) {
         context += `\n\nCurrent cart from ${currentRestaurant.name}:`;
-        cart.items.forEach(item => {
-            context += `\n- ${item.quantity}x ${item.name} ($${item.price})`;
+        cartEntries.forEach(([, items]) => {
+            items.forEach(item => {
+                context += `\n- ${item.quantity}x ${item.name} ($${item.price})`;
+            });
         });
+    }
+
+    // Warn Claude when no restaurant is selected — must search before adding items
+    if (!currentRestaurant) {
+        context += `\n\n⚠️ NO RESTAURANT SELECTED. Do NOT use [ADD_ITEM_NUM:] — there is no active menu. If user wants food, ALWAYS use [SEARCH: food_type] first, then let them pick a restaurant.`;
     }
 
     // DoorDash menu - include actual menu items from the restaurant
@@ -116,10 +122,9 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n\n=== CURRENT RESTAURANT: ${currentRestaurant.name} ===`;
         // Filter by budget if set — only show affordable items to Claude
         const budgetFilter = preferences.budget || null;
-        const allMenuItems = doordashMenu.slice(0, 20);
         const menuToShow = budgetFilter
-            ? allMenuItems.filter(item => (item.price || 0) <= budgetFilter)
-            : allMenuItems;
+            ? doordashMenu.filter(item => (item.price || 0) <= budgetFilter)
+            : doordashMenu;
         if (budgetFilter) {
             context += `\n\n*** MENU UNDER $${budgetFilter.toFixed(2)} (budget filter active — DO NOT suggest items over this price) ***`;
         } else {
@@ -128,14 +133,14 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         // Use original index so ADD_ITEM_NUM maps correctly
         menuToShow.forEach((item) => {
             const originalIndex = doordashMenu.indexOf(item) + 1;
-            context += `\n${originalIndex}. ${item.name} - $${item.price?.toFixed(2) || '?.??'}`;
+            const desc = item.description ? ` — ${item.description}` : '';
+            context += `\n${originalIndex}. ${item.name} - $${item.price?.toFixed(2) || '?.??'}${desc}`;
         });
         context += `\n*** END OF MENU ***`;
         context += `\n\nCRITICAL RULES FOR MENU:`;
-        context += `\n- ONLY show the ${menuToShow.length} items listed above. These are the ACTUAL items from DoorDash.`;
+        context += `\n- ONLY suggest items listed above (all ${menuToShow.length} items). These are the ACTUAL items from DoorDash.`;
         context += `\n- DO NOT invent, fabricate, or add any menu items that are not in the list above.`;
-        context += `\n- DO NOT create categories like "Burritos", "Bowls", "Tacos" with made-up items.`;
-        context += `\n- Copy the menu items EXACTLY as shown above with their exact names and prices.`;
+        context += `\n- When user asks for a TYPE of food (entree, side, drink, dessert, appetizer, etc.), scan ALL ${menuToShow.length} items above — not just the first few — and recommend the best matches by name and number. The user's SMS display only shows 15 at a time, but YOU can see everything.`;
         context += `\n- When user says a NUMBER, use [ADD_ITEM_NUM: that exact number].`;
         context += `\n- When user says an ITEM NAME (like "tres leches"), find the EXACT matching item in the menu above and use its number.`;
         context += `\n- DOUBLE CHECK: Before using [ADD_ITEM_NUM: X], verify that item X in the menu above matches what the user asked for.`;
@@ -155,14 +160,16 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n\nScheduled order: set for ${timeDisplay} today`;
     }
 
-    // Pending item awaiting options
-    if (preferences.pendingItem) {
-        const optionName = Object.keys(preferences.pendingItem.requiredOptions)[0];
-        context += `\n\nAWAITING SELECTION: User needs to pick ${optionName} for ${preferences.pendingItem.name}`;
-        context += `\nWhen they reply with a number, use [SELECT_OPTION: number]`;
-    }
+    const isNewUser = !userAddress && (!preferences.favoriteCuisines?.length) && (db.getUserOrders(user.id, 1).length === 0);
+    const onboarding = isNewUser ? `
 
-    return `You are MessageAI, an SMS-based food ordering assistant. You help users find restaurants, browse menus, and place orders.
+NEW USER ONBOARDING: This person just texted for the first time. Welcome them warmly and in ONE message explain:
+1. What MessageAI is ("I can find restaurants on DoorDash and order food for you via text!")
+2. Ask for their delivery address first: "What's your delivery address?"
+3. Mention DoorDash setup: "You'll also need to link your DoorDash account — say 'setup doordash email password' when ready."
+Keep it friendly and brief. Do NOT search for food yet.` : '';
+
+    return `You are MessageAI, an SMS-based food ordering assistant. You help users find restaurants, browse menus, and place orders.${onboarding}
 
 USER INFO:${context || '\nNew user - no saved info yet'}
 
@@ -242,26 +249,24 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
     [CLEAR_BUDGET]
     Triggers: "no budget", "remove budget", "clear budget", "money is no object", "price doesn't matter"
 
-17. QUICK ORDER - When user specifies restaurant + item + options:
-    [QUICK_ORDER: restaurant | item | protein]
-    Examples:
-    - "chicken burrito from chipotle" → [QUICK_ORDER: chipotle | burrito | chicken]
-    - "big mac from mcdonalds" → [QUICK_ORDER: mcdonalds | big mac]
-
-    FOR MULTIPLE ITEMS: Use multiple commands!
-    - "chicken burrito from chipotle and crunchwrap from taco bell" →
-      [QUICK_ORDER: chipotle | burrito | chicken] [QUICK_ORDER: taco bell | crunchwrap]
-
-    IMPORTANT: Process ALL items in one response. Don't say "I'll do one then the other".
-    Just use multiple [QUICK_ORDER] commands and they'll all be added to the cart.
+17. REMOVE ITEM - Remove a specific item from cart:
+    [REMOVE_ITEM: item name]
+    Triggers: "remove the X", "take off the X", "don't want X", "delete X from cart", "get rid of X"
+    Example: "remove the burrito" → [REMOVE_ITEM: burrito]
+    IMPORTANT: Use this to remove ONE item. Use [CLEAR_CART] only when user wants to start completely over.
 
 CRITICAL RULES:
+- NEVER describe what a command does in your text. The system handles ALL confirmations automatically. Do NOT say "Address saved!", "Setting up your DoorDash account", "Budget set", "Cart cleared", etc. — just use the command. One brief sentence max (e.g. "On it!" or "Got it!").
+- NEVER describe cart contents, list items, or calculate totals yourself. The system appends the real cart automatically.
+- NEVER list restaurant search results or menu items in your text. The system appends results after [SEARCH:] and [SELECT:] automatically. Just say one short sentence like "Looking for pizza!" and use the command.
 - When user says a NUMBER after seeing restaurants, use [SELECT: number]
 - When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number]
 - When user says an item NAME, use [ADD_ITEM_NUM: number] with the matching number
 - NEVER use [SHOW_MENU] - the system shows it automatically after selecting
-- ALWAYS include [SELECT: number] in the SAME message when the user picks a restaurant. The menu will be appended automatically - do NOT say "let me get the menu" or "loading the menu". Just briefly acknowledge their choice (1 short sentence) and include the command. The menu will appear below your message automatically.
 - ALWAYS use [SAVE_BUDGET: X] when user mentions a price limit, budget, or "cheap/affordable". NEVER just talk about it in text without the command.
+- After [CLEAR_CART], if the user's next request involves food/ordering, ALWAYS follow up with [SEARCH: food_type] in the same response.
+- If NO RESTAURANT IS SELECTED (no menu shown above), NEVER use [ADD_ITEM_NUM:]. You MUST use [SEARCH: food_type] first.
+- If the user asks for a DIFFERENT type of food than what was just searched, ALWAYS use [SEARCH: new_type] — never pick from the old restaurant list.
 
 NATURAL LANGUAGE - Understand these phrases:
 - "I'm hungry" / "feed me" / "get me food" → Ask what cuisine or suggest based on history
@@ -273,6 +278,8 @@ NATURAL LANGUAGE - Understand these phrases:
 - "my usual" / "same as last time" / "reorder" → Use [REORDER]
 - "what's good?" / "any recommendations?" → Suggest based on their history
 - "cancel" / "start over" / "never mind" → Use [CLEAR_CART]
+- After clearing cart, if user immediately requests food → Use [CLEAR_CART] then [SEARCH: food_type] in the same response
+- "remove the X" / "take off X" / "delete X" → Use [REMOVE_ITEM: X] — NOT [CLEAR_CART]
 
 PERSONALITY:
 - Be casual and friendly, like texting a friend who knows good food
@@ -300,8 +307,17 @@ function getOrderStatusText(order) {
         return `Almost there! Your ${name} order is close.\nPlaced ${minutesAgo} min ago.`;
     } else {
         db.updateOrderStatus(order.id, 'delivered');
-        return `Your ${name} order should have arrived by now.\nIf you haven't received it, check the DoorDash app.`;
+        return `Your ${name} order should have arrived by now. If something went wrong, reply "help" and we'll sort it out.`;
     }
+}
+
+function formatCheckoutError(error) {
+    if (!error) return 'Could not complete checkout.';
+    if (error.includes('Place Order button')) return "Couldn't reach the checkout button. Your cart is saved — try saying 'checkout' again.";
+    if (error.includes('disabled'))           return "The checkout button was disabled. This usually means a payment or address issue — try again in a few minutes or reply 'help'.";
+    if (error.includes('Browser not open'))   return "The browser session timed out. Search for a restaurant again to start fresh.";
+    if (error.includes('checkout page'))      return "Couldn't load the checkout page. Your cart is saved — try saying 'checkout' again.";
+    return "Checkout ran into an issue. Your cart is saved — try saying 'checkout' again or reply 'help'.";
 }
 
 // Process commands from AI response
@@ -309,6 +325,7 @@ async function processCommands(response, user, phoneNumber) {
     let cleanResponse = response;
     let actions = [];
     let additionalContext = '';
+    let textResolvedMenuIndex = -1; // tracks which menu index SELECT_OPTIONS_TEXT already added this turn
 
     // Budget — must run BEFORE search so the saved budget is visible to the search handler
     const budgetMatch = response.match(/\[SAVE_BUDGET:\s*(\d+(?:\.\d+)?)\]/i);
@@ -334,7 +351,28 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'budget_cleared' });
     }
 
-    // Search restaurants - uses real DoorDash if credentials available
+    // Clear cart — must run BEFORE search so prefs are cleared and don't overwrite search results
+    if (response.includes('[CLEAR_CART]')) {
+        db.clearCart(user.id);
+        doordash.clearBrowserCart().catch(() => {}); // sync DoorDash browser cart (non-blocking)
+        const prefsForClear = db.getUserPreferences(user.id);
+        prefsForClear.currentRestaurant = null;
+        prefsForClear.currentRestaurantSource = null;
+        prefsForClear.currentRestaurantUrl = null;
+        prefsForClear.pendingItem = null;
+        prefsForClear.pendingDoordashItem = null;
+        prefsForClear.pendingDoordashOptions = null;
+        prefsForClear.pendingDoordashSelections = null;
+        db.setUserPreferences(user.id, prefsForClear);
+        cleanResponse = cleanResponse.replace('[CLEAR_CART]', '').trim();
+        // Only show "cart cleared" message if no search is following (search results make it obvious)
+        if (!response.match(/\[SEARCH:/i)) {
+            additionalContext = `\n\nCart cleared! What else can I help with?`;
+        }
+        actions.push({ type: 'clear_cart' });
+    }
+
+    // Search restaurants - always uses DoorDash
     const searchMatch = response.match(/\[SEARCH:\s*(.+?)\]/i);
     if (searchMatch) {
         const query = searchMatch[1].trim().toLowerCase();
@@ -343,118 +381,46 @@ async function processCommands(response, user, phoneNumber) {
         const prefs = db.getUserPreferences(user.id);
         const address = db.getUserAddress(user.id);
 
-        // Check if user has DoorDash credentials for real search
-        if (db.hasDoorDashCredentials(user.id) && address) {
-            const credentials = db.getDoorDashCredentials(user.id);
+        const credentials = db.getDoorDashCredentials(user.id) || {
+            email: process.env.DOORDASH_EMAIL,
+            password: process.env.DOORDASH_PASSWORD
+        };
 
+        if (!address) {
+            additionalContext = `\n\nI need your delivery address first. What's your address?`;
+        } else {
             try {
-                additionalContext = `\n\nSearching DoorDash for "${query}"...`;
-
-                // Search DoorDash for real restaurants
                 const searchResult = await doordash.searchRestaurantsNearAddress(credentials, address, query);
-
                 if (searchResult.success && searchResult.restaurants.length > 0) {
-                    // Cache the search results
                     db.cacheSearchResults(user.id, query, searchResult.restaurants);
-
-                    // Store restaurant IDs in prefs for selection
                     prefs.lastSearchResults = searchResult.restaurants.map(r => r.id);
                     prefs.lastSearchSource = 'doordash';
                     prefs.lastSearchQuery = query;
                     db.setUserPreferences(user.id, prefs);
-
-                    // Format results for display - Top 5 highest rated
-                    additionalContext = `\n\nTop ${searchResult.restaurants.length} highest rated ${query || 'restaurants'} on DoorDash:\n\n`;
+                    additionalContext = `\n\nTop ${searchResult.restaurants.length} results on DoorDash near you:\n\n`;
                     additionalContext += searchResult.restaurants.map((r, i) => {
                         let line = `${i + 1}. ${r.name.toUpperCase()}`;
                         let details = [];
                         if (r.rating) details.push(`★ ${r.rating}`);
                         if (r.deliveryTime) details.push(r.deliveryTime);
                         if (r.deliveryFee) details.push(r.deliveryFee);
-                        if (details.length > 0) {
-                            line += `\n   ${details.join(' · ')}`;
-                        }
+                        if (details.length > 0) line += `\n   ${details.join(' · ')}`;
                         return line;
                     }).join('\n\n');
-                    additionalContext += `\n\nWhich one would you like? (Reply with the number)`;
-
-                    actions.push({ type: 'search_doordash', query, count: searchResult.restaurants.length, totalFound: searchResult.totalFound });
+                    additionalContext += `\n\nWhich one? (Reply with the number)`;
+                    actions.push({ type: 'search_doordash', query, count: searchResult.restaurants.length });
                 } else {
-                    additionalContext = `\n\nI couldn't find any "${query}" restaurants on DoorDash near you. Try a different search?`;
-                    actions.push({ type: 'search_doordash', query, count: 0 });
+                    additionalContext = `\n\nCouldn't find "${query}" restaurants on DoorDash near you. Try a different search?`;
                 }
-
             } catch (error) {
                 const fs = require('fs');
-                fs.appendFileSync('C:/Users/hatch/Projects/MessageAI/doordash_error.log', `\n[${new Date().toISOString()}] DoorDash search error:\n${error?.stack || error}\n`);
-                console.error('[Search] DoorDash search error:', error);
-                // Fall back to mock data
-                additionalContext = `\n\nDoorDash search failed. Here are some options:\n\n`;
-                const results = restaurants.searchRestaurants(query);
-                if (results.length > 0) {
-                    additionalContext += restaurants.formatRestaurantList(results);
-                    additionalContext += `\n\nWhich one would you like? (Reply with the number)`;
-                    prefs.lastSearchResults = results.map(r => r.id);
-                    prefs.lastSearchSource = 'mock';
-                    db.setUserPreferences(user.id, prefs);
-                }
-                actions.push({ type: 'search_fallback', query, count: results.length });
-            }
-        } else {
-            // No DoorDash credentials - use mock data
-            // Check for exact restaurant name match FIRST
-            const allRestaurants = restaurants.restaurants;
-            const exactMatch = allRestaurants.find(r => {
-                const name = r.name.toLowerCase();
-                const firstWord = name.split(' ')[0];
-                return query.includes(firstWord) || name.includes(query);
-            });
-
-            if (exactMatch) {
-                // Direct match to a restaurant - go straight to menu
-                prefs.currentRestaurant = exactMatch.id;
-                prefs.lastSearchResults = null;
-                prefs.lastSearchSource = 'mock';
-                db.setUserPreferences(user.id, prefs);
-                additionalContext = `\n\n${restaurants.formatMenu(exactMatch, prefs.budget || null)}\n\nWhat would you like? (Reply with item number)`;
-                actions.push({ type: 'select_restaurant', restaurant: exactMatch.name });
-            } else {
-                // No exact match, do cuisine search
-                const results = restaurants.searchRestaurants(query);
-                if (results.length > 0) {
-                    additionalContext = `\n\nHere's what I found:\n\n${restaurants.formatRestaurantList(results)}\n\nWhich one would you like? (Reply with the number)`;
-                    prefs.lastSearchResults = results.map(r => r.id);
-                    prefs.lastSearchSource = 'mock';
-                    db.setUserPreferences(user.id, prefs);
-                    actions.push({ type: 'search', query, count: results.length });
-                } else {
-                    additionalContext = `\n\nI couldn't find any ${query} restaurants nearby. Try another cuisine?`;
-                    actions.push({ type: 'search', query, count: 0 });
-                }
-            }
-
-            // Suggest setting up DoorDash if not set up
-            if (!db.hasDoorDashCredentials(user.id)) {
-                additionalContext += `\n\n(Tip: Link your DoorDash account to see real restaurants near you!)`;
+                fs.appendFileSync('C:/Users/hatch/Projects/MessageAI/doordash_error.log', `\n[${new Date().toISOString()}] Search error:\n${error?.stack || error}\n`);
+                additionalContext = `\n\nDoorDash search ran into an issue. Please try again in a moment.`;
             }
         }
     }
 
-    // Select restaurant
-    const selectMatch = response.match(/\[SELECT_RESTAURANT:\s*(.+?)\]/i);
-    if (selectMatch) {
-        const restaurantId = selectMatch[1].trim();
-        const restaurant = restaurants.getRestaurant(restaurantId);
-        cleanResponse = cleanResponse.replace(selectMatch[0], '').trim();
-
-        if (restaurant) {
-            const prefs = db.getUserPreferences(user.id);
-            prefs.currentRestaurant = restaurantId;
-            db.setUserPreferences(user.id, prefs);
-            additionalContext = `\n\n${restaurants.formatMenu(restaurant, prefs.budget || null)}\n\nWhat would you like to order? (Reply with item number)`;
-            actions.push({ type: 'select_restaurant', restaurant: restaurant.name });
-        }
-    }
+    // [SELECT_RESTAURANT:] is no longer used — restaurant selection goes through [SELECT: N] + DoorDash cache
 
     // Handle numeric selection (restaurant)
     const numberMatch = response.match(/\[SELECT:\s*(\d+)\]/i);
@@ -466,7 +432,7 @@ async function processCommands(response, user, phoneNumber) {
         if (prefs.lastSearchResults && prefs.lastSearchResults[num]) {
             const restaurantId = prefs.lastSearchResults[num];
 
-            // Check if this was a DoorDash search or mock search
+            // Check if this was a DoorDash search result
             if (prefs.lastSearchSource === 'doordash') {
                 // Real DoorDash restaurant - navigate to it and get categories
                 const credentials = db.getDoorDashCredentials(user.id);
@@ -484,13 +450,23 @@ async function processCommands(response, user, phoneNumber) {
                             prefs.currentRestaurant = restaurantId;
                             prefs.currentRestaurantSource = 'doordash';
                             prefs.currentRestaurantUrl = menuResult.url;
+                            // Clear pending option state when switching restaurants
+                            delete prefs.pendingDoordashItem;
+                            delete prefs.pendingDoordashOptions;
+                            delete prefs.pendingDoordashSelections;
                             db.setUserPreferences(user.id, prefs);
+
+                            // Clear cart and menu page when switching restaurants
+                            db.clearCart(user.id);
+                            doordash.clearBrowserCart().catch(() => {});
+                            prefs.menuPage = 0;
 
                             const restaurantName = menuResult.restaurantName || selectedRestaurant.name;
 
-                            // Always extract menu items so we can add them later
-                            const menuItems = await doordash.extractMenuItems();
-                            console.log(`[DoorDash] Extracted ${menuItems.length} menu items`);
+                            // Use cached menu if fresh (30-min TTL), otherwise scrape
+                            const cachedMenu = db.getCachedRestaurantMenu(user.id, restaurantId);
+                            const menuItems = cachedMenu || await doordash.extractMenuItems();
+                            console.log(`[DoorDash] ${cachedMenu ? 'Using cached' : 'Extracted'} ${menuItems.length} menu items`);
 
                             // Cache the restaurant data WITH menu
                             db.cacheCurrentRestaurant(user.id, {
@@ -499,11 +475,11 @@ async function processCommands(response, user, phoneNumber) {
                                 categories: menuResult.categories || [],
                                 url: menuResult.url,
                                 source: 'doordash',
-                                menu: menuItems  // Include menu items!
+                                menu: menuItems
                             });
 
-                            // Also cache menu separately for redundancy
-                            if (menuItems && menuItems.length > 0) {
+                            // Cache menu separately if freshly scraped
+                            if (!cachedMenu && menuItems && menuItems.length > 0) {
                                 db.cacheRestaurantMenu(user.id, restaurantId, menuItems);
                             }
 
@@ -523,10 +499,16 @@ async function processCommands(response, user, phoneNumber) {
                                 if (displayItems.length === 0) {
                                     menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
                                 } else {
+                                    // Cap at 15 items to stay under SMS length limits
+                                    const PAGE_SIZE = 15;
+                                    const pageItems = displayItems.slice(0, PAGE_SIZE);
                                     // Use original index so ADD_ITEM_NUM still maps correctly
-                                    menuText += displayItems.map(item =>
+                                    menuText += pageItems.map(item =>
                                         `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
                                     ).join('\n\n');
+                                    if (displayItems.length > PAGE_SIZE) {
+                                        menuText += `\n\n(+${displayItems.length - PAGE_SIZE} more items — say "more menu" to see them)`;
+                                    }
                                 }
                                 menuText += `\n\nWhat would you like? (Reply with item number)`;
                                 cleanResponse = menuText;
@@ -549,19 +531,7 @@ async function processCommands(response, user, phoneNumber) {
                     additionalContext = `\n\nSorry, that restaurant is no longer available. Try searching again?`;
                 }
             } else {
-                // Mock restaurant
-                const restaurant = restaurants.getRestaurant(restaurantId);
-                if (restaurant) {
-                    prefs.currentRestaurant = restaurantId;
-                    prefs.currentRestaurantSource = 'mock';
-                    db.setUserPreferences(user.id, prefs);
-                    cleanResponse = `${restaurants.formatMenu(restaurant, prefs.budget || null)}\n\nWhat would you like? (Reply with item number)`;
-                    additionalContext = '';
-                    actions.push({ type: 'select_restaurant', restaurant: restaurant.name });
-                    console.log(`[DB] Selected restaurant: ${restaurant.name}`);
-                } else {
-                    additionalContext = `\n\nSorry, that's not a valid option. Please pick a number from the list.`;
-                }
+                additionalContext = `\n\nSorry, that restaurant is no longer available. Try searching again?`;
             }
         } else {
             additionalContext = `\n\nSorry, that's not a valid option. Please pick a number from the list.`;
@@ -573,42 +543,270 @@ async function processCommands(response, user, phoneNumber) {
         const prefs = db.getUserPreferences(user.id);
         cleanResponse = cleanResponse.replace('[SHOW_MENU]', '').trim();
 
-        if (prefs.currentRestaurant) {
-            const restaurant = restaurants.getRestaurant(prefs.currentRestaurant);
-            additionalContext = `\n\n${restaurants.formatMenu(restaurant, prefs.budget || null)}`;
+        if (prefs.currentRestaurant && prefs.currentRestaurantSource === 'doordash') {
+            const cachedRestaurant = db.getCachedCurrentRestaurant(user.id);
+            if (cachedRestaurant && cachedRestaurant.menu && cachedRestaurant.menu.length > 0) {
+                const budget = prefs.budget || null;
+                const menuItems = cachedRestaurant.menu;
+                const displayItems = budget
+                    ? menuItems.filter(item => (parseFloat(item.price) || 0) <= budget)
+                    : menuItems;
+                let menuText = `══════════════════\n`;
+                menuText += `  ${cachedRestaurant.name.toUpperCase()}\n`;
+                if (budget) menuText += `  Under $${budget.toFixed(2)}\n`;
+                menuText += `══════════════════\n\n`;
+                if (displayItems.length === 0) {
+                    menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
+                } else {
+                    const PAGE_SIZE = 15;
+                    const pageStart = prefs.menuPage ? prefs.menuPage * PAGE_SIZE : 0;
+                    const pageItems = displayItems.slice(pageStart, pageStart + PAGE_SIZE);
+                    menuText += pageItems.map(item =>
+                        `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
+                    ).join('\n\n');
+                    if (displayItems.length > pageStart + PAGE_SIZE) {
+                        menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more — say "more menu")`;
+                    }
+                }
+                additionalContext = `\n\n${menuText}`;
+            } else {
+                additionalContext = `\n\nMenu not available. Try selecting the restaurant again.`;
+            }
             actions.push({ type: 'show_menu' });
         } else {
-            additionalContext = `\n\nNo restaurant selected. What cuisine are you in the mood for?`;
+            additionalContext = `\n\nNo menu available. Try searching for a restaurant first.`;
         }
     }
 
-    // Add item to cart
-    const addMatch = response.match(/\[ADD_ITEM:\s*(.+?)\]/i);
-    if (addMatch) {
-        const itemId = addMatch[1].trim();
-        const prefs = db.getUserPreferences(user.id);
-        cleanResponse = cleanResponse.replace(addMatch[0], '').trim();
-
-        if (prefs.currentRestaurant) {
-            const restaurant = restaurants.getRestaurant(prefs.currentRestaurant);
-            const item = restaurants.getMenuItem(prefs.currentRestaurant, itemId);
-
-            if (item) {
-                db.addToCart(user.id, prefs.currentRestaurant, item);
-                const cart = db.getCart(user.id);
-                additionalContext = `\n\nAdded ${item.name}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-                actions.push({ type: 'add_item', item: item.name });
+    // "more menu" — show next page of menu items
+    if (/\bmore menu\b/i.test(response) && !response.includes('[')) {
+        const prefsMore = db.getUserPreferences(user.id);
+        const cachedMore = db.getCachedCurrentRestaurant(user.id);
+        if (cachedMore && cachedMore.menu) {
+            const PAGE_SIZE = 15;
+            prefsMore.menuPage = (prefsMore.menuPage || 0) + 1;
+            db.setUserPreferences(user.id, prefsMore);
+            const menuItems = cachedMore.menu;
+            const displayItems = prefsMore.budget
+                ? menuItems.filter(item => (parseFloat(item.price) || 0) <= prefsMore.budget)
+                : menuItems;
+            const pageStart = prefsMore.menuPage * PAGE_SIZE;
+            const pageItems = displayItems.slice(pageStart, pageStart + PAGE_SIZE);
+            if (pageItems.length === 0) {
+                additionalContext = `\n\nThat's the whole menu!`;
+                prefsMore.menuPage = 0;
+                db.setUserPreferences(user.id, prefsMore);
+            } else {
+                let menuText = pageItems.map(item =>
+                    `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
+                ).join('\n\n');
+                if (displayItems.length > pageStart + PAGE_SIZE) {
+                    menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more — say "more menu")`;
+                }
+                cleanResponse = menuText;
+                additionalContext = '';
             }
         }
     }
 
-    // Add by number - handle multiple items (supports both mock and DoorDash)
+    // Handle TEXT-based multi-option selection — runs BEFORE ADD_ITEM_NUM so pending options resolve first
+    const textSelectMatch = response.match(/\[SELECT_OPTIONS_TEXT:\s*(.+?)\]/i);
+    if (textSelectMatch) {
+        cleanResponse = cleanResponse.replace(textSelectMatch[0], '').trim(); // always strip the command
+        if (textSelectMatch[1]) {
+            const prefsText = db.getUserPreferences(user.id);
+            if (prefsText.pendingDoordashItem && prefsText.pendingDoordashOptions) {
+                // Split by comma only to preserve multi-word phrases, then match positionally
+                // e.g. "Teri Chicken, Kalua Pig, White Rice, Teri Sauce" → phrase[0] → group[0], phrase[1] → group[1], etc.
+                const userPhrases = textSelectMatch[1].split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0);
+                console.log('[DoorDash] Text-based option selection (phrases):', userPhrases);
+                const numGroups = prefsText.pendingDoordashOptions.length;
+                const selectionsText = [];
+
+                // Helper: find best matching option index in a group for a phrase
+                // Priority: exact match > opt starts with phrase > phrase is first word of opt > substring
+                function matchPhraseInGroup(group, phrase) {
+                    if (!phrase) return null;
+                    let bestIdx = -1, bestScore = 0;
+                    for (let oIdx = 0; oIdx < group.options.length; oIdx++) {
+                        const opt = group.options[oIdx].toLowerCase();
+                        let score = 0;
+                        if (opt === phrase) {
+                            score = 4; // exact match
+                        } else if (new RegExp('^' + phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\s|$)').test(opt)) {
+                            score = 3; // opt starts with phrase then space or end
+                        } else if (opt.split(' ')[0] === phrase) {
+                            score = 2; // phrase is first word of opt
+                        } else if (opt.includes(phrase)) {
+                            score = 1; // substring fallback
+                        }
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestIdx = oIdx;
+                        }
+                    }
+                    if (bestIdx >= 0) {
+                        return { index: bestIdx, option: group.options[bestIdx] };
+                    }
+                    return null;
+                }
+
+                // Phase 1: positional matching — phrase[N] → group[N]
+                for (let gIdx = 0; gIdx < numGroups; gIdx++) {
+                    const group = prefsText.pendingDoordashOptions[gIdx];
+                    const phrase = userPhrases[gIdx];
+                    const match = matchPhraseInGroup(group, phrase);
+                    let matchedOption, matchedIndex;
+                    if (match) {
+                        matchedOption = match.option;
+                        matchedIndex = match.index;
+                    } else if (group.options.length > 0) {
+                        matchedOption = group.options[0];
+                        matchedIndex = 0;
+                    }
+                    if (matchedOption) {
+                        const cleanOption = matchedOption.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+                        selectionsText.push({ groupIndex: gIdx, optionIndex: matchedIndex, optionText: cleanOption });
+                        console.log(`[DoorDash] Group ${gIdx} (${group.name}): Matched "${cleanOption}"`);
+                    }
+                }
+
+                // Phase 2: overflow phrases — when user gave more phrases than groups,
+                // map extras to last group (handles multi-select/checkbox groups like Five Guys toppings)
+                if (userPhrases.length > numGroups && numGroups > 0) {
+                    const lastGroupIdx = numGroups - 1;
+                    const lastGroup = prefsText.pendingDoordashOptions[lastGroupIdx];
+                    for (let pIdx = numGroups; pIdx < userPhrases.length; pIdx++) {
+                        const match = matchPhraseInGroup(lastGroup, userPhrases[pIdx]);
+                        if (match) {
+                            const cleanOption = match.option.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+                            selectionsText.push({ groupIndex: lastGroupIdx, optionIndex: match.index, optionText: cleanOption });
+                            console.log(`[DoorDash] Group ${lastGroupIdx} extra (checkbox): Matched "${cleanOption}"`);
+                        }
+                    }
+                }
+                prefsText.pendingDoordashSelections = selectionsText;
+                db.setUserPreferences(user.id, prefsText);
+                const itemText = prefsText.pendingDoordashItem;
+                const numText = itemText.menuIndex;
+                try {
+                    let addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true }, itemText);
+                    // If browser was closed (server restart), re-navigate and retry
+                    if (!addResultText.success && addResultText.browserNotOpen && prefsText.currentRestaurantUrl) {
+                        console.log('[Recovery] Browser not open - navigating back to restaurant page...');
+                        await doordash.navigateToRestaurantPage(prefsText.currentRestaurantUrl);
+                        addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true }, itemText);
+                    }
+                    if (addResultText.success) {
+                        prefsText.pendingDoordashItem = null;
+                        prefsText.pendingDoordashOptions = null;
+                        prefsText.pendingDoordashSelections = null;
+                        db.setUserPreferences(user.id, prefsText);
+                        db.addToCart(user.id, prefsText.currentRestaurant, { id: itemText.id || `doordash-${numText}`, name: itemText.name, price: itemText.price || 0, source: 'doordash' });
+                        actions.push({ type: 'add_item_doordash', item: itemText.name });
+                        textResolvedMenuIndex = numText; // mark so ADD_ITEM_NUM won't re-add this item
+                        // Show cart now — ADD_ITEM_NUM may not fire in the same response
+                        const cartNow = db.getCart(user.id);
+                        additionalContext = `\n\nAdded ${itemText.name}!\n\n${restaurants.formatCart(cartNow)}\n\nAnything else, or say "checkout" to order?`;
+                    } else if (addResultText.needsOptions) {
+                        additionalContext = `\n\nPlease select more options:\n`;
+                        addResultText.requiredOptions.forEach(group => {
+                            additionalContext += `**${group.name}**:\n`;
+                            group.options.forEach((opt, oIdx) => { additionalContext += `   ${oIdx + 1}. ${opt}\n`; });
+                        });
+                        prefsText.pendingDoordashOptions = addResultText.requiredOptions;
+                        db.setUserPreferences(user.id, prefsText);
+                    } else if (addResultText.browserNotOpen) {
+                        additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
+                    } else {
+                        additionalContext = `\n\nCouldn't add ${itemText.name}. Please try again.`;
+                    }
+                } catch (error) {
+                    console.error('[AddItem] DoorDash text selection error:', error);
+                    additionalContext = `\n\nError adding item. Please try again.`;
+                }
+            }
+        }
+    }
+
+    // Handle numeric option selection — runs BEFORE ADD_ITEM_NUM so pending options resolve first
+    const optionMatch = response.match(/\[SELECT_OPTION:\s*(\d+)\]/i);
+    if (optionMatch) {
+        const optNum = parseInt(optionMatch[1]) - 1;
+        const prefsOpt = db.getUserPreferences(user.id);
+        cleanResponse = cleanResponse.replace(optionMatch[0], '').trim();
+        if (prefsOpt.pendingDoordashItem && prefsOpt.pendingDoordashOptions) {
+            console.log('[DoorDash] Applying user option selection:', optNum);
+            const selectionsOpt = [];
+            for (let gIdx = 0; gIdx < prefsOpt.pendingDoordashOptions.length; gIdx++) {
+                const group = prefsOpt.pendingDoordashOptions[gIdx];
+                if (gIdx === 0) {
+                    let optionText = (group.options[optNum] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: optNum, optionText });
+                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): User selected "${optionText}"`);
+                } else if (!group.hasSelection) {
+                    const cleanOption = (group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: 0, optionText: cleanOption });
+                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): Auto-selecting "${cleanOption}"`);
+                }
+            }
+            prefsOpt.pendingDoordashSelections = selectionsOpt;
+            db.setUserPreferences(user.id, prefsOpt);
+            const itemOpt = prefsOpt.pendingDoordashItem;
+            const numOpt = itemOpt.menuIndex;
+            try {
+                let addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true }, itemOpt);
+                // If browser was closed (server restart), re-navigate and retry
+                if (!addResultOpt.success && addResultOpt.browserNotOpen && prefsOpt.currentRestaurantUrl) {
+                    console.log('[Recovery] Browser not open - navigating back to restaurant page...');
+                    await doordash.navigateToRestaurantPage(prefsOpt.currentRestaurantUrl);
+                    addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true }, itemOpt);
+                }
+                if (addResultOpt.success) {
+                    prefsOpt.pendingDoordashItem = null;
+                    prefsOpt.pendingDoordashOptions = null;
+                    prefsOpt.pendingDoordashSelections = null;
+                    db.setUserPreferences(user.id, prefsOpt);
+                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: itemOpt.id || `doordash-${numOpt}`, name: itemOpt.name, price: itemOpt.price || 0, source: 'doordash' });
+                    actions.push({ type: 'add_item_doordash', item: itemOpt.name });
+                    // Show cart now — ADD_ITEM_NUM may not fire in the same response
+                    const cartOpt = db.getCart(user.id);
+                    additionalContext = `\n\nAdded ${itemOpt.name}!\n\n${restaurants.formatCart(cartOpt)}\n\nAnything else, or say "checkout" to order?`;
+                } else if (addResultOpt.needsOptions) {
+                    additionalContext = `\n\nPlease select more options:\n`;
+                    addResultOpt.requiredOptions.forEach((group, gIdx) => {
+                        additionalContext += `**${group.name}**:\n`;
+                        group.options.forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
+                    });
+                    prefsOpt.pendingDoordashOptions = addResultOpt.requiredOptions;
+                    db.setUserPreferences(user.id, prefsOpt);
+                } else if (addResultOpt.browserNotOpen) {
+                    additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
+                } else {
+                    additionalContext = `\n\nCouldn't add ${itemOpt.name}. Please try again.`;
+                }
+            } catch (error) {
+                console.error('[DoorDash] Option selection error:', error);
+                additionalContext = `\n\nError adding item. Please try again.`;
+            }
+        }
+    }
+
+    // [ADD_ITEM:] is deprecated — items are added via [ADD_ITEM_NUM:] using DoorDash menu indices
+
+    // Add by number - handle multiple items (DoorDash)
     const addNumMatches = [...response.matchAll(/\[ADD_ITEM_NUM:\s*(\d+)\]/gi)];
     const itemsAdded = [];
-    let pendingItem = null;
+    let needsOptionsBreak = false;
 
-    for (const match of addNumMatches) {
+    for (let matchIdx = 0; matchIdx < addNumMatches.length; matchIdx++) {
+        const match = addNumMatches[matchIdx];
+        if (needsOptionsBreak) {
+            cleanResponse = cleanResponse.replace(match[0], '').trim();
+            continue;
+        }
         const requestedNum = parseInt(match[1]);
+        if (isNaN(requestedNum) || requestedNum < 1) continue;
         const num = requestedNum - 1; // Convert to 0-based index
         const prefs = db.getUserPreferences(user.id);
         cleanResponse = cleanResponse.replace(match[0], '').trim();
@@ -622,13 +820,20 @@ async function processCommands(response, user, phoneNumber) {
         }
 
         if (prefs.currentRestaurant) {
-            // Check if using DoorDash or mock data
+            // Check if using DoorDash
             if (prefs.currentRestaurantSource === 'doordash') {
                 // Real DoorDash item - get from cache and add via automation
                 const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
 
                 if (currentRestaurant && currentRestaurant.menu && currentRestaurant.menu[num]) {
                     const item = currentRestaurant.menu[num];
+
+                    // If SELECT_OPTIONS_TEXT already added this item this turn, just show cart — don't re-add
+                    if (num === textResolvedMenuIndex) {
+                        console.log(`[ADD_ITEM_NUM] Skipping re-add of index ${num} — already resolved by SELECT_OPTIONS_TEXT`);
+                        itemsAdded.push(item.name);
+                        continue;
+                    }
 
                     try {
                         // Check if we have pending selections for THIS SPECIFIC item
@@ -651,7 +856,17 @@ async function processCommands(response, user, phoneNumber) {
                             { selectFirst: false }; // Don't auto-select, let user choose
 
                         // Add item via browser automation
-                        const addResult = await doordash.addItemByIndex(num, addOptions, item);
+                        let addResult = await doordash.addItemByIndex(num, addOptions, item);
+                        // If browser was closed (server restart), re-navigate and retry
+                        if (!addResult.success && addResult.browserNotOpen && prefs.currentRestaurantUrl) {
+                            console.log('[Recovery] Browser not open - navigating back to restaurant page...');
+                            try {
+                                await doordash.navigateToRestaurantPage(prefs.currentRestaurantUrl);
+                                addResult = await doordash.addItemByIndex(num, addOptions, item);
+                            } catch (e) {
+                                addResult = { success: false, error: 'Browser session expired. Please search for a restaurant again.' };
+                            }
+                        }
 
                         if (addResult.success) {
                             // Clear any pending selections
@@ -672,6 +887,8 @@ async function processCommands(response, user, phoneNumber) {
                             actions.push({ type: 'add_item_doordash', item: item.name });
                         } else if (addResult.needsOptions) {
                             // Item has required options - ask user to choose
+                            // Stop processing further ADD_ITEM_NUM commands until options are resolved
+                            needsOptionsBreak = true;
                             prefs.pendingDoordashItem = { ...item, menuIndex: num };
                             prefs.pendingDoordashOptions = addResult.requiredOptions;
                             prefs.pendingDoordashGroupIndex = 0; // Track which group we're asking about
@@ -699,9 +916,23 @@ async function processCommands(response, user, phoneNumber) {
                             const firstGroup = addResult.requiredOptions[0];
                             additionalContext += `**Please choose for "${firstGroup.name}"** - Reply with a number (1-${Math.min(8, firstGroup.options.length)})`;
                             additionalContext += `\n(Other options will use defaults, or you can specify: "2, Flour, Black Beans")`;
+
+                            // If there were more items queued, mention them
+                            const remaining = addNumMatches.slice(matchIdx + 1);
+                            if (remaining.length > 0) {
+                                const currentMenu = db.getCachedCurrentRestaurant(user.id);
+                                const remainingNames = remaining.map(m => {
+                                    const idx = parseInt(m[1]) - 1;
+                                    return currentMenu?.menu?.[idx]?.name || `item #${m[1]}`;
+                                });
+                                additionalContext += `\n\n(I'll add ${remainingNames.join(' and ')} after you pick.)`;
+                            }
+
                             actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
+                        } else if (addResult.browserNotOpen) {
+                            additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
                         } else {
-                            additionalContext = `\n\nCouldn't add ${item.name}. ${addResult.error || 'Please try again.'}`;
+                            additionalContext = `\n\nCouldn't add ${item.name}. Please try again.`;
                         }
                     } catch (error) {
                         console.error('[AddItem] DoorDash error:', error);
@@ -711,283 +942,16 @@ async function processCommands(response, user, phoneNumber) {
                     additionalContext = `\n\nSorry, couldn't find that item. The menu may have changed.`;
                 }
             } else {
-                // Mock restaurant
-                const restaurant = restaurants.getRestaurant(prefs.currentRestaurant);
-                const item = restaurant?.menu[num];
-
-                if (item) {
-                    // Check if item has required options
-                    if (item.requiredOptions && Object.keys(item.requiredOptions).length > 0) {
-                        // Store pending item and ask for options
-                        prefs.pendingItem = { ...item, menuIndex: num };
-                        db.setUserPreferences(user.id, prefs);
-                        pendingItem = item;
-                    } else {
-                        // No required options, add directly
-                        db.addToCart(user.id, prefs.currentRestaurant, item);
-                        itemsAdded.push(item.name);
-                        actions.push({ type: 'add_item', item: item.name });
-                    }
-                }
+                additionalContext = `\n\nPlease search for a DoorDash restaurant first.`;
             }
         }
     }
 
-    // Handle pending item with required options
-    if (pendingItem) {
-        const optionName = Object.keys(pendingItem.requiredOptions)[0];
-        const options = pendingItem.requiredOptions[optionName];
-
-        // Strip any AI-generated options list from the response
-        cleanResponse = cleanResponse
-            .replace(/choose your \w+:?[\s\S]*?reply with/gi, '')
-            .replace(/\d\.\s*(chicken|steak|carnitas|barbacoa|sofritas|veggie|tofu)[\s\S]*?(?=\n\n|$)/gi, '')
-            .replace(/🌯/g, '')
-            .trim();
-
-        // Keep just a simple acknowledgment
-        if (cleanResponse.length > 100) {
-            cleanResponse = `Adding ${pendingItem.name}!`;
-        }
-
-        additionalContext = `\n\nChoose your ${optionName}:\n\n`;
-        additionalContext += options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
-        additionalContext += `\n\nReply with the number.`;
-        actions.push({ type: 'awaiting_option', item: pendingItem.name, option: optionName });
-    }
-    // Show cart after adding items (only if no pending item)
-    else if (itemsAdded.length > 0) {
+    // Show cart after adding items
+    if (itemsAdded.length > 0) {
         const cart = db.getCart(user.id);
         const itemList = itemsAdded.join(' and ');
         additionalContext = `\n\nAdded ${itemList}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-    }
-
-    // Handle TEXT-based multi-option selection for DoorDash (e.g., "flour, black, tomatillo ranch")
-    // This runs BEFORE [SELECT_OPTION] to catch text-based selections
-    const textSelectMatch = response.match(/\[SELECT_OPTIONS_TEXT:\s*(.+?)\]/i);
-    if (textSelectMatch && textSelectMatch[1]) {
-        const prefs = db.getUserPreferences(user.id);
-
-        if (prefs.pendingDoordashItem && prefs.pendingDoordashOptions) {
-            const userChoices = textSelectMatch[1].toLowerCase().split(/[,\s]+/).filter(s => s.length > 2);
-            console.log('[DoorDash] Text-based option selection:', userChoices);
-
-            const selections = [];
-
-            // For each pending option group, find a matching user choice
-            for (let gIdx = 0; gIdx < prefs.pendingDoordashOptions.length; gIdx++) {
-                const group = prefs.pendingDoordashOptions[gIdx];
-                let matchedOption = null;
-                let matchedIndex = 0;
-
-                // Try to find a user choice that matches an option in this group
-                for (const choice of userChoices) {
-                    for (let oIdx = 0; oIdx < group.options.length; oIdx++) {
-                        const opt = group.options[oIdx].toLowerCase();
-                        if (opt.includes(choice) || choice.includes(opt.split(' ')[0])) {
-                            matchedOption = group.options[oIdx];
-                            matchedIndex = oIdx;
-                            break;
-                        }
-                    }
-                    if (matchedOption) break;
-                }
-
-                // If no match found, use first option as default
-                if (!matchedOption && group.options.length > 0) {
-                    matchedOption = group.options[0];
-                    matchedIndex = 0;
-                }
-
-                if (matchedOption) {
-                    const cleanOption = matchedOption.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                    selections.push({
-                        groupIndex: gIdx,
-                        optionIndex: matchedIndex,
-                        optionText: cleanOption
-                    });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): Matched "${cleanOption}"`);
-                }
-            }
-
-            // Store the new selections and trigger add item
-            prefs.pendingDoordashSelections = selections;
-            db.setUserPreferences(user.id, prefs);
-
-            const item = prefs.pendingDoordashItem;
-            const num = item.menuIndex;
-
-            cleanResponse = cleanResponse.replace(textSelectMatch[0], '').trim();
-
-            try {
-                const addResult = await doordash.addItemByIndex(num, {
-                    selectFirst: false,
-                    selections: selections,
-                    skipOptionsCheck: true
-                }, item);
-
-                if (addResult.success) {
-                    prefs.pendingDoordashItem = null;
-                    prefs.pendingDoordashOptions = null;
-                    prefs.pendingDoordashSelections = null;
-                    db.setUserPreferences(user.id, prefs);
-
-                    const cartItem = {
-                        id: item.id || `doordash-${num}`,
-                        name: item.name,
-                        price: item.price || 0,
-                        source: 'doordash'
-                    };
-                    db.addToCart(user.id, prefs.currentRestaurant, cartItem);
-
-                    const cart = db.getCart(user.id);
-                    additionalContext = `\n\nAdded ${item.name}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-                    actions.push({ type: 'add_item_doordash', item: item.name });
-                } else if (addResult.needsOptions) {
-                    additionalContext = `\n\nPlease select more options:\n`;
-                    addResult.requiredOptions.forEach((group) => {
-                        additionalContext += `**${group.name}**:\n`;
-                        group.options.forEach((opt, oIdx) => {
-                            additionalContext += `   ${oIdx + 1}. ${opt}\n`;
-                        });
-                    });
-                    prefs.pendingDoordashOptions = addResult.requiredOptions;
-                    db.setUserPreferences(user.id, prefs);
-                } else {
-                    additionalContext = `\n\nCouldn't add ${item.name}. ${addResult.error || 'Please try again.'}`;
-                }
-            } catch (error) {
-                console.error('[AddItem] DoorDash text selection error:', error);
-                additionalContext = `\n\nError adding item. Please try again.`;
-            }
-        }
-    }
-
-    // Handle option selection for pending item (both mock and DoorDash)
-    const optionMatch = response.match(/\[SELECT_OPTION:\s*(\d+)\]/i);
-    if (optionMatch) {
-        const optNum = parseInt(optionMatch[1]) - 1;
-        const prefs = db.getUserPreferences(user.id);
-        cleanResponse = cleanResponse.replace(optionMatch[0], '').trim();
-
-        // Check if we have a pending DoorDash item with options
-        if (prefs.pendingDoordashItem && prefs.pendingDoordashOptions) {
-            console.log('[DoorDash] Applying user option selection:', optNum);
-            console.log('[DoorDash] Pending options groups:', prefs.pendingDoordashOptions.length);
-
-            // Build selections for ALL groups
-            // User's choice for the first group, auto-select first option for remaining groups
-            const selections = [];
-
-            for (let gIdx = 0; gIdx < prefs.pendingDoordashOptions.length; gIdx++) {
-                const group = prefs.pendingDoordashOptions[gIdx];
-
-                if (gIdx === 0) {
-                    // User's selection for first group
-                    let optionText = '';
-                    if (group.options[optNum]) {
-                        optionText = group.options[optNum];
-                        optionText = optionText.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                    }
-                    selections.push({
-                        groupIndex: gIdx,
-                        optionIndex: optNum,
-                        optionText: optionText
-                    });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): User selected "${optionText}"`);
-                } else if (!group.hasSelection) {
-                    // Auto-select first option for remaining unselected groups
-                    const firstOption = group.options[0] || '';
-                    const cleanOption = firstOption.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                    selections.push({
-                        groupIndex: gIdx,
-                        optionIndex: 0,
-                        optionText: cleanOption
-                    });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): Auto-selecting "${cleanOption}"`);
-                }
-            }
-
-            prefs.pendingDoordashSelections = selections;
-            db.setUserPreferences(user.id, prefs);
-
-            // Re-trigger add item with the selection
-            const item = prefs.pendingDoordashItem;
-            const num = item.menuIndex;
-
-            try {
-                const addResult = await doordash.addItemByIndex(num, {
-                    selectFirst: false,
-                    selections: prefs.pendingDoordashSelections,
-                    skipOptionsCheck: true
-                }, item);
-
-                if (addResult.success) {
-                    // Clear pending state
-                    prefs.pendingDoordashItem = null;
-                    prefs.pendingDoordashOptions = null;
-                    prefs.pendingDoordashSelections = null;
-                    db.setUserPreferences(user.id, prefs);
-
-                    // Add to cart
-                    const cartItem = {
-                        id: item.id || `doordash-${num}`,
-                        name: item.name,
-                        price: item.price || 0,
-                        source: 'doordash'
-                    };
-                    db.addToCart(user.id, prefs.currentRestaurant, cartItem);
-
-                    const cart = db.getCart(user.id);
-                    additionalContext = `\n\nAdded ${item.name}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-                    actions.push({ type: 'add_item_doordash', item: item.name });
-                } else if (addResult.needsOptions) {
-                    // Still more options needed
-                    additionalContext = `\n\nPlease select more options:\n`;
-                    addResult.requiredOptions.forEach((group, gIdx) => {
-                        additionalContext += `**${group.name}**:\n`;
-                        group.options.forEach((opt, oIdx) => {
-                            additionalContext += `${oIdx + 1}. ${opt}\n`;
-                        });
-                    });
-                    prefs.pendingDoordashOptions = addResult.requiredOptions;
-                    db.setUserPreferences(user.id, prefs);
-                } else {
-                    additionalContext = `\n\nCouldn't add ${item.name}. ${addResult.error || 'Please try again.'}`;
-                }
-            } catch (error) {
-                console.error('[DoorDash] Option selection error:', error);
-                additionalContext = `\n\nError adding item. Please try again.`;
-            }
-        } else if (prefs.pendingItem && prefs.currentRestaurant) {
-            // Mock restaurant pending item
-            const item = prefs.pendingItem;
-            const optionName = Object.keys(item.requiredOptions)[0];
-            const options = item.requiredOptions[optionName];
-            const selectedOption = options[optNum];
-
-            if (selectedOption) {
-                // Add item with selected option
-                const itemWithOption = {
-                    ...item,
-                    name: `${item.name} (${selectedOption.replace(' (+$2)', '')})`,
-                    price: selectedOption.includes('+$2') ? item.price + 2 : item.price,
-                    selectedOptions: { [optionName]: selectedOption }
-                };
-                delete itemWithOption.requiredOptions;
-                delete itemWithOption.menuIndex;
-
-                db.addToCart(user.id, prefs.currentRestaurant, itemWithOption);
-
-                // Clear pending item
-                prefs.pendingItem = null;
-                db.setUserPreferences(user.id, prefs);
-
-                const cart = db.getCart(user.id);
-                additionalContext = `\n\nAdded ${itemWithOption.name}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-                actions.push({ type: 'add_item', item: itemWithOption.name });
-            }
-        }
     }
 
     // Show cart
@@ -1004,15 +968,32 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'show_cart' });
     }
 
-    // Clear cart
-    if (response.includes('[CLEAR_CART]')) {
-        db.clearCart(user.id);
-        const prefs = db.getUserPreferences(user.id);
-        prefs.currentRestaurant = null;
-        db.setUserPreferences(user.id, prefs);
-        cleanResponse = cleanResponse.replace('[CLEAR_CART]', '').trim();
-        additionalContext = `\n\nCart cleared! What else can I help with?`;
-        actions.push({ type: 'clear_cart' });
+    // Remove item from cart
+    const removeItemMatch = response.match(/\[REMOVE_ITEM:\s*(.+?)\]/i);
+    if (removeItemMatch) {
+        const itemName = removeItemMatch[1].trim().toLowerCase();
+        cleanResponse = cleanResponse.replace(removeItemMatch[0], '').trim();
+        const cart = db.getCart(user.id);
+        let removed = false;
+        for (const restaurantId of Object.keys(cart.items || {})) {
+            const items = cart.items[restaurantId];
+            const match = items.find(i =>
+                i.name.toLowerCase().includes(itemName) ||
+                itemName.includes(i.name.toLowerCase().split(' ')[0])
+            );
+            if (match) {
+                db.removeFromCart(user.id, restaurantId, match.id);
+                const updatedCart = db.getCart(user.id);
+                const hasItems = Object.values(updatedCart.items || {}).some(arr => arr.length > 0);
+                additionalContext = `\n\nRemoved ${match.name}!\n\n${hasItems ? restaurants.formatCart(updatedCart) : 'Cart is now empty.'}`;
+                removed = true;
+                actions.push({ type: 'remove_item', item: match.name });
+                break;
+            }
+        }
+        if (!removed) {
+            additionalContext = `\n\nCouldn't find "${removeItemMatch[1].trim()}" in your cart.`;
+        }
     }
 
     // Setup DoorDash credentials
@@ -1075,7 +1056,9 @@ async function processCommands(response, user, phoneNumber) {
                 try {
                     const result = await doordash.checkoutCurrentCart();
 
-                    if (result.success) {
+                    if (result.dryRun) {
+                        additionalContext = `\n\n✅ Dry run complete! Checkout page loaded and Place Order button found. Everything looks ready.\n\n(Remove DOORDASH_DRY_RUN from .env to place real orders.)`;
+                    } else if (result.success) {
                         // Create order record
                         const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
                         const restaurantName = currentRestaurant?.name || 'DoorDash Order';
@@ -1107,265 +1090,26 @@ async function processCommands(response, user, phoneNumber) {
                             cart.items[prefs.currentRestaurant] || [],
                             userAddress,
                             subtotal.toFixed(2),
-                            total.toFixed(2)
+                            total.toFixed(2),
+                            prefs.currentRestaurantUrl || null,
+                            result.orderUrl || null
                         );
                         db.clearCart(user.id);
                         prefs.currentRestaurant = null;
                         prefs.currentRestaurantSource = null;
+                        prefs.currentRestaurantUrl = null;
                         db.setUserPreferences(user.id, prefs);
 
-                        additionalContext = `\n\n🎉 Order placed successfully!\n\nTrack your order in the DoorDash app.`;
+                        additionalContext = `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`;
                         actions.push({ type: 'order_placed_doordash', restaurant: restaurantName });
                     } else {
-                        additionalContext = `\n\n${result.error || 'Could not complete checkout.'}\n\nYour cart is saved. Try ordering directly through the DoorDash app.`;
+                        additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
                     }
                 } catch (error) {
                     console.error('[Checkout] DoorDash error:', error);
-                    additionalContext = `\n\nSomething went wrong. Try ordering directly through the DoorDash app.`;
-                }
-            } else {
-                // Mock restaurant order - use original flow
-                const credentials = db.getDoorDashCredentials(user.id);
-                const totals = restaurants.calculateMultiOrderTotal(cart);
-
-                // Prepare items for DoorDash automation
-                const orderItems = [];
-                const restaurantNames = [];
-
-                restaurantIds.forEach(restaurantId => {
-                    const restaurant = restaurants.getRestaurant(restaurantId);
-                    const items = cart.items[restaurantId];
-                    if (!restaurant || !items) return;
-
-                    restaurantNames.push(restaurant.name);
-
-                    items.forEach(item => {
-                        orderItems.push({
-                            restaurant: restaurant.name,
-                            name: item.name,
-                            options: item.selectedOptions || {},
-                            quantity: item.quantity || 1
-                        });
-                    });
-                });
-
-            // Send initial response while order is being placed
-            additionalContext = `\n\nPlacing your order on DoorDash...\n\n`;
-            additionalContext += restaurantNames.map(n => `📍 ${n}`).join('\n') + '\n';
-            additionalContext += `Total: ~$${totals.total}\n\n`;
-            additionalContext += `Please wait while I complete the order...`;
-
-            // Place order via browser automation with session reuse
-            try {
-                // Group items by restaurant for multi-restaurant orders
-                const ordersByRestaurant = {};
-                orderItems.forEach(item => {
-                    if (!ordersByRestaurant[item.restaurant]) {
-                        ordersByRestaurant[item.restaurant] = [];
-                    }
-                    ordersByRestaurant[item.restaurant].push(item);
-                });
-
-                const restaurantList = Object.entries(ordersByRestaurant);
-                const isMultiOrder = restaurantList.length > 1;
-
-                // Place orders for each restaurant with session reuse
-                const orderResults = [];
-                const successfulOrders = [];
-                const failedOrders = [];
-
-                for (let i = 0; i < restaurantList.length; i++) {
-                    const [restaurantName, items] = restaurantList[i];
-                    const isLastOrder = i === restaurantList.length - 1;
-
-                    console.log(`[DoorDash] Placing order ${i + 1}/${restaurantList.length} at ${restaurantName}...`);
-
-                    // Use keepBrowserOpen for all orders except the last one
-                    const result = await doordash.placeFullOrder(credentials, {
-                        restaurantName,
-                        items,
-                        address,
-                        tipPercent: 15
-                    }, {
-                        keepBrowserOpen: !isLastOrder && isMultiOrder,
-                        isAdditionalOrder: i > 0
-                    });
-
-                    orderResults.push({
-                        restaurant: restaurantName,
-                        ...result
-                    });
-
-                    if (result.success) {
-                        successfulOrders.push({ restaurant: restaurantName, result });
-                    } else {
-                        failedOrders.push({ restaurant: restaurantName, result });
-                        // Don't break - try remaining orders if using session reuse
-                        if (!isMultiOrder) break;
-                    }
-                }
-
-                // Handle results
-                const allSuccess = failedOrders.length === 0;
-                const partialSuccess = successfulOrders.length > 0 && failedOrders.length > 0;
-
-                if (allSuccess) {
-                    // All orders successful - clear cart
-                    const orderIds = [];
-                    restaurantIds.forEach(restaurantId => {
-                        const restaurant = restaurants.getRestaurant(restaurantId);
-                        const items = cart.items[restaurantId];
-                        if (!restaurant || !items) return;
-
-                        const restaurantTotals = restaurants.calculateOrderTotal(items, restaurant);
-                        const orderId = db.createOrder(
-                            user.id,
-                            restaurant.id,
-                            restaurant.name,
-                            items,
-                            address,
-                            parseFloat(restaurantTotals.subtotal),
-                            parseFloat(restaurantTotals.total)
-                        );
-                        orderIds.push(orderId);
-
-                        // Learn from this order
-                        if (!prefs.favoriteCuisines) prefs.favoriteCuisines = [];
-                        if (!prefs.favoriteCuisines.includes(restaurant.cuisine)) {
-                            prefs.favoriteCuisines.push(restaurant.cuisine);
-                        }
-                        if (!prefs.favoriteRestaurants) prefs.favoriteRestaurants = [];
-                        if (!prefs.favoriteRestaurants.includes(restaurant.id)) {
-                            prefs.favoriteRestaurants.unshift(restaurant.id);
-                            prefs.favoriteRestaurants = prefs.favoriteRestaurants.slice(0, 5);
-                        }
-                    });
-
-                    // Clear cart and prefs only on full success
-                    db.clearCart(user.id);
-                    prefs.currentRestaurant = null;
-                    prefs.lastSearchResults = null;
-                    db.setUserPreferences(user.id, prefs);
-
-                    // Format success message
-                    const firstResult = orderResults[0];
-                    const eta = firstResult.eta || '30-45 min';
-
-                    if (restaurantIds.length > 1) {
-                        additionalContext = `\n\nOrders placed on DoorDash!\n\n`;
-                        additionalContext += restaurantNames.map(n => `📍 ${n}`).join('\n') + '\n\n';
-                        additionalContext += `Total: $${totals.total}\n`;
-                        additionalContext += `Delivering to: ${address}\n\n`;
-                        if (firstResult.orderNumber) {
-                            additionalContext += `DoorDash Order: ${firstResult.orderNumber}\n`;
-                        }
-                        additionalContext += `Estimated arrival: ${eta}\n\n`;
-                        additionalContext += `Track your order in the DoorDash app!`;
-                    } else {
-                        const restaurant = restaurants.getRestaurant(restaurantIds[0]);
-                        additionalContext = `\n\nOrder placed on DoorDash!\n\n`;
-                        additionalContext += `${restaurant.name}\n`;
-                        additionalContext += `Total: $${totals.total}\n`;
-                        additionalContext += `Delivering to: ${address}\n\n`;
-                        if (firstResult.orderNumber) {
-                            additionalContext += `DoorDash Order: ${firstResult.orderNumber}\n`;
-                        }
-                        additionalContext += `Estimated arrival: ${eta}\n\n`;
-                        additionalContext += `Track your order in the DoorDash app!`;
-                    }
-
-                    actions.push({
-                        type: 'order_placed_doordash',
-                        orderIds,
-                        total: totals.total,
-                        doordashResults: orderResults
-                    });
-
-                } else if (partialSuccess) {
-                    // Some orders succeeded, some failed - DON'T clear cart
-                    additionalContext = `\n\nPartial order success:\n\n`;
-                    successfulOrders.forEach(({ restaurant }) => {
-                        additionalContext += `✓ ${restaurant} - Order placed!\n`;
-                    });
-                    failedOrders.forEach(({ restaurant, result }) => {
-                        const errorMsg = doordash.getUserFriendlyError(result.errorType || result.error);
-                        additionalContext += `✗ ${restaurant} - ${errorMsg}\n`;
-                    });
-                    additionalContext += `\nYour cart still has the failed items. Say "checkout" to retry.`;
-
-                    actions.push({
-                        type: 'order_partial_success',
-                        successfulOrders: successfulOrders.map(o => o.restaurant),
-                        failedOrders: failedOrders.map(o => o.restaurant),
-                        doordashResults: orderResults
-                    });
-
-                } else {
-                    // All orders failed - DON'T clear cart so user can retry
-                    const firstFailure = failedOrders[0];
-                    const errorType = firstFailure.result.errorType || firstFailure.result.error;
-                    const errorMsg = doordash.getUserFriendlyError(errorType);
-
-                    additionalContext = `\n\nOrder failed: ${errorMsg}\n\n`;
-
-                    // Provide specific recovery suggestions based on error type
-                    switch (errorType) {
-                        case doordash.DoorDashErrors.TWO_FA_REQUIRED:
-                        case doordash.DoorDashErrors.TWO_FA_TIMEOUT:
-                            additionalContext += `Please login to DoorDash manually to complete verification, then try again.`;
-                            break;
-                        case doordash.DoorDashErrors.NO_PAYMENT_METHOD:
-                            additionalContext += `Add a payment method in the DoorDash app, then try again.`;
-                            break;
-                        case doordash.DoorDashErrors.RESTAURANT_CLOSED:
-                        case doordash.DoorDashErrors.RESTAURANT_UNAVAILABLE:
-                            additionalContext += `Try a different restaurant or check back later.`;
-                            break;
-                        case doordash.DoorDashErrors.ADDRESS_NOT_SERVICEABLE:
-                            additionalContext += `This restaurant may not deliver to your address. Try a different restaurant.`;
-                            break;
-                        case doordash.DoorDashErrors.MINIMUM_NOT_MET:
-                            additionalContext += `Add more items to meet the minimum order amount.`;
-                            break;
-                        case doordash.DoorDashErrors.ITEM_SOLD_OUT:
-                        case doordash.DoorDashErrors.ITEM_UNAVAILABLE:
-                            additionalContext += `Some items aren't available. Try removing them and ordering again.`;
-                            break;
-                        default:
-                            additionalContext += `Your cart is saved. Say "checkout" to try again, or "clear cart" to start over.`;
-                    }
-
-                    // Include failed step info if available
-                    if (firstFailure.result.failedStep) {
-                        console.log(`[DoorDash] Order failed at step: ${firstFailure.result.failedStep}`);
-                    }
-
-                    actions.push({
-                        type: 'order_failed',
-                        error: errorType,
-                        errorMessage: errorMsg,
-                        restaurant: firstFailure.restaurant,
-                        failedStep: firstFailure.result.failedStep,
-                        doordashResults: orderResults
-                    });
-                }
-
-            } catch (error) {
-                console.error('[DoorDash] Order error:', error);
-                // DON'T clear cart on error - let user retry
-                additionalContext = `\n\nSomething went wrong placing your order.\n\n`;
-                additionalContext += `Your cart is saved. Say "checkout" to try again.\n\n`;
-                additionalContext += `If the problem continues, try ordering directly through the DoorDash app.`;
-                actions.push({ type: 'order_error', error: error.message });
-
-                // Try to close browser on error
-                try {
-                    await doordash.closeBrowser();
-                } catch (e) {
-                    // Ignore
+                    additionalContext = `\n\n${formatCheckoutError(error.message)}\n\nYour cart is saved.`;
                 }
             }
-            } // Close else block for mock restaurant flow
         }
     }
 
@@ -1395,89 +1139,6 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'show_orders' });
     }
 
-    // Quick order - supports multiple items from different restaurants
-    const quickOrderMatches = [...response.matchAll(/\[QUICK_ORDER:\s*(.+?)\s*\|\s*(.+?)(?:\s*\|\s*(.+?))?\]/gi)];
-    const quickOrdersAdded = [];
-    let pendingQuickOrder = null;
-
-    for (const match of quickOrderMatches) {
-        const restaurantQuery = match[1].trim().toLowerCase();
-        const itemQuery = match[2].trim().toLowerCase();
-        const optionQuery = match[3]?.trim().toLowerCase();
-        cleanResponse = cleanResponse.replace(match[0], '').trim();
-
-        // Find restaurant
-        const allRestaurants = restaurants.restaurants;
-        const restaurant = allRestaurants.find(r => {
-            const name = r.name.toLowerCase();
-            const firstWord = name.split(' ')[0];
-            return restaurantQuery.includes(firstWord) || name.includes(restaurantQuery);
-        });
-
-        if (restaurant) {
-            // Find menu item
-            const menuItem = restaurant.menu.find(item => {
-                const itemName = item.name.toLowerCase();
-                return itemName.includes(itemQuery) || itemQuery.includes(itemName.split(' ')[0]);
-            });
-
-            if (menuItem) {
-                // Check if item needs options and we have them
-                if (menuItem.requiredOptions && optionQuery) {
-                    const optionName = Object.keys(menuItem.requiredOptions)[0];
-                    const options = menuItem.requiredOptions[optionName];
-                    const selectedOption = options.find(opt =>
-                        opt.toLowerCase().includes(optionQuery) || optionQuery.includes(opt.toLowerCase().split(' ')[0])
-                    );
-
-                    if (selectedOption) {
-                        const itemWithOption = {
-                            ...menuItem,
-                            name: `${menuItem.name} (${selectedOption.replace(' (+$2)', '')})`,
-                            price: selectedOption.includes('+$2') ? menuItem.price + 2 : menuItem.price,
-                            selectedOptions: { [optionName]: selectedOption }
-                        };
-                        delete itemWithOption.requiredOptions;
-
-                        db.addToCart(user.id, restaurant.id, itemWithOption);
-                        quickOrdersAdded.push(`${itemWithOption.name} from ${restaurant.name}`);
-                        actions.push({ type: 'quick_order', restaurant: restaurant.name, item: itemWithOption.name });
-                    } else {
-                        pendingQuickOrder = { restaurant, menuItem, optionName };
-                    }
-                } else if (menuItem.requiredOptions) {
-                    pendingQuickOrder = { restaurant, menuItem };
-                } else {
-                    db.addToCart(user.id, restaurant.id, menuItem);
-                    quickOrdersAdded.push(`${menuItem.name} from ${restaurant.name}`);
-                    actions.push({ type: 'quick_order', restaurant: restaurant.name, item: menuItem.name });
-                }
-            }
-        }
-    }
-
-    // Show results after processing all quick orders
-    if (quickOrdersAdded.length > 0) {
-        const cart = db.getCart(user.id);
-        const itemList = quickOrdersAdded.join(' and ');
-        additionalContext = `\n\nAdded ${itemList}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
-    }
-
-    // Handle any pending item that needs options
-    if (pendingQuickOrder && quickOrdersAdded.length === 0) {
-        const { restaurant, menuItem } = pendingQuickOrder;
-        const prefs = db.getUserPreferences(user.id);
-        prefs.currentRestaurant = restaurant.id;
-        prefs.pendingItem = { ...menuItem };
-        db.setUserPreferences(user.id, prefs);
-
-        const optionName = Object.keys(menuItem.requiredOptions)[0];
-        const options = menuItem.requiredOptions[optionName];
-        additionalContext = `\n\nChoose your ${optionName} for ${menuItem.name}:\n\n`;
-        additionalContext += options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
-        additionalContext += `\n\nReply with the number.`;
-    }
-
     // Reorder last order
     if (response.includes('[REORDER]')) {
         const orders = db.getUserOrders(user.id, 1);
@@ -1485,26 +1146,60 @@ async function processCommands(response, user, phoneNumber) {
 
         if (orders.length > 0) {
             const lastOrder = orders[0];
-            const restaurant = restaurants.getRestaurant(lastOrder.restaurant_id);
+            db.clearCart(user.id);
+            doordash.clearBrowserCart().catch(() => {});
 
-            if (restaurant) {
-                // Add all items from last order to cart
-                db.clearCart(user.id);
-                lastOrder.items.forEach(item => {
-                    db.addToCart(user.id, lastOrder.restaurant_id, item);
-                });
+            const restaurantUrl = lastOrder.restaurant_url;
+            if (restaurantUrl) {
+                additionalContext = `\n\nLoading ${lastOrder.restaurant_name}...`;
+                try {
+                    const navResult = await doordash.selectRestaurantFromSearch(restaurantUrl);
+                    if (navResult.success) {
+                        const prefs = db.getUserPreferences(user.id);
+                        prefs.currentRestaurant = lastOrder.restaurant_id;
+                        prefs.currentRestaurantSource = 'doordash';
+                        prefs.currentRestaurantUrl = restaurantUrl;
+                        db.setUserPreferences(user.id, prefs);
 
-                // Set current restaurant
+                        const cachedMenu = db.getCachedRestaurantMenu(user.id, lastOrder.restaurant_id);
+                        const menuItems = cachedMenu || await doordash.extractMenuItems();
+                        if (!cachedMenu && menuItems.length > 0)
+                            db.cacheRestaurantMenu(user.id, lastOrder.restaurant_id, menuItems);
+
+                        for (const item of lastOrder.items) {
+                            const menuIdx = menuItems.findIndex(m =>
+                                m.name.toLowerCase().includes(item.name.toLowerCase()) ||
+                                item.name.toLowerCase().includes(m.name.toLowerCase())
+                            );
+                            if (menuIdx >= 0) {
+                                const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true }, menuItems[menuIdx]);
+                                if (addResult.success) {
+                                    db.addToCart(user.id, lastOrder.restaurant_id, {
+                                        id: `doordash-${menuIdx}`, name: item.name,
+                                        price: item.price, source: 'doordash'
+                                    });
+                                }
+                            }
+                        }
+                        const cart = db.getCart(user.id);
+                        additionalContext = `\n\nLoaded your last order from ${lastOrder.restaurant_name}!\n\n${restaurants.formatCart(cart)}\n\nNote: any customizations (e.g. protein choice) may be reset to defaults. Reply "show cart" to verify before checking out.`;
+                    } else {
+                        additionalContext = `\n\nCouldn't reconnect to ${lastOrder.restaurant_name}. Try searching for it again.`;
+                    }
+                } catch (err) {
+                    console.error('[Reorder] Browser nav failed:', err.message);
+                    additionalContext = `\n\nSomething went wrong loading ${lastOrder.restaurant_name}. Try searching for it again.`;
+                }
+            } else {
+                // Old order without stored URL — load DB cart only
+                lastOrder.items.forEach(item => db.addToCart(user.id, lastOrder.restaurant_id, item));
                 const prefs = db.getUserPreferences(user.id);
                 prefs.currentRestaurant = lastOrder.restaurant_id;
                 db.setUserPreferences(user.id, prefs);
-
                 const cart = db.getCart(user.id);
-                additionalContext = `\n\nI've loaded your last order!\n\n${restaurants.formatCart(cart)}\n\nSay "checkout" to place this order, or make changes.`;
-                actions.push({ type: 'reorder', orderId: lastOrder.id });
-            } else {
-                additionalContext = `\n\nSorry, ${lastOrder.restaurant_name} isn't available right now. Want to try somewhere else?`;
+                additionalContext = `\n\nLoaded your last order from ${lastOrder.restaurant_name}!\n\n${restaurants.formatCart(cart)}\n\nNote: any customizations (e.g. protein choice) may be reset to defaults. Reply "show cart" to verify before checking out.`;
             }
+            actions.push({ type: 'reorder', orderId: lastOrder.id });
         } else {
             additionalContext = `\n\nYou don't have any previous orders yet. What would you like to eat?`;
         }
@@ -1524,7 +1219,20 @@ async function processCommands(response, user, phoneNumber) {
                 additionalContext = `\n\nNo active orders right now. Want to order something?`;
             }
         } else {
-            additionalContext = `\n\n${getOrderStatusText(latestOrder)}`;
+            let statusText = null;
+            if (latestOrder.tracking_url && db.hasDoorDashCredentials(user.id)) {
+                try {
+                    const creds = db.getDoorDashCredentials(user.id);
+                    const statusResult = await doordash.getOrderStatus(creds, latestOrder.tracking_url);
+                    if (statusResult && statusResult.statusText) {
+                        statusText = statusResult.statusText;
+                        if (statusResult.eta) statusText += ` ETA: ${statusResult.eta}`;
+                    }
+                } catch (e) {
+                    console.error('[OrderStatus] Real poll failed:', e.message);
+                }
+            }
+            additionalContext = `\n\n${statusText || getOrderStatusText(latestOrder)}`;
         }
         actions.push({ type: 'order_status' });
     }
@@ -1540,7 +1248,9 @@ async function processCommands(response, user, phoneNumber) {
         cleanResponse = cleanResponse.replace(scheduleMatch[0], '').trim();
 
         const restaurantIds = Object.keys(cart.items || {});
-        if (restaurantIds.length === 0) {
+        if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+            additionalContext = `\n\nInvalid time. Please use a valid 12 or 24-hour time (e.g., "7pm" or "19:00").`;
+        } else if (restaurantIds.length === 0) {
             additionalContext = `\n\nYour cart is empty! Add items first, then I can schedule the order.`;
         } else if (!address) {
             additionalContext = `\n\nI need your delivery address before scheduling. What's your address?`;
@@ -1590,6 +1300,18 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'history_cleared' });
     }
 
+    // Strip cart/order display blocks Claude may have generated in its text
+    // Cart blocks contain "YOUR CART" or "YOUR ORDER" surrounded by ══ borders
+    cleanResponse = cleanResponse.replace(/══+[^═]*(?:YOUR CART|YOUR ORDER|🛒)[\s\S]*?══+[^\n]*/gi, '').trim();
+    // Also strip ── sub-blocks (line items + totals) that Claude generated
+    cleanResponse = cleanResponse.replace(/══+[\s\S]*?Anything else[^\n]*/gi, '').trim();
+    cleanResponse = cleanResponse.replace(/──+[\s\S]*?TOTAL:[^\n]*\n?/gi, '').trim();
+    // Strip bullet-point item lines like "• Coke Bottle - $4.20" (price formatting)
+    cleanResponse = cleanResponse.replace(/^[•\-]\s+.+\s+-\s+\$[\d.]+\s*$/gm, '').trim();
+    // Strip Claude-generated fee rows (restaurant name then delivery/service/tax lines)
+    cleanResponse = cleanResponse.replace(/^.*\n(?:Delivery|Service Fee|Tax):\s+\$[\d.]+.*$/gm, '').trim();
+    cleanResponse = cleanResponse.replace(/\n{3,}/g, '\n\n').trim();
+
     // Clean up response
     cleanResponse = cleanResponse.replace(/\n{3,}/g, '\n\n').trim();
     cleanResponse = (cleanResponse + additionalContext).trim();
@@ -1608,16 +1330,11 @@ async function handleMessage(phoneNumber, message) {
     let doordashMenu = null;
 
     if (preferences.currentRestaurant) {
-        if (preferences.currentRestaurantSource === 'doordash') {
-            // Get cached DoorDash restaurant with menu
-            const cachedRestaurant = db.getCachedCurrentRestaurant(user.id);
-            if (cachedRestaurant) {
-                currentRestaurant = { name: cachedRestaurant.name, source: 'doordash' };
-                doordashMenu = cachedRestaurant.menu || [];
-            }
-        } else {
-            // Mock restaurant
-            currentRestaurant = restaurants.getRestaurant(preferences.currentRestaurant);
+        // Get cached DoorDash restaurant with menu
+        const cachedRestaurant = db.getCachedCurrentRestaurant(user.id);
+        if (cachedRestaurant) {
+            currentRestaurant = { name: cachedRestaurant.name, source: 'doordash' };
+            doordashMenu = cachedRestaurant.menu || [];
         }
     }
 
@@ -1680,16 +1397,20 @@ app.post('/api/twilio/webhook', async (req, res) => {
 
     console.log(`[Twilio] Incoming SMS from ${from}: ${message}`);
 
-    try {
-        const { response, actions } = await handleMessage(from, message);
-        console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 100)}...`);
-        await sendSMS(from, response);
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('[Twilio Webhook] Error:', error);
-        await sendSMS(from, 'Sorry, something went wrong. Please try again.');
-        res.sendStatus(200);
-    }
+    // Respond to Twilio immediately — DoorDash can take >15s and Twilio would time out
+    res.set('Content-Type', 'text/xml').send('<Response></Response>');
+
+    // Process and reply asynchronously
+    (async () => {
+        try {
+            const { response } = await handleMessage(from, message);
+            console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 100)}...`);
+            await sendSMS(from, response);
+        } catch (error) {
+            console.error('[Twilio Webhook] Error:', error);
+            await sendSMS(from, 'Sorry, something went wrong. Please try again.');
+        }
+    })();
 });
 
 // Get user profile endpoint
@@ -1738,9 +1459,15 @@ app.post('/api/clear', (req, res) => {
             prefs.lastSearchSource = null;
             prefs.lastSearchQuery = null;
             prefs.pendingItem = null;
+            prefs.pendingDoordashItem = null;
+            prefs.pendingDoordashOptions = null;
+            prefs.pendingDoordashSelections = null;
+            prefs.pendingDoordashGroupIndex = null;
             db.setUserPreferences(user.id, prefs);
             // Also clear cached restaurant data
             db.clearDoorDashCache(user.id);
+            // Clear the DoorDash browser cart to stay in sync
+            doordash.clearBrowserCart().catch(() => {});
             console.log(`[Clear] Cleared all data for user ${user.id}`);
         }
     }
@@ -1772,16 +1499,33 @@ setInterval(() => {
 // Proactive order status SMS updates (every 2 minutes)
 async function pollOrderStatuses() {
     try {
-        const activeOrders = db.getActiveOrders();
+        const activeOrders = db.getActiveOrders() || [];
         for (const order of activeOrders) {
             const minutesAgo = Math.floor((Date.now() - new Date(order.placed_at).getTime()) / 60000);
 
             let newStatus;
-            if (minutesAgo < 5) newStatus = 'placed';
-            else if (minutesAgo < 20) newStatus = 'preparing';
-            else if (minutesAgo < 35) newStatus = 'picked_up';
-            else if (minutesAgo < 50) newStatus = 'on_the_way';
-            else newStatus = 'delivered';
+
+            // Try real DoorDash status first if user has credentials
+            const creds = db.getDoorDashCredentials(order.user_id);
+            if (creds) {
+                try {
+                    const realStatus = await doordash.getOrderStatus(creds, order.tracking_url || null);
+                    if (realStatus.status && realStatus.status !== 'unknown') {
+                        newStatus = realStatus.status;
+                    }
+                } catch (e) {
+                    console.error('[StatusPoll] Real status check failed, falling back to time estimate:', e.message);
+                }
+            }
+
+            // Fall back to time-based estimate if real status unavailable
+            if (!newStatus) {
+                if (minutesAgo < 5) newStatus = 'placed';
+                else if (minutesAgo < 20) newStatus = 'preparing';
+                else if (minutesAgo < 35) newStatus = 'picked_up';
+                else if (minutesAgo < 50) newStatus = 'on_the_way';
+                else newStatus = 'delivered';
+            }
 
             if (newStatus === order.last_known_status) continue;
 
@@ -1825,7 +1569,7 @@ setInterval(pollOrderStatuses, 2 * 60 * 1000);
 async function checkScheduledOrders() {
     try {
         const now = new Date();
-        const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
         const usersWithScheduled = db.db.prepare(`
             SELECT * FROM users
@@ -1839,7 +1583,12 @@ async function checkScheduledOrders() {
                 if (!prefs.scheduledOrder) continue;
 
                 const { time, cart, restaurantId, restaurantSource, address, phoneNumber: userPhone } = prefs.scheduledOrder;
-                if (time !== currentTime) continue;
+                if (!time || !time.includes(':')) continue;
+
+                const [schedH, schedM] = time.split(':').map(Number);
+                const schedMinutes = schedH * 60 + schedM;
+                // Fire if within a 1-minute window (handles server timing drift)
+                if (Math.abs(schedMinutes - currentMinutes) > 1) continue;
 
                 console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
 
@@ -1854,42 +1603,31 @@ async function checkScheduledOrders() {
                 const restaurantIds = Object.keys(cart || {});
                 if (restaurantIds.length === 0) continue;
 
-                const creds = db.getDoorDashCredentials(userRow.id);
+                const creds = db.getDoorDashCredentials(userRow.id) || {
+                    email: process.env.DOORDASH_EMAIL,
+                    password: process.env.DOORDASH_PASSWORD
+                };
 
-                if (creds && restaurantSource !== 'mock') {
-                    // DoorDash order — attempt automation
-                    const orderItems = [];
-                    restaurantIds.forEach(rid => {
-                        (cart[rid] || []).forEach(item => {
-                            orderItems.push({ restaurant: rid, name: item.name, options: item.selectedOptions || {}, quantity: item.quantity || 1 });
-                        });
+                // DoorDash order — attempt automation
+                const orderItems = [];
+                restaurantIds.forEach(rid => {
+                    (cart[rid] || []).forEach(item => {
+                        orderItems.push({ restaurant: rid, name: item.name, options: item.selectedOptions || {}, quantity: item.quantity || 1 });
                     });
+                });
 
-                    const result = await doordash.placeFullOrder(creds, {
-                        restaurantName: restaurantIds[0],
-                        items: orderItems,
-                        address,
-                        tipPercent: 15
-                    });
+                const result = await doordash.placeFullOrder(creds, {
+                    restaurantName: restaurantIds[0],
+                    items: orderItems,
+                    address,
+                    tipPercent: 15
+                });
 
-                    if (result.success) {
-                        await sendSMS(phone, `Scheduled order placed! ETA: ${result.eta || '30-45 min'}`);
-                    } else {
-                        await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
-                    }
+                if (result.success) {
+                    db.setCart(userRow.id, {});
+                    await sendSMS(phone, `Scheduled order placed! ETA: ${result.eta || '30-45 min'}`);
                 } else {
-                    // Mock order — just create DB record
-                    let subtotal = 0;
-                    restaurantIds.forEach(rid => {
-                        const restaurant = restaurants.getRestaurant(rid);
-                        (cart[rid] || []).forEach(item => { subtotal += (item.price || 0) * (item.quantity || 1); });
-                        if (restaurant) {
-                            const totals = restaurants.calculateOrderTotal(cart[rid], restaurant);
-                            db.createOrder(userRow.id, rid, restaurant.name, cart[rid], address, parseFloat(totals.subtotal), parseFloat(totals.total));
-                        }
-                    });
-
-                    await sendSMS(phone, `Your scheduled order has been placed!`);
+                    await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
                 }
             } catch (err) {
                 console.error(`[Scheduler] Error for user ${userRow.id}:`, err.message);

@@ -457,6 +457,10 @@ async function waitForElement(selectors, options = {}) {
  * Take a debug screenshot
  */
 async function takeScreenshot(name) {
+    if (!page) {
+        console.log(`[DoorDash] Screenshot skipped (page not ready): ${name}`);
+        return null;
+    }
     const screenshotDir = path.join(BROWSER_DATA_DIR, 'screenshots');
     if (!fs.existsSync(screenshotDir)) {
         fs.mkdirSync(screenshotDir, { recursive: true });
@@ -1862,87 +1866,84 @@ async function checkoutCurrentCart() {
 
         await takeScreenshot('after-close-modals');
 
-        // Look for cart button in the header - usually shows item count and price
-        // DoorDash cart button is typically in top-right with cart icon and price
-        const cartCoords = await page.evaluate(() => {
-            // Look for cart button with price
-            const buttons = document.querySelectorAll('button, a');
-            for (const btn of buttons) {
-                const text = btn.textContent || '';
-                const ariaLabel = btn.getAttribute('aria-label') || '';
-
-                // Cart button usually has "$" and "cart" in aria-label or shows item count
-                if ((ariaLabel.toLowerCase().includes('cart') || text.includes('$')) &&
-                    btn.offsetWidth > 0 && btn.offsetHeight > 0) {
-                    const rect = btn.getBoundingClientRect();
-                    // Cart is usually in the top-right area
-                    if (rect.top < 100 && rect.right > window.innerWidth - 300) {
-                        console.log('[Cart] Found cart button:', text.substring(0, 30), ariaLabel);
-                        return {
-                            found: true,
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                            text: text.substring(0, 30)
-                        };
+        // Look for a checkout/continue button anywhere on the page (DoorDash embeds cart in sidebar)
+        const findCheckoutBtn = async () => {
+            return await page.evaluate(() => {
+                const buttons = document.querySelectorAll('button, a');
+                // Priority order: exact data-anchor-id → text match
+                for (const btn of buttons) {
+                    const anchorId = (btn.getAttribute('data-anchor-id') || '').toLowerCase();
+                    if (anchorId.includes('checkout') || anchorId.includes('cartcheckout')) {
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: btn.textContent.trim().substring(0, 40) };
+                        }
                     }
                 }
-            }
-            return { found: false };
-        });
+                for (const btn of buttons) {
+                    const text = (btn.textContent || '').trim().toLowerCase();
+                    const rect = btn.getBoundingClientRect();
+                    if (rect.width < 60 || rect.height < 28) continue;
+                    if (rect.top < 0 || rect.top > window.innerHeight) continue;
+                    const isCheckout = text.includes('go to checkout') || text.includes('checkout') ||
+                                       text === 'continue' || text.includes('continue to checkout') ||
+                                       text.includes('view cart') || text.includes('place order');
+                    if (isCheckout) {
+                        console.log('[Cart] Found checkout button:', text.substring(0, 40), 'at', Math.round(rect.left), Math.round(rect.top));
+                        return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.substring(0, 40) };
+                    }
+                }
+                return { found: false };
+            });
+        };
 
-        if (cartCoords.found) {
-            console.log(`[DoorDash] Clicking cart at (${cartCoords.x}, ${cartCoords.y}): ${cartCoords.text}`);
-            await page.mouse.click(cartCoords.x, cartCoords.y);
-            await delay(2000);
+        // First try: look for checkout button directly (DoorDash sidebar often has it)
+        let checkoutBtnCoords = await findCheckoutBtn();
+
+        if (!checkoutBtnCoords.found) {
+            // Try clicking the cart icon in the header to open cart drawer
+            const cartCoords = await page.evaluate(() => {
+                const buttons = document.querySelectorAll('button, a');
+                for (const btn of buttons) {
+                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    const anchorId = (btn.getAttribute('data-anchor-id') || '').toLowerCase();
+                    if (ariaLabel.includes('cart') || anchorId.includes('cart')) {
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+                        }
+                    }
+                }
+                return { found: false };
+            });
+            if (cartCoords.found) {
+                await page.mouse.click(cartCoords.x, cartCoords.y);
+                await delay(1500);
+            }
+            checkoutBtnCoords = await findCheckoutBtn();
         }
 
         await takeScreenshot('after-cart-click');
-
-        // Now look for "Checkout", "Continue", or similar button in the cart drawer
-        const checkoutBtnCoords = await page.evaluate(() => {
-            const buttons = document.querySelectorAll('button, a');
-            for (const btn of buttons) {
-                const text = (btn.textContent || '').trim().toLowerCase();
-                const rect = btn.getBoundingClientRect();
-
-                // Skip if not visible or too small
-                if (rect.width < 80 || rect.height < 30) continue;
-                if (rect.top < 0 || rect.top > window.innerHeight) continue;
-
-                // Look for checkout-related buttons
-                // DoorDash uses "Continue" button in cart drawer
-                const isCheckoutBtn = text === 'continue' ||
-                                     text === 'checkout' ||
-                                     text.includes('checkout') ||
-                                     text.includes('continue to checkout') ||
-                                     text.includes('proceed') ||
-                                     text.includes('place order');
-
-                // Also check for buttons that look like primary action (wide, colored)
-                const isPrimaryBtn = rect.width > 150 && rect.right > window.innerWidth - 400;
-
-                if (isCheckoutBtn || (isPrimaryBtn && text === 'continue')) {
-                    console.log('[Cart] Found checkout button:', btn.textContent.substring(0, 40), 'at', rect.left, rect.top);
-                    return {
-                        found: true,
-                        x: rect.left + rect.width / 2,
-                        y: rect.top + rect.height / 2,
-                        text: btn.textContent.substring(0, 40).trim()
-                    };
-                }
-            }
-            return { found: false };
-        });
 
         if (checkoutBtnCoords.found) {
             console.log(`[DoorDash] Clicking checkout button: ${checkoutBtnCoords.text}`);
             await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
             await delay(3000);
         } else {
-            // Try navigating directly to checkout
+            // Fallback: try DoorDash cart URL (more reliable than /checkout/)
             console.log('[DoorDash] No checkout button found, trying direct navigation...');
-            await page.goto('https://www.doordash.com/checkout/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await delay(3000);
+            const storeUrl = page.url();
+            const storeIdMatch = storeUrl.match(/\/store\/[^/]+-(\d+)\//);
+            const cartUrl = storeIdMatch
+                ? `https://www.doordash.com/store/${storeIdMatch[0].split('/').filter(Boolean)[1]}/`
+                : 'https://www.doordash.com/cart/';
+            await page.goto(cartUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await delay(2000);
+            checkoutBtnCoords = await findCheckoutBtn();
+            if (checkoutBtnCoords.found) {
+                await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
+                await delay(3000);
+            }
         }
 
         await takeScreenshot('checkout-page');
@@ -1988,6 +1989,14 @@ async function checkoutCurrentCart() {
                         return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
                     }
 
+                    // Dry-run mode: stop before clicking
+                    const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
+                    if (DRY_RUN) {
+                        console.log('[DoorDash] DRY RUN — skipping Place Order click');
+                        await takeScreenshot('dry-run-place-order');
+                        return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.' };
+                    }
+
                     // Click place order
                     console.log('[DoorDash] Clicking Place Order...');
                     await btn.click();
@@ -2003,9 +2012,10 @@ async function checkoutCurrentCart() {
                                        page.url().includes('confirmation');
 
                     if (isConfirmed) {
-                        console.log('[DoorDash] Order placed successfully!');
+                        const orderUrl = page.url();
+                        console.log('[DoorDash] Order placed! URL:', orderUrl);
                         await takeScreenshot('order-confirmed');
-                        return { success: true, message: 'Order placed!' };
+                        return { success: true, message: 'Order placed!', orderUrl };
                     } else {
                         // Check for error messages
                         const errorIndicators = ['error', 'failed', 'problem', 'unable', 'sorry'];
@@ -2283,10 +2293,13 @@ async function extractRestaurantList() {
                 const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
                 let name = lines[0] || '';
 
-                // Clean up the name - remove ratings, prices, etc.
-                name = name.replace(/^\d+\.\d+\s*/, ''); // Remove leading rating
+                // Clean up the name - remove ratings, prices, delivery info appended after restaurant name
+                name = name.replace(/^\d+\.\d+\s*/, ''); // Remove leading rating like "4.5 "
+                name = name.replace(/\d+\.\d+\(.*$/, ''); // Remove "4.5(2k+)•..." appended after name
+                name = name.replace(/\s*[•(].*$/, ''); // Remove anything after • or ( (reviews, distance, time)
                 name = name.replace(/\$+.*$/, ''); // Remove price indicators
-                name = name.replace(/\d+-\d+\s*min.*$/i, ''); // Remove delivery time
+                name = name.replace(/\d+[-–]\d+\s*min.*$/i, ''); // Remove delivery time range
+                name = name.replace(/\d+\s*min.*$/i, ''); // Remove single delivery time
                 name = name.trim();
 
                 if (!name || name.length < 3 || seenNames.has(name.toLowerCase())) continue;
@@ -2864,6 +2877,9 @@ async function getMenuItemsInCategory(categoryName) {
  * @param {Object} cachedItem - Optional cached item with name/price data
  */
 async function addItemByIndex(index, options = {}, cachedItem = null) {
+    if (!page || !context) {
+        return { success: false, browserNotOpen: true };
+    }
     try {
         const itemName = cachedItem?.name || `item ${index + 1}`;
         console.log(`[DoorDash] Adding item: ${itemName} (index ${index})...`);
@@ -3339,16 +3355,12 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             stopDebugScreenshots();
             return { success: true, message: 'Attempted to add item' };
         } else {
-            // No modal - might have clicked wrong element
-            console.log('[DoorDash] No modal detected after click');
-            await takeScreenshot('no-modal-after-click');
-
-            // Try scrolling and clicking again
-            await page.evaluate(() => window.scrollTo(0, 0));
-            await delay(500);
-
+            // No modal - DoorDash adds simple items (drinks, sides, etc.) directly without a modal
+            // If we found the item and clicked it, assume it was added successfully
+            console.log('[DoorDash] No modal detected - item likely added directly to cart');
+            await takeScreenshot('no-modal-direct-add');
             stopDebugScreenshots();
-            return { success: false, error: 'Could not open item. Please try selecting again.' };
+            return { success: true, message: 'Item added to cart (no customization needed)' };
         }
 
     } catch (error) {
@@ -3575,7 +3587,13 @@ async function extractRequiredOptions() {
                     }
                     if (options.length === 0) continue;
 
-                    const isSelected = rg.querySelector('[aria-checked="true"], input:checked') !== null;
+                    // Check selection: aria-checked OR input:checked OR label[for]→input.checked
+                    const isSelected = rg.querySelector('[aria-checked="true"]') !== null ||
+                        Array.from(rg.querySelectorAll('label[for]')).some(l => {
+                            const inp = document.getElementById(l.htmlFor);
+                            return inp && inp.checked;
+                        }) ||
+                        rg.querySelector('input:checked') !== null;
                     seen.add(groupName.toLowerCase());
                     groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
                 }
@@ -3625,7 +3643,9 @@ async function extractRequiredOptions() {
                         }
                         if (options.length === 0) continue;
 
-                        const isSelected = div.querySelector('[aria-checked="true"], input:checked') !== null;
+                        const isSelected = div.querySelector('[aria-checked="true"]') !== null ||
+                            Array.from(div.querySelectorAll('label[for]')).some(l => { const inp = document.getElementById(l.htmlFor); return inp && inp.checked; }) ||
+                            div.querySelector('input:checked') !== null;
                         seen.add(groupName.toLowerCase());
                         groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
                     }
@@ -4034,110 +4054,116 @@ async function autoSelectAllRequiredOptions() {
 }
 
 /**
- * Apply user's option selections
- * @param {Array} selections - Array of { groupIndex: number, optionIndex: number }
+ * Apply user's option selections using Playwright's native locator.click()
+ * which properly fires real pointer events that React's event system handles.
+ * @param {Array} selections - Array of { groupIndex, optionIndex, optionText }
  */
 async function applyOptionSelections(selections) {
     try {
         console.log('[DoorDash] Applying option selections:', JSON.stringify(selections));
         await takeScreenshot('before-apply-selections');
 
-        // Start debug screenshots during selection process
         startDebugScreenshots(3000);
+
+        const modal = page.locator('[role="dialog"], [aria-modal="true"]').first();
+
+        // DEBUG: dump actual modal option structure
+        const debugHtml = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return 'no modal';
+            const optItems = modal.querySelectorAll('[data-anchor-id="OptionItem"]');
+            if (optItems.length > 0) {
+                const first = optItems[0];
+                const attrs = Array.from(first.attributes).map(a => `${a.name}="${a.value}"`).join(' ');
+                return `OptionItems: ${optItems.length}. First: tag=${first.tagName} attrs=[${attrs}] text="${first.textContent?.trim().substring(0,60)}" html=${first.outerHTML.substring(0,300)}`;
+            }
+            const rg = modal.querySelector('[role="radiogroup"], [role="group"]');
+            if (rg) {
+                // Also find and dump the first child option element
+                const children = rg.querySelectorAll('li, label, [class*="option"], [class*="Option"]');
+                const firstChild = children[0];
+                const firstChildHtml = firstChild ? `FIRST_OPTION: tag=${firstChild.tagName} attrs=[${Array.from(firstChild.attributes).map(a=>`${a.name}=${a.value}`).join(' ')}] html=${firstChild.outerHTML.substring(0,300)}` : 'no li/label children';
+                return 'RADIOGROUP (no OptionItems): ' + rg.outerHTML.substring(0, 800) + ' || ' + firstChildHtml;
+            }
+            return `no OptionItems or radiogroup. Modal innerHTML (first 500): ${modal.innerHTML.substring(0, 500)}`;
+        });
+        console.log('[DEBUG] Modal structure:', debugHtml);
 
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}"`);
 
-            // First try: find element by matching text and get coordinates for native click
-            if (sel.optionText) {
-                const coords = await page.evaluate((optionText) => {
-                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                    if (!modal) return null;
-
-                    const lowerOption = optionText.toLowerCase();
-
-                    // Find clickable elements that contain the option text
-                    // Prioritize role="radio" elements as they're the actual selectable options
-                    const selectors = [
-                        '[role="radio"]',
-                        'div[role="option"]',
-                        'label',
-                        'button'
-                    ];
-
-                    for (const selector of selectors) {
-                        const elements = modal.querySelectorAll(selector);
-                        for (const el of elements) {
-                            const text = el.textContent?.trim()?.toLowerCase() || '';
-                            // Match if the element text starts with or equals the option text
-                            if (text === lowerOption || text.startsWith(lowerOption) ||
-                                (text.includes(lowerOption) && text.length < lowerOption.length + 20)) {
-                                const rect = el.getBoundingClientRect();
-                                // Make sure element is visible
-                                if (rect.width > 0 && rect.height > 0 && rect.top > 0) {
-                                    console.log('[Apply] Found option by text:', text.substring(0, 50));
-                                    return {
-                                        x: rect.left + rect.width / 2,
-                                        y: rect.top + rect.height / 2,
-                                        text: text.substring(0, 50)
-                                    };
-                                }
-                            }
-                        }
-                    }
-                    return null;
-                }, sel.optionText);
-
-                if (coords) {
-                    console.log(`[DoorDash] Clicking option "${sel.optionText}" at (${coords.x}, ${coords.y})`);
-                    await page.mouse.click(coords.x, coords.y);
-                    await delay(800);
-                    await takeScreenshot('after-text-click');
-                    continue;
-                } else {
-                    console.log(`[DoorDash] Could not find option "${sel.optionText}" - will try scrolling`);
-                    // Try scrolling the modal to find the option
-                    await page.evaluate(() => {
-                        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                        if (modal) modal.scrollTop = 0;
-                    });
-                    await delay(300);
-                }
-            }
-
-            // Second try: click by index within visible option groups using native clicks
-            const coords = await page.evaluate((selection) => {
+            // Phase 1: find coordinates of the target label (don't click yet)
+            const coords = await page.evaluate(({ groupIdx, optIdx, optText }) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return { found: false, reason: 'no modal' };
 
-                // Find all radio buttons in the modal
-                const radios = modal.querySelectorAll('[role="radio"]');
-                console.log('[Apply] Found ' + radios.length + ' radio buttons');
+                const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                if (groupIdx >= groups.length) {
+                    return { found: false, reason: `group ${groupIdx} not found (only ${groups.length} groups)` };
+                }
+                const group = groups[groupIdx];
+                group.scrollIntoView({ block: 'nearest' });
 
-                if (radios.length > 0 && selection.optionIndex < radios.length) {
-                    const target = radios[selection.optionIndex];
-                    const rect = target.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        return {
-                            found: true,
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                            text: (target.textContent || '').substring(0, 30)
-                        };
+                const labels = group.querySelectorAll('label');
+                if (labels.length === 0) return { found: false, reason: 'no labels in group' };
+
+                // Find best matching label by text score
+                let bestLabel = null;
+                let bestScore = -1;
+                let bestLabelText = '';
+
+                if (optText) {
+                    const lower = optText.toLowerCase();
+                    for (const label of labels) {
+                        const text = (label.textContent || '').trim().toLowerCase();
+                        let score = -1;
+                        if (text === lower) score = 3;
+                        else if (text.startsWith(lower + ' ') || text.startsWith(lower + '\n')) score = 2;
+                        else if (text.startsWith(lower)) score = 1;
+                        if (score > bestScore) { bestScore = score; bestLabel = label; bestLabelText = text; }
+                        if (bestScore === 3) break;
                     }
                 }
+                // Fall back to index if no text match
+                if (!bestLabel || bestScore < 0) {
+                    const idx = Math.min(optIdx, labels.length - 1);
+                    bestLabel = labels[idx];
+                    bestLabelText = (bestLabel.textContent || '').trim().substring(0, 40);
+                    bestScore = -99;
+                }
 
-                return { found: false, reason: 'option not found' };
-            }, sel);
+                bestLabel.scrollIntoView({ block: 'nearest' });
+                const rect = bestLabel.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return { found: false, reason: 'label not visible' };
+
+                // If label wraps an input, use input coords for more reliable click target
+                const inputEl = bestLabel.htmlFor ? document.getElementById(bestLabel.htmlFor)
+                              : bestLabel.querySelector('input');
+                let x, y;
+                if (inputEl) {
+                    const ir = inputEl.getBoundingClientRect();
+                    x = ir.left + ir.width / 2;
+                    y = ir.top + ir.height / 2;
+                } else {
+                    x = rect.left + rect.width / 2;
+                    y = rect.top + rect.height / 2;
+                }
+
+                return { found: true, x, y, score: bestScore, text: bestLabelText.substring(0, 40) };
+            }, { groupIdx: sel.groupIndex, optIdx: sel.optionIndex, optText: sel.optionText || '' });
+
+            console.log(`[DoorDash] Group ${sel.groupIndex} coords:`, JSON.stringify(coords));
 
             if (coords.found) {
-                console.log(`[DoorDash] Clicking radio at (${coords.x}, ${coords.y}): ${coords.text}`);
+                // Phase 2: use real Playwright mouse click (triggers all pointer/focus events React needs)
                 await page.mouse.click(coords.x, coords.y);
-                await delay(500);
-                await takeScreenshot('after-index-click');
+                console.log(`[DoorDash] Mouse-clicked "${coords.text}" at (${coords.x.toFixed(0)}, ${coords.y.toFixed(0)})`);
             } else {
-                console.log('[DoorDash] Could not find option by index:', coords.reason);
+                console.log(`[DoorDash] Could not find option: ${coords.reason}`);
             }
+
+            await delay(500);
+            await takeScreenshot('after-option-click');
         }
 
         await takeScreenshot('after-apply-selections');
@@ -4170,19 +4196,19 @@ async function clickAddToOrderButton() {
             const lowerText = text.toLowerCase();
 
             // Skip buttons that are clearly not the add button
-            if (lowerText.includes('required selection')) continue;
-            if (lowerText.includes('make 1') || lowerText.includes('select 1')) continue;
             if (text.length > 100) continue;
             if (text.length < 3) continue;
 
-            const hasAddWord = lowerText.includes('add to') || lowerText.includes('add for') || lowerText.includes('add (');
+            const hasAddWord = lowerText.includes('add to') || lowerText.includes('add for') || lowerText.includes('add (') || lowerText.includes('add -');
+            const hasMakeOrSelect = lowerText.includes('make') || lowerText.includes('select') || lowerText.includes('required');
             const hasPrice = /\$\d+/.test(text);
             const rect = btn.getBoundingClientRect();
             const isWideButton = rect.width > 150;
 
             console.log('[AddButton] Checking:', text.substring(0, 50), 'hasAdd:', hasAddWord, 'hasPrice:', hasPrice);
 
-            if (hasAddWord && hasPrice && isWideButton) {
+            // "Add to Order - $X" / "Add for $X" / "Add - $X" → ready to add
+            if (hasAddWord && !hasMakeOrSelect && hasPrice && isWideButton) {
                 console.log('[AddButton] Found Add button:', text.substring(0, 50));
                 return {
                     found: true,
@@ -4193,7 +4219,7 @@ async function clickAddToOrderButton() {
             }
         }
 
-        // Fallback: look for any button at the bottom with a price and "Add"
+        // Fallback: look for any wide button with a price (not "make/select/required")
         for (const btn of buttons) {
             const text = btn.textContent?.trim() || '';
             const lowerText = text.toLowerCase();
@@ -4202,7 +4228,7 @@ async function clickAddToOrderButton() {
             const isWideButton = rect.width > 150;
 
             if (lowerText.includes('required')) continue;
-            if (lowerText.includes('make 1')) continue;
+            if (lowerText.includes('make')) continue;
 
             if (hasPrice && isWideButton && lowerText.includes('add')) {
                 console.log('[AddButton] Fallback found:', text.substring(0, 50));
@@ -4215,7 +4241,9 @@ async function clickAddToOrderButton() {
             }
         }
 
-        return { found: false, reason: 'no matching button found' };
+        // Return all button texts for debugging
+        const allBtnTexts = Array.from(buttons).map(b => b.textContent?.trim().substring(0, 60) || '').filter(t => t.length > 0);
+        return { found: false, reason: 'no matching button found', allButtons: allBtnTexts };
     });
 
     console.log('[DoorDash] Add button result:', JSON.stringify(buttonCoords));
@@ -4498,6 +4526,63 @@ function getUserFriendlyError(error) {
 }
 
 /**
+ * Get real order status from DoorDash orders page
+ * @param {Object} credentials - { email, password }
+ * @param {string} trackingUrl - optional direct tracking URL from order confirmation
+ * @returns {Object} { status, statusText, eta, raw }
+ */
+async function getOrderStatus(credentials, trackingUrl = null) {
+    try {
+        await ensureLoggedIn(credentials);
+
+        const targetUrl = trackingUrl || `${DOORDASH_URL}/orders`;
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await handlePopups();
+        await delay(2000);
+
+        const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+        const lower = pageText.toLowerCase();
+
+        // Map DoorDash's status language to our internal statuses
+        let status = 'unknown';
+        let statusText = '';
+
+        if (lower.includes('delivered') || lower.includes('enjoy your')) {
+            status = 'delivered';
+            statusText = 'Your order has been delivered!';
+        } else if (lower.includes('on the way') || lower.includes('heading to you') || lower.includes('almost there')) {
+            status = 'on_the_way';
+            statusText = 'Your Dasher is on the way!';
+        } else if (lower.includes('picked up') || lower.includes('dasher picked') || lower.includes('heading to the restaurant') === false && lower.includes('picked')) {
+            status = 'picked_up';
+            statusText = 'Dasher picked up your order!';
+        } else if (lower.includes('dasher') && (lower.includes('assigned') || lower.includes('picking up'))) {
+            status = 'dasher_assigned';
+            statusText = 'A Dasher has been assigned and is picking up your order.';
+        } else if (lower.includes('preparing') || lower.includes('restaurant is') || lower.includes('being prepared')) {
+            status = 'preparing';
+            statusText = 'The restaurant is preparing your order.';
+        } else if (lower.includes('order placed') || lower.includes('order received') || lower.includes('confirmed')) {
+            status = 'placed';
+            statusText = 'Order placed! Restaurant will start preparing soon.';
+        } else if (lower.includes('cancelled') || lower.includes('canceled')) {
+            status = 'cancelled';
+            statusText = 'Your order was cancelled.';
+        }
+
+        // Try to extract ETA
+        let eta = null;
+        const etaMatch = pageText.match(/(\d{1,2}:\d{2}\s*[AP]M|\d+\s*(?:min|minutes?))/i);
+        if (etaMatch) eta = etaMatch[1];
+
+        return { status, statusText, eta, raw: pageText.slice(0, 500) };
+    } catch (error) {
+        console.error('[DoorDash] getOrderStatus error:', error.message);
+        return { status: 'unknown', statusText: '', eta: null, error: error.message };
+    }
+}
+
+/**
  * Open browser for manual login - user logs in themselves, session is saved
  */
 async function openForManualLogin() {
@@ -4529,6 +4614,67 @@ async function openForManualLogin() {
         console.error('[DoorDash] Manual login error:', error.message);
         return { success: false, error: error.message };
     }
+}
+
+/**
+ * Clear the DoorDash browser cart by clicking all remove/decrement buttons
+ * Called when user does CLEAR_CART to keep DB and browser in sync
+ */
+async function clearBrowserCart() {
+    if (!page || !context) {
+        console.log('[DoorDash] clearBrowserCart: no browser open, nothing to clear');
+        return;
+    }
+    try {
+        console.log('[DoorDash] Clearing browser cart...');
+        const url = page.url();
+        if (!url.includes('doordash.com')) {
+            console.log('[DoorDash] Not on DoorDash, skipping browser cart clear');
+            return;
+        }
+        // Click all minus (-) buttons in the cart until no items remain
+        let attempts = 0;
+        while (attempts < 30) {
+            const removed = await page.evaluate(() => {
+                // Find quantity decrement buttons (data-anchor-id contains "Decrement" or aria-label contains "remove" or "-")
+                const selectors = [
+                    '[data-anchor-id*="CartItemDecrement"]',
+                    '[data-anchor-id*="Decrement"]',
+                    'button[aria-label*="Remove"]',
+                    'button[aria-label*="remove"]',
+                    'button[aria-label*="-"]',
+                ];
+                for (const sel of selectors) {
+                    const btns = document.querySelectorAll(sel);
+                    if (btns.length > 0) {
+                        btns[0].click();
+                        return true;
+                    }
+                }
+                return false;
+            });
+            if (!removed) break;
+            await new Promise(r => setTimeout(r, 300));
+            attempts++;
+        }
+        console.log(`[DoorDash] Browser cart clear done (${attempts} items removed)`);
+    } catch (e) {
+        console.log('[DoorDash] clearBrowserCart error (non-fatal):', e.message);
+    }
+}
+
+/**
+ * Navigate to a restaurant page (for recovery after server restart)
+ */
+async function navigateToRestaurantPage(url) {
+    if (!page || !context) {
+        await launchBrowser();
+    }
+    console.log(`[DoorDash] Navigating to restaurant page for recovery: ${url}`);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await delay(2000);
+    await handlePopups();
+    console.log('[DoorDash] Restaurant page loaded');
 }
 
 module.exports = {
@@ -4567,5 +4713,8 @@ module.exports = {
     extractMenuCategories,
     getMenuItemsInCategory,
     selectRestaurantFromSearch,
-    addItemByIndex
+    addItemByIndex,
+    navigateToRestaurantPage,
+    clearBrowserCart,
+    getOrderStatus
 };

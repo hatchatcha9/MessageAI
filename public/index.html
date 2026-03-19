@@ -239,7 +239,7 @@
             <div class="phone-header">
                 <div class="contact-info">
                     <div class="contact-name">MessageAI</div>
-                    <div class="contact-number">+1 (555) AI-HELP</div>
+                    <div class="contact-number">+1 (801) 346-2263</div>
                 </div>
             </div>
 
@@ -265,8 +265,12 @@
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
 
-        // Simulated phone number for this session
-        const phoneNumber = '+1' + Math.floor(Math.random() * 9000000000 + 1000000000);
+        // Persist phone number across refreshes so session/history is preserved
+        let phoneNumber = localStorage.getItem('messageai_phone');
+        if (!phoneNumber) {
+            phoneNumber = '+1' + Math.floor(Math.random() * 9000000000 + 1000000000);
+            localStorage.setItem('messageai_phone', phoneNumber);
+        }
 
         function addMessage(text, type) {
             const message = document.createElement('div');
@@ -335,6 +339,11 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ phoneNumber })
                 });
+
+                // Reset phone number so next session is fully fresh
+                localStorage.removeItem('messageai_phone');
+                phoneNumber = '+1' + Math.floor(Math.random() * 9000000000 + 1000000000);
+                localStorage.setItem('messageai_phone', phoneNumber);
 
                 // Clear UI
                 messagesContainer.innerHTML = '';
