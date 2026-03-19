@@ -1474,6 +1474,18 @@ app.post('/api/clear', (req, res) => {
     res.json({ success: true });
 });
 
+// Health check — shows env var status without exposing values
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        anthropicKey: process.env.ANTHROPIC_API_KEY ? `set (${process.env.ANTHROPIC_API_KEY.length} chars)` : 'MISSING',
+        twilio: process.env.TWILIO_ACCOUNT_SID ? 'set' : 'MISSING',
+        doordashEmail: process.env.DOORDASH_EMAIL ? 'set' : 'MISSING',
+        dbPath: process.env.DB_PATH || 'default',
+        browserDataDir: process.env.BROWSER_DATA_DIR || 'default'
+    });
+});
+
 // Serve the simulator UI
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
