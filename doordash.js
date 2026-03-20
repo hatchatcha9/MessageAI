@@ -713,49 +713,46 @@ async function login(email, password) {
         await delay(3000);
         await handlePopups();
 
-        // Check if we got SMS verification page - click "Use password instead"
-        console.log('[DoorDash] Checking for SMS verification page...');
-        const usePasswordSelectors = [
-            'text="Use password instead"',
-            'a:has-text("Use password instead")',
-            'button:has-text("Use password instead")',
-            'span:has-text("Use password instead")'
-        ];
+        // Step 3: Wait for either password field or "Use password instead" link
+        console.log('[DoorDash] Waiting for password field or OTP page...');
+        let passwordInput = null;
 
-        for (const selector of usePasswordSelectors) {
-            try {
-                const link = await page.$(selector);
-                if (link && await link.isVisible()) {
-                    console.log('[DoorDash] Found "Use password instead" - clicking it...');
-                    await link.click({ force: true });
-                    await delay(2000);
-                    break;
-                }
-            } catch (e) {
-                continue;
-            }
+        // Race: password field vs OTP/verification page
+        try {
+            await Promise.race([
+                page.waitForSelector('input[type="password"]', { timeout: 8000 }),
+                page.waitForSelector(':text("password instead"), :text("Password instead"), :text("Use password")', { timeout: 8000 }),
+            ]);
+        } catch (e) {
+            console.log('[DoorDash] Neither password nor OTP page detected yet, continuing...');
         }
 
-        // Step 3: Wait for and fill password
-        console.log('[DoorDash] Waiting for password field...');
-        let passwordInput = null;
-        try {
-            await page.waitForSelector('input[type="password"]', { timeout: 10000 });
-            passwordInput = await page.$('input[type="password"]');
-        } catch (e) {
-            // Still no password field - check for "Use password instead" again
+        // If no password field, try to find and click "Use password instead"
+        passwordInput = await page.$('input[type="password"]');
+        if (!passwordInput) {
             await takeScreenshot('looking-for-password');
-            for (const selector of usePasswordSelectors) {
-                try {
-                    const link = await page.$(selector);
-                    if (link && await link.isVisible()) {
-                        console.log('[DoorDash] Clicking "Use password instead"...');
-                        await link.click({ force: true });
-                        await delay(2000);
-                        passwordInput = await page.$('input[type="password"]');
-                        break;
+            console.log('[DoorDash] No password field — looking for "Use password instead" link...');
+
+            // Search all links/buttons for any text containing "password"
+            const clicked = await page.evaluate(() => {
+                const els = [...document.querySelectorAll('a, button, span, div')];
+                for (const el of els) {
+                    const text = (el.textContent || '').toLowerCase();
+                    if (text.includes('password instead') || text.includes('use password')) {
+                        el.click();
+                        return true;
                     }
-                } catch (e2) {}
+                }
+                return false;
+            });
+
+            if (clicked) {
+                console.log('[DoorDash] Clicked "Use password instead"');
+                await delay(2000);
+                passwordInput = await page.$('input[type="password"]');
+            } else {
+                console.log('[DoorDash] "Use password instead" not found on page');
+                await takeScreenshot('password-field-not-found');
             }
         }
 
