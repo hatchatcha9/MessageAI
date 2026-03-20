@@ -2426,6 +2426,100 @@ async function extractMenuItems() {
         console.log('[DoorDash] Starting menu item extraction...');
         await takeScreenshot('extract-menu-start');
 
+        // Wait for any price to appear on page (indicates menu loaded)
+        try {
+            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 10000 });
+        } catch (e) {
+            console.log('[DoorDash] No prices detected after 10s');
+        }
+
+        // Scroll the full page to trigger lazy loading, then scroll back
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await delay(2000);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await delay(1000);
+        await takeScreenshot('extract-menu-start');
+
+        // Extract ALL elements with prices in one shot — no viewport filtering
+        const extracted = await page.evaluate(() => {
+            const results = [];
+            const seen = new Set();
+
+            // Walk every element that contains a dollar price
+            const all = document.querySelectorAll('button, a, article, li, div, section, [role="button"], [role="listitem"]');
+            for (const el of all) {
+                // Skip tiny/hidden/script elements
+                if (el.offsetWidth < 80 || el.offsetHeight < 40) continue;
+                if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
+
+                const text = (el.textContent || '').trim();
+                const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
+                if (!priceMatch) continue;
+
+                const price = parseFloat(priceMatch[1]);
+                if (price < 1 || price > 100) continue;
+
+                // Skip elements that are too short or too long (likely wrappers)
+                if (text.length < 5 || text.length > 500) continue;
+
+                // Skip if any child also has a price (we want the leaf item, not a wrapper)
+                const children = el.querySelectorAll('*');
+                let childHasPrice = false;
+                for (const child of children) {
+                    if (child.offsetWidth < 80 || child.offsetHeight < 40) continue;
+                    if ((child.textContent || '').match(/\$\d+/)) { childHasPrice = true; break; }
+                }
+                if (childHasPrice) continue;
+
+                // Extract name: first non-price, non-empty line
+                const lines = text.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                let name = '';
+                for (const line of lines) {
+                    if (!line.includes('$') && !line.match(/^\d+$/) && !line.match(/cal/i) && line.length < 80) {
+                        name = line.split('•')[0].trim();
+                        break;
+                    }
+                }
+                if (!name || name.length < 3) continue;
+
+                const key = name.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                const rect = el.getBoundingClientRect();
+                results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+            }
+
+            return results.slice(0, 30);
+        });
+
+        console.log(`[DoorDash] Extracted ${extracted.length} menu items`);
+        for (let i = 0; i < extracted.length; i++) {
+            const item = extracted[i];
+            menuItems.push({
+                id: `item-${i}`,
+                index: i,
+                name: item.name,
+                price: item.price,
+                description: '',
+                x: item.x || 0,
+                y: item.y || 0
+            });
+            console.log(`[DoorDash] Item ${i + 1}: "${item.name}" - $${item.price}`);
+        }
+
+        await takeScreenshot('extract-menu-done');
+        return menuItems;
+
+    } catch (error) {
+        console.error('[DoorDash] Extract menu error:', error.message);
+        await takeScreenshot('extract-menu-error');
+    }
+
+    // --- OLD SCROLL-BASED EXTRACTION BELOW (kept as fallback reference) ---
+    // (unreachable — kept for rollback reference only)
+    if (false) {
+
         // Wait for page to fully load
         await delay(2000);
 
@@ -2678,28 +2772,7 @@ async function extractMenuItems() {
             console.log(`[DoorDash] Fallback found ${fallbackItems.length} items`);
         }
 
-        // Add all items to menuItems with proper structure
-        for (let i = 0; i < Math.min(allExtractedItems.length, 25); i++) {
-            const item = allExtractedItems[i];
-            menuItems.push({
-                id: `item-${i}`,
-                index: i,
-                name: item.name,
-                price: item.price,
-                description: '',
-                x: item.x || 0,
-                y: item.y || 0
-            });
-            console.log(`[DoorDash] Item ${i + 1}: "${item.name}" - $${item.price}`);
-        }
-        console.log(`[DoorDash] ===== END EXTRACTION (${menuItems.length} items) =====`);
-
-        await takeScreenshot('extract-menu-done');
-
-    } catch (error) {
-        console.error('[DoorDash] Extract menu error:', error.message);
-        await takeScreenshot('extract-menu-error');
-    }
+    } // end if (false) — old extraction code
 
     return menuItems;
 }
