@@ -8,6 +8,13 @@ const db = require('./db');
 const restaurants = require('./restaurants');
 const doordash = require('./doordash');
 
+// In-memory log buffer for remote debugging
+const logBuffer = [];
+const _origLog = console.log.bind(console);
+const _origErr = console.error.bind(console);
+console.log = (...args) => { const line = args.join(' '); logBuffer.push(line); if (logBuffer.length > 300) logBuffer.shift(); _origLog(...args); };
+console.error = (...args) => { const line = '[ERR] ' + args.join(' '); logBuffer.push(line); if (logBuffer.length > 300) logBuffer.shift(); _origErr(...args); };
+
 const CRASH_LOG = 'C:/Users/hatch/Projects/MessageAI/crash.log';
 process.on('uncaughtException', (err) => {
     fs.appendFileSync(CRASH_LOG, `\n[${new Date().toISOString()}] UncaughtException:\n${err?.stack || err}\n`);
@@ -1502,6 +1509,11 @@ app.post('/api/doordash/manual-login', async (req, res) => {
     } else {
         console.log('[Manual Login] Failed:', result.error);
     }
+});
+
+// Remote log viewer
+app.get('/logs', (req, res) => {
+    res.type('text/plain').send(logBuffer.slice(-150).join('\n'));
 });
 
 // Export DoorDash cookies (run locally, paste into Railway env)
