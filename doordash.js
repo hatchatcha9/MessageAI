@@ -2084,15 +2084,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('1-loaded-homepage');
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
-        // Step 3: Check if logged in using account UI indicators
-        const loggedIn = await isLoggedIn();
-        console.log('[DoorDash] Logged in:', loggedIn);
+        // Step 3: Check if logged in — skip if cookies were pre-loaded via env var
+        const hasCookieEnv = !!process.env.DOORDASH_COOKIES;
+        const loggedIn = hasCookieEnv ? true : await isLoggedIn();
+        console.log('[DoorDash] Logged in:', loggedIn, '(cookie env:', hasCookieEnv, ')');
 
         if (!loggedIn) {
             console.log('[DoorDash] Not logged in, attempting login...');
             const loginResult = await login(email, password);
             if (!loginResult.success) {
-                // One more check — cookies may have loaded us in despite login() failing
                 const recheckOk = await isLoggedIn();
                 if (!recheckOk) {
                     return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
