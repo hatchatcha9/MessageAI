@@ -293,6 +293,18 @@ async function launchBrowser(headless = HEADLESS) {
 
     updateSessionState({ launched: true });
     console.log('[DoorDash] Browser launched');
+
+    // Auto-import cookies from env var whenever browser launches
+    if (process.env.DOORDASH_COOKIES) {
+        try {
+            const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
+            await context.addCookies(cookies);
+            console.log(`[DoorDash] Auto-imported ${cookies.length} cookies on launch`);
+        } catch (e) {
+            console.error('[DoorDash] Failed to auto-import cookies:', e.message);
+        }
+    }
+
     return page;
 }
 
@@ -4679,6 +4691,16 @@ async function clearBrowserCart() {
 async function navigateToRestaurantPage(url) {
     if (!page || !context) {
         await launchBrowser();
+        // Re-import cookies after crash recovery
+        if (process.env.DOORDASH_COOKIES) {
+            try {
+                const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
+                await context.addCookies(cookies);
+                console.log(`[DoorDash] Re-imported ${cookies.length} cookies after browser relaunch`);
+            } catch (e) {
+                console.error('[DoorDash] Failed to re-import cookies:', e.message);
+            }
+        }
     }
     console.log(`[DoorDash] Navigating to restaurant page for recovery: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
