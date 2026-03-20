@@ -824,6 +824,8 @@ async function processCommands(response, user, phoneNumber) {
                 // Real DoorDash item - get from cache and add via automation
                 const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
 
+                const menuLen = currentRestaurant?.menu?.length ?? 'no menu';
+                console.log(`[ADD_ITEM_NUM] Cache check: restaurant=${!!currentRestaurant}, menuLen=${menuLen}, num=${num}`);
                 if (currentRestaurant && currentRestaurant.menu && currentRestaurant.menu[num]) {
                     const item = currentRestaurant.menu[num];
 
@@ -938,7 +940,7 @@ async function processCommands(response, user, phoneNumber) {
                         additionalContext = `\n\nError adding item. Please try again.`;
                     }
                 } else {
-                    additionalContext = `\n\nSorry, couldn't find that item. The menu may have changed.`;
+                    additionalContext = `\n\nCouldn't find item #${requestedNum} (index ${num}, menu has ${menuLen} items). Try selecting the restaurant again.`;
                 }
             } else {
                 additionalContext = `\n\nPlease search for a DoorDash restaurant first.`;
