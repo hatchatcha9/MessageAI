@@ -294,12 +294,14 @@ async function launchBrowser(headless = HEADLESS) {
     updateSessionState({ launched: true });
     console.log('[DoorDash] Browser launched');
 
-    // Auto-import cookies from env var whenever browser launches
+    // Auto-import DoorDash auth cookies (skip Cloudflare cookies — they're fingerprint-specific)
     if (process.env.DOORDASH_COOKIES) {
         try {
-            const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
-            await context.addCookies(cookies);
-            console.log(`[DoorDash] Auto-imported ${cookies.length} cookies on launch`);
+            const allCookies = JSON.parse(process.env.DOORDASH_COOKIES);
+            const CF_COOKIES = new Set(['cf_clearance', '__cf_bm', '_cfuvid', '__cfwaitingroom']);
+            const authCookies = allCookies.filter(c => !CF_COOKIES.has(c.name));
+            await context.addCookies(authCookies);
+            console.log(`[DoorDash] Auto-imported ${authCookies.length} auth cookies (skipped CF cookies)`);
         } catch (e) {
             console.error('[DoorDash] Failed to auto-import cookies:', e.message);
         }
@@ -4766,12 +4768,14 @@ async function clearBrowserCart() {
 async function navigateToRestaurantPage(url) {
     if (!page || !context) {
         await launchBrowser();
-        // Re-import cookies after crash recovery
+        // Re-import auth cookies after crash (skip CF cookies — fingerprint-specific)
         if (process.env.DOORDASH_COOKIES) {
             try {
-                const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
-                await context.addCookies(cookies);
-                console.log(`[DoorDash] Re-imported ${cookies.length} cookies after browser relaunch`);
+                const allCookies = JSON.parse(process.env.DOORDASH_COOKIES);
+                const CF_COOKIES = new Set(['cf_clearance', '__cf_bm', '_cfuvid', '__cfwaitingroom']);
+                const authCookies = allCookies.filter(c => !CF_COOKIES.has(c.name));
+                await context.addCookies(authCookies);
+                console.log(`[DoorDash] Re-imported ${authCookies.length} auth cookies after relaunch`);
             } catch (e) {
                 console.error('[DoorDash] Failed to re-import cookies:', e.message);
             }
