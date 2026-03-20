@@ -1502,6 +1502,16 @@ app.post('/api/doordash/manual-login', async (req, res) => {
     }
 });
 
+// Export DoorDash cookies (run locally, paste into Railway env)
+app.get('/api/export-cookies', async (req, res) => {
+    const result = await doordash.exportCookies();
+    if (result.success) {
+        res.json({ cookies: result.cookies, count: result.cookies.length });
+    } else {
+        res.status(500).json({ error: result.error });
+    }
+});
+
 // Cleanup expired sessions periodically
 setInterval(() => {
     db.deleteExpiredSessions();
@@ -1652,7 +1662,7 @@ async function checkScheduledOrders() {
 setInterval(checkScheduledOrders, 60 * 1000);
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`\n========================================`);
     console.log(`  MessageAI Server Running!`);
     console.log(`========================================`);
@@ -1662,5 +1672,16 @@ app.listen(PORT, () => {
 
     if (!process.env.ANTHROPIC_API_KEY) {
         console.log('Warning: ANTHROPIC_API_KEY not set in .env file\n');
+    }
+
+    // Auto-import DoorDash cookies from env var (set on Railway to skip login)
+    if (process.env.DOORDASH_COOKIES) {
+        try {
+            const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
+            await doordash.importCookies(cookies);
+            console.log(`[Startup] Imported ${cookies.length} DoorDash cookies from env`);
+        } catch (e) {
+            console.error('[Startup] Failed to import DOORDASH_COOKIES:', e.message);
+        }
     }
 });

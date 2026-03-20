@@ -4680,6 +4680,21 @@ async function navigateToRestaurantPage(url) {
     console.log('[DoorDash] Restaurant page loaded');
 }
 
+async function exportCookies() {
+    if (!context) return { success: false, error: 'Browser not open' };
+    const cookies = await context.cookies();
+    return { success: true, cookies };
+}
+
+async function importCookies(cookies) {
+    if (!context) {
+        await launchBrowser();
+    }
+    await context.addCookies(cookies);
+    console.log(`[DoorDash] Imported ${cookies.length} cookies`);
+    return { success: true };
+}
+
 module.exports = {
     launchBrowser,
     closeBrowser,
@@ -4719,5 +4734,7 @@ module.exports = {
     addItemByIndex,
     navigateToRestaurantPage,
     clearBrowserCart,
-    getOrderStatus
+    getOrderStatus,
+    exportCookies,
+    importCookies
 };
