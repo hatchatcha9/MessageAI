@@ -156,7 +156,7 @@ async function validateSession() {
         // Navigate to DoorDash if not already there
         if (!url.includes('doordash.com')) {
             console.log('[DoorDash] Not on DoorDash, navigating...');
-            await page.goto(DOORDASH_URL, { waitUntil: 'networkidle' });
+            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded' });
             await delay(2000);
         }
 
@@ -617,7 +617,7 @@ async function isLoggedIn() {
         // Don't navigate if we're already on DoorDash
         const currentUrl = page.url();
         if (!currentUrl.includes('doordash.com')) {
-            await page.goto(DOORDASH_URL, { waitUntil: 'networkidle' });
+            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded' });
         }
         await delay(2000);
         await handlePopups();
@@ -663,7 +663,7 @@ async function login(email, password) {
         }
 
         // Navigate to login page
-        await page.goto(`${DOORDASH_URL}/consumer/login`, { waitUntil: 'networkidle' });
+        await page.goto(`${DOORDASH_URL}/consumer/login`, { waitUntil: 'domcontentloaded' });
         await delay(2000);
 
         // Aggressively handle popups before login
@@ -873,7 +873,7 @@ async function login(email, password) {
                 const currentUrl = page.url();
                 if (currentUrl.includes('identity.doordash.com')) {
                     console.log('[DoorDash] Stuck on identity server, navigating to homepage...');
-                    await page.goto(DOORDASH_URL, { waitUntil: 'networkidle' });
+                    await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded' });
                     await delay(3000);
                 }
             }
@@ -1165,7 +1165,7 @@ async function searchRestaurant(name, address = null) {
         }
 
         // Navigate to search or use existing page
-        await page.goto(`${DOORDASH_URL}/search/store/${encodeURIComponent(name)}`, { waitUntil: 'networkidle' });
+        await page.goto(`${DOORDASH_URL}/search/store/${encodeURIComponent(name)}`, { waitUntil: 'domcontentloaded' });
         await delay(2000);
         await handlePopups();
 
@@ -2360,7 +2360,7 @@ async function getRestaurantMenu(credentials, restaurantId, restaurantUrl = null
 
         // Navigate to restaurant page
         const url = restaurantUrl || `${DOORDASH_URL}/store/${restaurantId}/`;
-        await page.goto(url, { waitUntil: 'networkidle' });
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
         await delay(3000);
         await handlePopups();
 
