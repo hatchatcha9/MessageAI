@@ -249,17 +249,18 @@ async function launchBrowser(headless = HEADLESS) {
         fs.mkdirSync(BROWSER_DATA_DIR, { recursive: true });
     }
 
-    // Use real Chrome with a dedicated MessageAI profile (separate from your normal Chrome)
-    // This avoids both DoorDash bot detection AND profile locking conflicts
+    // Use real Chrome if available (local dev), otherwise fall back to bundled Chromium (Railway)
     const CHROME_INSTALLED = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
-    const BOT_PROFILE_DIR = 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile';
+    const BOT_PROFILE_DIR = CHROME_INSTALLED
+        ? 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile'
+        : path.join(BROWSER_DATA_DIR, 'ChromeProfile');
 
     if (!fs.existsSync(BOT_PROFILE_DIR)) {
         fs.mkdirSync(BOT_PROFILE_DIR, { recursive: true });
     }
 
     const launchOptions = {
-        headless: false,
+        headless,
         channel: CHROME_INSTALLED ? 'chrome' : undefined,
         locale: 'en-US',
         timezoneId: 'America/Denver',
