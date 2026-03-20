@@ -2281,9 +2281,14 @@ async function extractRestaurantList() {
                 // Get the href and extract store ID
                 const href = await link.getAttribute('href');
                 if (!href || !href.includes('/store/')) continue;
+                if (i < 5) console.log(`[DoorDash] Sample href[${i}]: ${href}`);
 
-                const storeIdMatch = href.match(/\/store\/(\d+)/);
-                if (!storeIdMatch) continue;
+                // Support both old format /store/12345/ and new format /store/slug/12345/
+                const storeIdMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
+                if (!storeIdMatch) {
+                    console.log(`[DoorDash] No store ID in href: ${href}`);
+                    continue;
+                }
 
                 // Get the text content of the link (restaurant name is usually in here)
                 const textContent = await link.textContent();
