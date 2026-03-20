@@ -9,7 +9,11 @@ const path = require('path');
 const { chromium } = require('playwright');
 
 const SESSION_FILE = path.join(__dirname, 'doordash-session.json');
-const BOT_PROFILE_DIR = 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile';
+const CHROME_INSTALLED_CHECK = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+const BOT_PROFILE_DIR = CHROME_INSTALLED_CHECK
+    ? 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile'
+    : require('path').join(process.env.BROWSER_DATA_DIR || '/data/browser-data', 'ChromeProfile');
+const HEADLESS_API = process.env.DOORDASH_HEADLESS !== 'false';
 const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 // Headers that mimic a real browser request
@@ -66,7 +70,7 @@ async function extractCookiesFromBrowser() {
 
     try {
         context = await chromium.launchPersistentContext(BOT_PROFILE_DIR, {
-            headless: false,
+            headless: HEADLESS_API,
             channel: CHROME_INSTALLED ? 'chrome' : undefined,
             args: [
                 '--disable-blink-features=AutomationControlled',
