@@ -513,7 +513,7 @@ async function processCommands(response, user, phoneNumber) {
                                 cleanResponse = menuText;
                                 additionalContext = '';
                             } else {
-                                additionalContext = '';
+                                additionalContext = `\n\nReached ${restaurantName} but couldn't load menu items. Try selecting again?`;
                             }
                             actions.push({ type: 'select_restaurant_doordash', restaurant: restaurantName, menuItemCount: menuItems.length });
 

@@ -2335,12 +2335,14 @@ async function extractRestaurantList() {
                 const timeMatch = textContent.match(/(\d+-\d+)\s*min/i);
                 const deliveryTime = timeMatch ? timeMatch[0] : '';
 
+                // Strip query params — cursor is session-specific and breaks direct navigation
+                const cleanUrl = `${DOORDASH_URL}/store/${storeIdMatch[1]}/`;
                 restaurants.push({
                     id: storeIdMatch[1],
                     name: name,
                     rating: rating,
                     deliveryTime: deliveryTime,
-                    url: href.startsWith('http') ? href : `${DOORDASH_URL}${href}`,
+                    url: cleanUrl,
                     index: i
                 });
 
