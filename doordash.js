@@ -2176,8 +2176,20 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         console.log(`[DoorDash] Extracted ${restaurants.length} restaurants`);
         await takeScreenshot('6-extraction-done');
 
+        // If nothing found, gather diagnostics
+        if (restaurants.length === 0) {
+            const currentUrl = page.url();
+            const storeLinks = await page.$$('a[href*="/store/"]');
+            const sampleHrefs = [];
+            for (let i = 0; i < Math.min(3, storeLinks.length); i++) {
+                sampleHrefs.push(await storeLinks[i].getAttribute('href'));
+            }
+            const diagMsg = `0 restaurants extracted. URL: ${currentUrl}. Store links: ${storeLinks.length}. Sample hrefs: ${JSON.stringify(sampleHrefs)}`;
+            console.log('[DoorDash] DIAG:', diagMsg);
+            return { success: false, error: diagMsg, restaurants: [] };
+        }
+
         // Sort by rating and return top 5
-        // Sort by relevance to query (exact matches first, then contains, then by rating)
         const sortedRestaurants = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
 
         console.log('[DoorDash] === SEARCH COMPLETE ===');
