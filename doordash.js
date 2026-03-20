@@ -2084,23 +2084,18 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('1-loaded-homepage');
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
-        // Step 3: Check if logged in - look for sign-in prompt to confirm NOT logged in
-        const pageContent = await page.content();
-        const isLoggedIn = !pageContent.includes('Sign in or Sign up') &&
-                           !pageContent.includes('sign-in') &&
-                           (pageContent.includes('/account') || pageContent.includes('/orders'));
-        console.log('[DoorDash] Logged in:', isLoggedIn);
+        // Step 3: Check if logged in using account UI indicators
+        const loggedIn = await isLoggedIn();
+        console.log('[DoorDash] Logged in:', loggedIn);
 
-        if (!isLoggedIn) {
+        if (!loggedIn) {
             console.log('[DoorDash] Not logged in, attempting login...');
             const loginResult = await login(email, password);
             if (!loginResult.success) {
-                // Check again - might actually be logged in
-                await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded' });
-                await delay(2000);
-                const recheckContent = await page.content();
-                if (!recheckContent.includes('/account')) {
-                    return { success: false, error: 'Login failed', restaurants: [] };
+                // One more check — cookies may have loaded us in despite login() failing
+                const recheckOk = await isLoggedIn();
+                if (!recheckOk) {
+                    return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
                 }
             }
             await takeScreenshot('2-after-login');
