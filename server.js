@@ -410,12 +410,11 @@ async function processCommands(response, user, phoneNumber) {
                     additionalContext += `\n\nWhich one? (Reply with the number)`;
                     actions.push({ type: 'search_doordash', query, count: searchResult.restaurants.length });
                 } else {
-                    additionalContext = `\n\nCouldn't find "${query}" restaurants on DoorDash near you. Try a different search?`;
+                    const reason = searchResult.error || 'no results returned';
+                    additionalContext = `\n\nSearch failed (${reason}). Try again?`;
                 }
             } catch (error) {
-                const fs = require('fs');
-                fs.appendFileSync('C:/Users/hatch/Projects/MessageAI/doordash_error.log', `\n[${new Date().toISOString()}] Search error:\n${error?.stack || error}\n`);
-                additionalContext = `\n\nDoorDash search ran into an issue. Please try again in a moment.`;
+                additionalContext = `\n\nSearch crashed: ${error.message}. Try again?`;
             }
         }
     }
