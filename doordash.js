@@ -2085,10 +2085,19 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
     try {
         console.log(`[DoorDash] === BROWSER SEARCH FALLBACK ===`);
 
-        // Step 1: Make sure browser is open
+        // Step 1: Make sure browser is open (and not crashed)
         if (!page || !context) {
             console.log('[DoorDash] Launching browser...');
             await launchBrowser();
+        } else {
+            // Verify page is still alive — a crashed page won't throw on .url() but will on evaluate()
+            try {
+                await page.evaluate(() => 1);
+            } catch (e) {
+                console.log('[DoorDash] Existing page crashed/closed, restarting browser...');
+                await closeBrowser();
+                await launchBrowser();
+            }
         }
 
         // Step 2: Go to DoorDash
@@ -2218,6 +2227,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         console.error('[DoorDash] Browser search error:', error.message);
         console.error('[DoorDash] Stack:', error.stack);
         try { await takeScreenshot('error-' + Date.now()); } catch (e) {}
+
+        // If the browser crashed mid-search, clean up so the next search gets a fresh start
+        if (error.message.includes('crashed') || error.message.includes('Target closed') || error.message.includes('closed')) {
+            console.log('[DoorDash] Browser crash detected during search — cleaning up for fresh restart');
+            try { await closeBrowser(); } catch (e) {}
+        }
 
         return { success: false, error: error.message, restaurants: [] };
     }
