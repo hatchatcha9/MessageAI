@@ -25,11 +25,10 @@ ENV BROWSER_DATA_DIR=/data/browser-data
 ENV DB_PATH=/data/messageai.db
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV DISPLAY=:99
 
 EXPOSE 3000
 
-# xvfb-run starts Xvfb, sets DISPLAY, then runs the app — more reliable than
-# manual Xvfb + sleep. Headed Chrome on Xvfb is indistinguishable from a real
-# browser to Cloudflare (bypasses CF fingerprint detection).
-CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24 -ac +extension GLX +render -noreset", "node", "server.js"]
+# xvfb-run -a auto-assigns a free display number and sets DISPLAY for the child
+# process. Headed Chrome on Xvfb is indistinguishable from a real browser to
+# Cloudflare, bypassing CF fingerprint/bot detection on store pages.
+CMD ["xvfb-run", "-a", "--server-args=-screen 0 1280x720x24 -ac +extension GLX +render -noreset", "node", "server.js"]
