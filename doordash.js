@@ -2800,10 +2800,41 @@ async function selectRestaurantFromSearch(indexOrUrl) {
     try {
         console.log(`[DoorDash] Selecting restaurant: ${indexOrUrl}`);
 
-        // If it's a URL, navigate directly
+        // If it's a URL, click the existing link on the page instead of page.goto().
+        // Direct navigation triggers Cloudflare security verification; clicking from
+        // the search results page has a proper Referer and passes through cleanly.
         if (typeof indexOrUrl === 'string' && indexOrUrl.includes('/store/')) {
-            console.log('[DoorDash] Navigating to restaurant URL...');
-            await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            const storeIdMatch = indexOrUrl.match(/\/store\/(\d+)/);
+            const storeId = storeIdMatch ? storeIdMatch[1] : null;
+
+            let clicked = false;
+            if (storeId && page.url().includes('doordash.com')) {
+                const storeLink = await page.$(`a[href*="/store/${storeId}"]`);
+                if (storeLink) {
+                    console.log(`[DoorDash] Clicking store link for ID ${storeId} from search page...`);
+                    try {
+                        await Promise.all([
+                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 })
+                                .catch(e => { if (!e.message.includes('ERR_ABORTED')) throw e; }),
+                            storeLink.click()
+                        ]);
+                    } catch (e) {
+                        console.log('[DoorDash] Click nav error (continuing):', e.message);
+                    }
+                    clicked = true;
+                }
+            }
+
+            if (!clicked) {
+                // Fallback: direct navigation
+                console.log('[DoorDash] No link found on page, navigating directly...');
+                try {
+                    await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                } catch (e) {
+                    if (e.message.includes('ERR_ABORTED')) await delay(3000);
+                    else throw e;
+                }
+            }
         } else {
             // It's an index - find and click the store link
             const storeLinks = await page.$$('a[href*="/store/"]');
