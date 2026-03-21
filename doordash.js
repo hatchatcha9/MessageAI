@@ -2444,9 +2444,9 @@ async function extractMenuItems() {
 
         // Wait for any price to appear on page (indicates menu loaded)
         try {
-            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 10000 });
+            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 45000 });
         } catch (e) {
-            console.log('[DoorDash] No prices detected after 10s');
+            console.log('[DoorDash] No prices detected after 45s');
         }
 
         // Scroll the full page to trigger lazy loading, then scroll back
@@ -2818,15 +2818,18 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 }
             }
 
-            // Verify we actually landed on a store page, not CF or some other page
+            // Detect Cloudflare IUAM challenge — it auto-solves via JS and then
+            // redirects to the real page. Wait for that redirect to complete.
             const landedUrl = page.url();
             console.log('[DoorDash] Landed URL:', landedUrl);
-            if (!landedUrl.includes('/store/')) {
-                console.log('[DoorDash] Not on store page yet, waiting for SPA navigation...');
+            if (landedUrl.includes('__cf_chl') || landedUrl.includes('cf_chl')) {
+                console.log('[DoorDash] CF challenge detected — waiting up to 45s for auto-solve...');
                 try {
-                    await page.waitForURL('**/store/**', { timeout: 10000 });
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
+                    console.log('[DoorDash] CF resolved, now at:', page.url());
+                    await delay(3000);
                 } catch (e) {
-                    console.log('[DoorDash] Store URL wait timed out, current URL:', page.url());
+                    console.log('[DoorDash] CF challenge did not resolve:', e.message);
                 }
             }
         } else {
