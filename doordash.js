@@ -2067,23 +2067,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
     console.log(`[DoorDash] Query: ${query || 'all'}`);
     console.log(`[DoorDash] Address: ${address}`);
 
-    // Try HTTP API first - no browser, no CAPTCHA
-    try {
-        console.log('[DoorDash] Attempting search via internal API (no browser)...');
-        const apiResult = await doordashApi.searchRestaurantsNearAddress(credentials, address, query);
-        if (apiResult.success && apiResult.restaurants.length > 0) {
-            console.log('[DoorDash] API search succeeded!');
-            return apiResult;
-        }
-        console.log('[DoorDash] API search returned no results, falling back to browser...');
-        console.log('[DoorDash] API error:', apiResult.error);
-    } catch (apiError) {
-        console.log('[DoorDash] API search threw error, falling back to browser:', apiError.message);
-    }
+    // API search is blocked by DoorDash WAF (GraphQL 403, REST 404) and launches extra
+    // browser instances that consume memory on Railway — skip it, go straight to browser.
 
-    // Fall back to browser automation
+    // Browser automation
     try {
-        console.log(`[DoorDash] === BROWSER SEARCH FALLBACK ===`);
+        console.log(`[DoorDash] === BROWSER SEARCH ===`);
 
         // Step 1: Make sure browser is open (and not crashed)
         if (!page || !context) {
