@@ -17,7 +17,9 @@ const doordashApi = require('./doordash-api');
 // Configuration
 const DOORDASH_URL = 'https://www.doordash.com';
 const BROWSER_DATA_DIR = process.env.BROWSER_DATA_DIR || path.join(__dirname, 'browser-data');
-const HEADLESS = process.env.DOORDASH_HEADLESS !== 'false';
+// If DISPLAY is set (Xvfb running), force headed mode regardless of DOORDASH_HEADLESS env var.
+// Railway's dashboard env var DOORDASH_HEADLESS=true otherwise overrides everything.
+const HEADLESS = process.env.DISPLAY ? false : (process.env.DOORDASH_HEADLESS !== 'false');
 
 // Selectors - abstracted for easy updates if DoorDash UI changes
 const SELECTORS = {
