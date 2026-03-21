@@ -2800,39 +2800,33 @@ async function selectRestaurantFromSearch(indexOrUrl) {
     try {
         console.log(`[DoorDash] Selecting restaurant: ${indexOrUrl}`);
 
-        // If it's a URL, click the existing link on the page instead of page.goto().
-        // Direct navigation triggers Cloudflare security verification; clicking from
-        // the search results page has a proper Referer and passes through cleanly.
         if (typeof indexOrUrl === 'string' && indexOrUrl.includes('/store/')) {
-            const storeIdMatch = indexOrUrl.match(/\/store\/(\d+)/);
-            const storeId = storeIdMatch ? storeIdMatch[1] : null;
-
-            let clicked = false;
-            if (storeId && page.url().includes('doordash.com')) {
-                const storeLink = await page.$(`a[href*="/store/${storeId}"]`);
-                if (storeLink) {
-                    console.log(`[DoorDash] Clicking store link for ID ${storeId} from search page...`);
-                    try {
-                        await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 })
-                                .catch(e => { if (!e.message.includes('ERR_ABORTED')) throw e; }),
-                            storeLink.click()
-                        ]);
-                    } catch (e) {
-                        console.log('[DoorDash] Click nav error (continuing):', e.message);
-                    }
-                    clicked = true;
+            // Navigate with the current page as Referer so Cloudflare sees it as
+            // internal navigation rather than a cold bot hit.
+            const referer = page.url().includes('doordash.com')
+                ? page.url()
+                : 'https://www.doordash.com/';
+            console.log(`[DoorDash] Navigating to restaurant with referer: ${referer}`);
+            try {
+                await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000, referer });
+            } catch (e) {
+                if (e.message.includes('ERR_ABORTED') || e.message.includes('ERR_FAILED')) {
+                    console.log('[DoorDash] Navigation aborted (SPA redirect), waiting...');
+                    await delay(4000);
+                } else {
+                    throw e;
                 }
             }
 
-            if (!clicked) {
-                // Fallback: direct navigation
-                console.log('[DoorDash] No link found on page, navigating directly...');
+            // Verify we actually landed on a store page, not CF or some other page
+            const landedUrl = page.url();
+            console.log('[DoorDash] Landed URL:', landedUrl);
+            if (!landedUrl.includes('/store/')) {
+                console.log('[DoorDash] Not on store page yet, waiting for SPA navigation...');
                 try {
-                    await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await page.waitForURL('**/store/**', { timeout: 10000 });
                 } catch (e) {
-                    if (e.message.includes('ERR_ABORTED')) await delay(3000);
-                    else throw e;
+                    console.log('[DoorDash] Store URL wait timed out, current URL:', page.url());
                 }
             }
         } else {
@@ -2924,7 +2918,9 @@ async function extractMenuCategories() {
                     if (seenCategories.has(cleanText.toLowerCase())) continue;
 
                     // Skip things that don't look like categories
-                    const skipWords = ['delivery', 'pickup', 'schedule', 'group order', 'sign', 'log', 'cart', 'featured', 'popular'];
+                    const skipWords = ['delivery', 'pickup', 'schedule', 'group order', 'sign', 'log', 'cart', 'featured', 'popular',
+                        'get to know', 'let us help', 'doing business', 'about', 'careers', 'investor', 'newsroom',
+                        'merchant', 'dasher', 'safety', 'blog', 'accessibility', 'privacy', 'terms', 'copyright'];
                     if (skipWords.some(w => cleanText.toLowerCase().includes(w))) continue;
 
                     // Common menu category patterns
