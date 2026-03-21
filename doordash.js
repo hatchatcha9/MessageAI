@@ -2172,7 +2172,17 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         if (!searchFound) {
             console.log('[DoorDash] Using direct search URL...');
             const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            try {
+                await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            } catch (navErr) {
+                if (navErr.message.includes('ERR_ABORTED') || navErr.message.includes('ERR_FAILED')) {
+                    // DoorDash SPA redirects mid-navigation — page is still loading, just wait
+                    console.log('[DoorDash] Navigation aborted (SPA redirect), waiting for page to settle...');
+                    await delay(4000);
+                } else {
+                    throw navErr;
+                }
+            }
         }
 
         // Step 5: Wait for results to load
