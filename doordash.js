@@ -4,7 +4,9 @@
  * Restaurant search uses the internal HTTP API (no browser needed).
  */
 
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+chromium.use(StealthPlugin());
 const path = require('path');
 const fs = require('fs');
 const { exec } = require('child_process');

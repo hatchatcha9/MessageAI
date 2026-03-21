@@ -6,7 +6,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+chromium.use(StealthPlugin());
 
 const SESSION_FILE = path.join(__dirname, 'doordash-session.json');
 const CHROME_INSTALLED_CHECK = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
