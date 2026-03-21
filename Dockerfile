@@ -29,6 +29,7 @@ ENV DISPLAY=:99
 
 EXPOSE 3000
 
-# Start Xvfb virtual display, then launch the app in headed mode.
-# Headed Chrome on Xvfb is indistinguishable from a real browser to Cloudflare.
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset & sleep 2 && DOORDASH_HEADLESS=false node server.js"]
+# xvfb-run starts Xvfb, sets DISPLAY, then runs the app — more reliable than
+# manual Xvfb + sleep. Headed Chrome on Xvfb is indistinguishable from a real
+# browser to Cloudflare (bypasses CF fingerprint detection).
+CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24 -ac +extension GLX +render -noreset", "node", "server.js"]
