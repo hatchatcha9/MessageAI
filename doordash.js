@@ -280,7 +280,7 @@ async function launchBrowser(headless = HEADLESS) {
         launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     }
 
-    console.log(`[DoorDash] Launching ${CHROME_INSTALLED ? 'real Chrome' : 'bundled Chromium'} with dedicated MessageAI profile`);
+    console.log(`[DoorDash] Launching ${CHROME_INSTALLED ? 'real Chrome' : 'bundled Chromium'} with dedicated MessageAI profile (headless=${headless}, DISPLAY=${process.env.DISPLAY || 'unset'})`);
     context = await chromium.launchPersistentContext(BOT_PROFILE_DIR, launchOptions);
 
     // Remove webdriver property so sites can't detect automation
