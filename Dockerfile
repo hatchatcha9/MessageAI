@@ -28,7 +28,9 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-# xvfb-run -a auto-assigns a free display number and sets DISPLAY for the child
-# process. Headed Chrome on Xvfb is indistinguishable from a real browser to
-# Cloudflare, bypassing CF fingerprint/bot detection on store pages.
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1280x720x24 -ac +extension GLX +render -noreset", "node", "server.js"]
+# start.sh tries to launch Xvfb for headed Chrome (bypasses CF Turnstile),
+# falls back gracefully to headless if Xvfb fails.
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]
