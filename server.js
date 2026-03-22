@@ -12,8 +12,8 @@ const doordash = require('./doordash');
 const logBuffer = [];
 const _origLog = console.log.bind(console);
 const _origErr = console.error.bind(console);
-console.log = (...args) => { const line = args.join(' '); logBuffer.push(line); if (logBuffer.length > 300) logBuffer.shift(); _origLog(...args); };
-console.error = (...args) => { const line = '[ERR] ' + args.join(' '); logBuffer.push(line); if (logBuffer.length > 300) logBuffer.shift(); _origErr(...args); };
+console.log = (...args) => { const line = args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origLog(...args); };
+console.error = (...args) => { const line = '[ERR] ' + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origErr(...args); };
 
 const CRASH_LOG = 'C:/Users/hatch/Projects/MessageAI/crash.log';
 process.on('uncaughtException', (err) => {

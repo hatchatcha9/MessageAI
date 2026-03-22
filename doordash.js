@@ -2453,67 +2453,80 @@ async function getRestaurantMenu(credentials, restaurantId, restaurantUrl = null
 }
 
 /**
- * Extract menu items from current restaurant page
- * Filters out UI/navigation elements and focuses on actual food items with prices
+ * Extract menu items from current restaurant page.
+ * Strategy 1: LI-based (DoorDash uses UL/LI for menus) with child-LI skip logic
+ *   — fixes the "child has price" false-positive from flex-container children.
+ * Strategy 2: Generic div/button fallback if LI approach gets < 3 items.
  */
 async function extractMenuItems() {
     const menuItems = [];
 
     try {
         console.log('[DoorDash] Starting menu item extraction...');
+        console.log('[DoorDash] Current URL:', page.url());
         await takeScreenshot('extract-menu-start');
 
-        // Wait for any price to appear on page (indicates menu loaded)
+        // Wait up to 60s for any price to appear (indicates menu loaded, not CF page)
+        let pricesFound = false;
         try {
-            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 45000 });
+            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 60000 });
+            pricesFound = true;
+            console.log('[DoorDash] Prices detected on page ✓');
         } catch (e) {
-            console.log('[DoorDash] No prices detected after 45s');
+            console.log('[DoorDash] No prices after 60s — page content:', await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'eval failed'));
+            await takeScreenshot('extract-menu-no-prices');
+            return menuItems;
         }
 
-        // Scroll the full page to trigger lazy loading, then scroll back
+        // Step-scroll to trigger lazy loading (incremental, not jump-to-bottom)
+        const pageHeight = await page.evaluate(() => document.body.scrollHeight);
+        console.log(`[DoorDash] Page height: ${pageHeight}px, step-scrolling...`);
+        for (let pos = 0; pos < pageHeight; pos += 600) {
+            await page.evaluate((y) => window.scrollTo(0, y), pos);
+            await delay(250);
+        }
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await delay(2000);
         await page.evaluate(() => window.scrollTo(0, 0));
         await delay(1000);
-        await takeScreenshot('extract-menu-start');
+        await takeScreenshot('extract-menu-scrolled');
 
-        // Extract ALL elements with prices in one shot — no viewport filtering
+        // --- Strategy 1: LI-based extraction ---
+        // Key fix: use child-LI check instead of child-size check.
+        // The old approach walked ALL descendants and if any large flex container
+        // (which includes the price) was a child, the whole LI was skipped as a
+        // "wrapper". The new approach only skips an LI if it contains other LIs
+        // that also have prices — i.e., it's a category container, not a menu item.
         const extracted = await page.evaluate(() => {
             const results = [];
             const seen = new Set();
 
-            // Walk every element that contains a dollar price
-            const all = document.querySelectorAll('button, a, article, li, div, section, [role="button"], [role="listitem"]');
-            for (const el of all) {
-                // Skip tiny/hidden/script elements
-                if (el.offsetWidth < 80 || el.offsetHeight < 40) continue;
-                if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
+            const listItems = document.querySelectorAll('li, [role="listitem"]');
+            for (const li of listItems) {
+                if (li.offsetWidth < 50 || li.offsetHeight < 30) continue;
 
-                const text = (el.textContent || '').trim();
+                const text = (li.textContent || '').trim();
                 const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
                 if (!priceMatch) continue;
 
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
 
-                // Skip elements that are too short or too long (likely wrappers)
-                if (text.length < 5 || text.length > 500) continue;
-
-                // Skip if any child also has a price (we want the leaf item, not a wrapper)
-                const children = el.querySelectorAll('*');
-                let childHasPrice = false;
-                for (const child of children) {
-                    if (child.offsetWidth < 80 || child.offsetHeight < 40) continue;
-                    if ((child.textContent || '').match(/\$\d+/)) { childHasPrice = true; break; }
+                // Skip if a child LI also has a price (this is a parent/category LI)
+                const childLIs = li.querySelectorAll('li, [role="listitem"]');
+                let childLIHasPrice = false;
+                for (const cLI of childLIs) {
+                    if ((cLI.textContent || '').match(/\$\d+/)) { childLIHasPrice = true; break; }
                 }
-                if (childHasPrice) continue;
+                if (childLIHasPrice) continue;
 
-                // Extract name: first non-price, non-empty line
-                const lines = text.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                // Extract name: text before the first '$' sign, first meaningful line
+                const beforePrice = text.split('$')[0];
+                const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
                 let name = '';
                 for (const line of lines) {
-                    if (!line.includes('$') && !line.match(/^\d+$/) && !line.match(/cal/i) && line.length < 80) {
-                        name = line.split('•')[0].trim();
+                    if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
+                        name = line.split('•')[0].replace(/\s+/g, ' ').trim();
                         break;
                     }
                 }
@@ -2523,16 +2536,79 @@ async function extractMenuItems() {
                 if (seen.has(key)) continue;
                 seen.add(key);
 
-                const rect = el.getBoundingClientRect();
+                const rect = li.getBoundingClientRect();
                 results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
             }
-
-            return results.slice(0, 30);
+            return results;
         });
 
-        console.log(`[DoorDash] Extracted ${extracted.length} menu items`);
-        for (let i = 0; i < extracted.length; i++) {
-            const item = extracted[i];
+        console.log(`[DoorDash] Strategy 1 (LI-based): ${extracted.length} items`);
+
+        // --- Strategy 2: Generic fallback (div/button/article) ---
+        // Only run if LI approach got fewer than 3 items.
+        let fallback = [];
+        if (extracted.length < 3) {
+            console.log('[DoorDash] Trying strategy 2 (generic elements)...');
+            fallback = await page.evaluate(() => {
+                const results = [];
+                const seen = new Set();
+                const all = document.querySelectorAll('button, article, div, [role="button"]');
+                for (const el of all) {
+                    if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
+                    if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
+
+                    const text = (el.textContent || '').trim();
+                    const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
+                    if (!priceMatch) continue;
+
+                    const price = parseFloat(priceMatch[1]);
+                    if (price < 1 || price > 100) continue;
+                    if (text.length > 600) continue;
+
+                    // Skip if a child div larger than 200x80 also has a price
+                    const children = el.querySelectorAll('div, article, button');
+                    let childHasPrice = false;
+                    for (const child of children) {
+                        if (child.offsetWidth < 200 || child.offsetHeight < 80) continue;
+                        if ((child.textContent || '').match(/\$\d+/)) { childHasPrice = true; break; }
+                    }
+                    if (childHasPrice) continue;
+
+                    const beforePrice = text.split('$')[0];
+                    const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                    let name = '';
+                    for (const line of lines) {
+                        if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
+                            name = line.split('•')[0].replace(/\s+/g, ' ').trim();
+                            break;
+                        }
+                    }
+                    if (!name || name.length < 3) continue;
+
+                    const key = name.toLowerCase();
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+
+                    const rect = el.getBoundingClientRect();
+                    results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                }
+                return results.slice(0, 30);
+            });
+            console.log(`[DoorDash] Strategy 2 (generic): ${fallback.length} items`);
+        }
+
+        const combined = extracted.length >= 3 ? extracted : fallback;
+        const deduped = [];
+        const seenNames = new Set();
+        for (const item of combined) {
+            if (!seenNames.has(item.name.toLowerCase())) {
+                seenNames.add(item.name.toLowerCase());
+                deduped.push(item);
+            }
+        }
+
+        for (let i = 0; i < deduped.length; i++) {
+            const item = deduped[i];
             menuItems.push({
                 id: `item-${i}`,
                 index: i,
@@ -2545,6 +2621,7 @@ async function extractMenuItems() {
             console.log(`[DoorDash] Item ${i + 1}: "${item.name}" - $${item.price}`);
         }
 
+        console.log(`[DoorDash] extractMenuItems returning ${menuItems.length} items`);
         await takeScreenshot('extract-menu-done');
         return menuItems;
 
@@ -2836,9 +2913,13 @@ async function waitForCFChallenge(timeoutMs = 60000) {
         } catch (e) { return false; }
     };
 
-    if (!(await isCFChallenge())) return true;
+    if (!(await isCFChallenge())) {
+        console.log('[DoorDash] No CF challenge detected, page URL:', page.url());
+        return true;
+    }
 
-    console.log('[DoorDash] CF challenge detected — waiting for auto-resolve...');
+    const snippet = await page.evaluate(() => document.body.innerText.substring(0, 200)).catch(() => '');
+    console.log('[DoorDash] CF challenge detected! URL:', page.url(), '| Content snippet:', snippet);
     await takeScreenshot('cf-challenge-detected');
 
     const start = Date.now();
@@ -2907,8 +2988,11 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             }
 
             // Wait for CF challenge to auto-resolve (checks content, not just URL)
+            await delay(1000); // brief settle before checking
             await waitForCFChallenge(60000);
-            console.log('[DoorDash] Landed URL after CF check:', page.url());
+            const finalUrl = page.url();
+            const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
+            console.log('[DoorDash] After CF check — URL:', finalUrl, '| Body:', bodySnippet);
         } else {
             // It's an index - find and click the store link
             const storeLinks = await page.$$('a[href*="/store/"]');
