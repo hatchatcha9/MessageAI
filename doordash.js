@@ -2316,42 +2316,50 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('5-search-results');
         console.log('[DoorDash] Current URL:', page.url());
 
-        // Step 5b: Check what page data DoorDash embeds (for finding store/menu data).
+        // Step 5b: Extract DoorDash's Apollo Client cache — it stores all fetched data
+        // including restaurant search results and featured menu items.
         try {
-            const pageDataInfo = await page.evaluate(() => {
-                // Check Next.js data
-                const nextEl = document.getElementById('__NEXT_DATA__');
-                // Check for script tags with JSON data
-                const scripts = Array.from(document.querySelectorAll('script[type="application/json"], script[id]'));
-                const scriptInfo = scripts.slice(0, 5).map(s => `id=${s.id || 'none'}, len=${s.textContent.length}`);
-                // Check global variables DoorDash might set
-                const globals = [];
-                const candidates = ['__data__', '__STORE__', '__INITIAL_STATE__', 'DD_FRONTEND', '__DD_DATA__', '__DOORDASH__'];
-                for (const k of candidates) {
-                    if (window[k]) globals.push(k);
+            const apolloResult = await page.evaluate(() => {
+                const client = window.__APOLLO_CLIENT__;
+                if (!client) return { found: false };
+                const cache = client.cache.extract();
+                const keys = Object.keys(cache);
+                // Sample the key types to understand structure
+                const keyTypes = {};
+                for (const k of keys) {
+                    const type = k.split(':')[0];
+                    keyTypes[type] = (keyTypes[type] || 0) + 1;
                 }
-                // Check window keys that look like data stores
-                const windowKeys = Object.keys(window).filter(k => k.startsWith('__') && k.endsWith('__')).slice(0, 10);
                 return {
-                    hasNextData: !!nextEl,
-                    nextDataLen: nextEl ? nextEl.textContent.length : 0,
-                    scriptTags: scriptInfo,
-                    globals,
-                    windowKeys
+                    found: true,
+                    totalKeys: keys.length,
+                    keyTypes,
+                    // Return full cache as string (might be large, but we need it)
+                    cacheJson: JSON.stringify(cache)
                 };
             });
-            console.log('[DoorDash] Page data check:', JSON.stringify(pageDataInfo));
 
-            // Check all JSON-like script tags for store menu data
-            const jsonScripts = await page.evaluate(() => {
-                const scripts = document.querySelectorAll('script[type="application/json"]');
-                return Array.from(scripts).map(s => s.textContent.substring(0, 100));
-            });
-            if (jsonScripts.length > 0) {
-                console.log(`[DoorDash] Found ${jsonScripts.length} JSON script tags`);
+            if (apolloResult.found) {
+                console.log(`[DoorDash] Apollo cache: ${apolloResult.totalKeys} keys, types: ${JSON.stringify(apolloResult.keyTypes)}`);
+                // Parse the Apollo cache and extract store/menu data
+                try {
+                    const apolloCache = JSON.parse(apolloResult.cacheJson);
+                    _extractAndCacheMenuData(apolloCache);
+                    const capturedIds = Object.keys(_capturedStoreMenus);
+                    console.log(`[DoorDash] Apollo cache yielded menus for stores: ${capturedIds.join(', ') || 'none'}`);
+                    if (capturedIds.length === 0) {
+                        // Log a sample of cache entries to understand structure
+                        const sample = Object.entries(apolloCache).slice(0, 3).map(([k, v]) => `${k}: ${JSON.stringify(v).substring(0, 100)}`);
+                        console.log('[DoorDash] Apollo cache sample:', sample.join(' | '));
+                    }
+                } catch (e) {
+                    console.log('[DoorDash] Apollo cache parse error:', e.message);
+                }
+            } else {
+                console.log('[DoorDash] __APOLLO_CLIENT__ not found or has no cache');
             }
         } catch (e) {
-            console.log('[DoorDash] Page data check error:', e.message);
+            console.log('[DoorDash] Apollo extraction error:', e.message);
         }
 
         // Step 6: Extract restaurants
