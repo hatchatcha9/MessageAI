@@ -263,6 +263,14 @@ async function launchBrowser(headless = HEADLESS) {
         fs.mkdirSync(BOT_PROFILE_DIR, { recursive: true });
     }
 
+    // Remove Chrome's profile lock files left by a previous container/process.
+    // On Railway, each deployment runs on a potentially different host so Chrome
+    // sees the lock as belonging to "another computer" and refuses to start.
+    for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        const lockPath = path.join(BOT_PROFILE_DIR, lockFile);
+        try { fs.unlinkSync(lockPath); console.log(`[DoorDash] Removed stale lock: ${lockFile}`); } catch (e) {}
+    }
+
     const launchOptions = {
         headless,
         channel: CHROME_INSTALLED ? 'chrome' : undefined,
