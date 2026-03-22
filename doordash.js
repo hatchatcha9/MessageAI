@@ -286,6 +286,11 @@ async function launchBrowser(headless = HEADLESS) {
             '--no-default-browser-check',
             '--window-size=1280,720',
             '--lang=en-US',
+            // Needed for Xvfb (no real GPU) — prevents renderer crashes under virtual display
+            '--disable-gpu',
+            '--disable-gpu-sandbox',
+            '--disable-setuid-sandbox',
+            '--no-zygote',
         ],
         ignoreDefaultArgs: ['--enable-automation'],
     };
