@@ -104,6 +104,9 @@ let browser = null;
 let context = null;
 let page = null;
 
+// Pre-fetched menu items from in-context API (fetched on search page before navigating away)
+let _preloadedMenuItems = null;
+
 // Session state tracking
 const sessionState = {
     launched: false,
@@ -2477,17 +2480,29 @@ async function extractMenuItems() {
     try {
         console.log('[DoorDash] Starting menu item extraction...');
         console.log('[DoorDash] Current URL:', page.url());
+
+        // Check if menu was pre-fetched from the search page context (fast path)
+        if (_preloadedMenuItems && _preloadedMenuItems.length > 0) {
+            console.log(`[DoorDash] Using pre-fetched menu (${_preloadedMenuItems.length} items) — skipping page wait`);
+            const items = _preloadedMenuItems;
+            _preloadedMenuItems = null; // consume it
+            for (let i = 0; i < items.length; i++) {
+                menuItems.push({ id: `item-${i}`, index: i, name: items[i].name, price: items[i].price, description: items[i].description || '', x: 0, y: 0 });
+            }
+            return menuItems;
+        }
+
         await takeScreenshot('extract-menu-start');
 
-        // Wait up to 60s for any price to appear (indicates menu loaded, not CF page)
+        // Wait up to 15s for any price to appear (shorter since we have API fallback below)
         let pricesFound = false;
         try {
-            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 60000 });
+            await page.waitForFunction(() => document.body.innerText.includes('$'), { timeout: 15000 });
             pricesFound = true;
             console.log('[DoorDash] Prices detected on page ✓');
         } catch (e) {
             const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'eval failed');
-            console.log('[DoorDash] No prices after 60s — page content:', pageContent);
+            console.log('[DoorDash] No prices after 15s — page content:', pageContent);
             await takeScreenshot('extract-menu-no-prices');
 
             // CF is blocking the page — try in-context API as fallback
@@ -3112,6 +3127,24 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
             if (storeIdMatch && currentUrl.includes('doordash.com')) {
                 const storeId = storeIdMatch[1];
+
+                // PRE-FETCH menu via in-context API while still on the search results page.
+                // The search page already passed CF, so same-origin XHR is not blocked.
+                // This avoids waiting 60s for CF Turnstile on the restaurant page.
+                console.log(`[DoorDash] Pre-fetching menu for store ${storeId} from search page context...`);
+                _preloadedMenuItems = null; // clear any old cache
+                try {
+                    const preloaded = await fetchMenuFromInContextAPI(storeId);
+                    if (preloaded && preloaded.length > 0) {
+                        _preloadedMenuItems = preloaded;
+                        console.log(`[DoorDash] Pre-fetch SUCCESS: ${preloaded.length} items cached`);
+                    } else {
+                        console.log('[DoorDash] Pre-fetch returned 0 items — will try DOM scraping after navigation');
+                    }
+                } catch (e) {
+                    console.log('[DoorDash] Pre-fetch error:', e.message);
+                }
+
                 const fullHref = await page.evaluate((id) => {
                     const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
                     return link ? link.href : null;
@@ -3134,9 +3167,11 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 console.log('[DoorDash] JS navigation error:', e.message);
             }
 
-            // Wait for CF challenge to auto-resolve (checks content, not just URL)
+            // If menu was pre-fetched, only do a brief CF check (no long wait needed).
+            // If not pre-fetched, wait up to 30s for CF to potentially auto-resolve.
+            const cfWait = _preloadedMenuItems ? 5000 : 30000;
             await delay(1000); // brief settle before checking
-            await waitForCFChallenge(60000);
+            await waitForCFChallenge(cfWait);
             const finalUrl = page.url();
             const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
             console.log('[DoorDash] After CF check — URL:', finalUrl, '| Body:', bodySnippet);
