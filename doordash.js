@@ -2946,45 +2946,41 @@ async function selectRestaurantFromSearch(indexOrUrl) {
         console.log(`[DoorDash] Selecting restaurant: ${indexOrUrl}`);
 
         if (typeof indexOrUrl === 'string' && indexOrUrl.includes('/store/')) {
-            // Prefer SPA-style click navigation over full page.goto() — clicking a link
-            // the user is already on goes through React Router (no full page load) so
-            // Cloudflare doesn't fire a fresh challenge.
-            let navigationDone = false;
+            // Navigate using window.location.href from within the page JS context.
+            // This bypasses both problems:
+            //   1. Cloudflare Turnstile overlay that blocks pointer events on link clicks
+            //   2. CF treating external page.goto() as a cold bot hit
+            // An in-page JS navigation uses the existing CF session cookies and is
+            // treated as a continuation of the same browsing session.
+            const currentUrl = page.url();
+            console.log(`[DoorDash] JS navigation from ${currentUrl} → ${indexOrUrl}`);
+
+            // Try to get the full original href from the search page (includes slug)
+            // so DoorDash's router gets the cleanest possible URL.
+            let targetUrl = indexOrUrl;
             const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
-            if (storeIdMatch && page.url().includes('doordash.com')) {
+            if (storeIdMatch && currentUrl.includes('doordash.com')) {
                 const storeId = storeIdMatch[1];
-                try {
-                    const link = await page.$(`a[href*="/store/"][href*="${storeId}"]`);
-                    if (link) {
-                        console.log(`[DoorDash] SPA click: found store ${storeId} link on current page`);
-                        await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
-                            link.click(),
-                        ]);
-                        navigationDone = true;
-                        console.log('[DoorDash] SPA navigation complete, URL:', page.url());
-                    }
-                } catch (e) {
-                    console.log('[DoorDash] SPA click failed, falling back to goto:', e.message);
+                const fullHref = await page.evaluate((id) => {
+                    const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
+                    return link ? link.href : null;
+                }, storeId);
+                if (fullHref) {
+                    // Strip cursor/session params but keep the slug
+                    try {
+                        const u = new URL(fullHref);
+                        targetUrl = u.origin + u.pathname; // drop all query params
+                    } catch (e) {}
+                    console.log(`[DoorDash] Using full slug URL: ${targetUrl}`);
                 }
             }
 
-            if (!navigationDone) {
-                // Fall back to full page.goto() with a DoorDash referer
-                const referer = page.url().includes('doordash.com')
-                    ? page.url()
-                    : 'https://www.doordash.com/';
-                console.log(`[DoorDash] goto navigation with referer: ${referer}`);
-                try {
-                    await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000, referer });
-                } catch (e) {
-                    if (e.message.includes('ERR_ABORTED') || e.message.includes('ERR_FAILED')) {
-                        console.log('[DoorDash] Navigation aborted (SPA redirect), waiting...');
-                        await delay(4000);
-                    } else {
-                        throw e;
-                    }
-                }
+            try {
+                await page.evaluate((url) => { window.location.href = url; }, targetUrl);
+                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                console.log('[DoorDash] JS navigation landed at:', page.url());
+            } catch (e) {
+                console.log('[DoorDash] JS navigation error:', e.message);
             }
 
             // Wait for CF challenge to auto-resolve (checks content, not just URL)
