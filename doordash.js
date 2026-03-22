@@ -273,13 +273,19 @@ async function launchBrowser(headless = HEADLESS) {
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-infobars',
+            '--disable-dev-shm-usage',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--window-size=1280,720',
+            '--lang=en-US',
         ],
         ignoreDefaultArgs: ['--enable-automation'],
     };
 
     if (!CHROME_INSTALLED) {
         launchOptions.viewport = { width: 1280, height: 720 };
-        launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+        // Keep user agent current — CF checks UA for recognizable Chrome versions
+        launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     }
 
     console.log(`[DoorDash] Launching ${CHROME_INSTALLED ? 'real Chrome' : 'bundled Chromium'} with dedicated MessageAI profile (headless=${headless}, DISPLAY=${process.env.DISPLAY || 'unset'})`);
@@ -289,6 +295,16 @@ async function launchBrowser(headless = HEADLESS) {
     await context.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
+
+    // Set headers that match a real Chrome browser — CF checks sec-ch-ua to verify the UA string
+    if (!CHROME_INSTALLED) {
+        await context.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+        });
+    }
 
     page = context.pages()[0] || await context.newPage();
 
@@ -2407,7 +2423,8 @@ async function getRestaurantMenu(credentials, restaurantId, restaurantUrl = null
         // Navigate to restaurant page
         const url = restaurantUrl || `${DOORDASH_URL}/store/${restaurantId}/`;
         await page.goto(url, { waitUntil: 'domcontentloaded' });
-        await delay(3000);
+        await waitForCFChallenge(60000);
+        await delay(2000);
         await handlePopups();
 
         // Extract restaurant name
@@ -2798,6 +2815,49 @@ async function extractMenuItems() {
 }
 
 /**
+ * Detect and wait for a Cloudflare IUAM challenge to auto-resolve.
+ * CF challenges show "Just a moment" / "Performing security verification" and
+ * auto-solve via JS — we just need to wait for the real page to appear.
+ * Returns true if no challenge or challenge resolved; false if timed out.
+ */
+async function waitForCFChallenge(timeoutMs = 60000) {
+    const isCFChallenge = async () => {
+        try {
+            const content = await page.content();
+            if (
+                content.includes('Just a moment') ||
+                content.includes('Performing security verification') ||
+                content.includes('cf-browser-verification') ||
+                content.includes('Enable JavaScript and cookies to continue') ||
+                content.includes('jschl_vc') ||
+                content.includes('_cf_chl_opt')
+            ) return true;
+            return !!(await page.$('iframe[src*="challenges.cloudflare.com"]'));
+        } catch (e) { return false; }
+    };
+
+    if (!(await isCFChallenge())) return true;
+
+    console.log('[DoorDash] CF challenge detected — waiting for auto-resolve...');
+    await takeScreenshot('cf-challenge-detected');
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        await delay(3000);
+        if (!(await isCFChallenge())) {
+            console.log(`[DoorDash] CF challenge resolved after ${Date.now() - start}ms`);
+            await delay(1000);
+            return true;
+        }
+        console.log(`[DoorDash] Still seeing CF challenge (${Math.round((Date.now() - start) / 1000)}s)...`);
+    }
+
+    console.log('[DoorDash] CF challenge timed out');
+    await takeScreenshot('cf-challenge-timeout');
+    return false;
+}
+
+/**
  * Navigate to a restaurant by URL or index and extract menu categories
  */
 async function selectRestaurantFromSearch(indexOrUrl) {
@@ -2805,37 +2865,50 @@ async function selectRestaurantFromSearch(indexOrUrl) {
         console.log(`[DoorDash] Selecting restaurant: ${indexOrUrl}`);
 
         if (typeof indexOrUrl === 'string' && indexOrUrl.includes('/store/')) {
-            // Navigate with the current page as Referer so Cloudflare sees it as
-            // internal navigation rather than a cold bot hit.
-            const referer = page.url().includes('doordash.com')
-                ? page.url()
-                : 'https://www.doordash.com/';
-            console.log(`[DoorDash] Navigating to restaurant with referer: ${referer}`);
-            try {
-                await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000, referer });
-            } catch (e) {
-                if (e.message.includes('ERR_ABORTED') || e.message.includes('ERR_FAILED')) {
-                    console.log('[DoorDash] Navigation aborted (SPA redirect), waiting...');
-                    await delay(4000);
-                } else {
-                    throw e;
+            // Prefer SPA-style click navigation over full page.goto() — clicking a link
+            // the user is already on goes through React Router (no full page load) so
+            // Cloudflare doesn't fire a fresh challenge.
+            let navigationDone = false;
+            const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
+            if (storeIdMatch && page.url().includes('doordash.com')) {
+                const storeId = storeIdMatch[1];
+                try {
+                    const link = await page.$(`a[href*="/store/"][href*="${storeId}"]`);
+                    if (link) {
+                        console.log(`[DoorDash] SPA click: found store ${storeId} link on current page`);
+                        await Promise.all([
+                            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+                            link.click(),
+                        ]);
+                        navigationDone = true;
+                        console.log('[DoorDash] SPA navigation complete, URL:', page.url());
+                    }
+                } catch (e) {
+                    console.log('[DoorDash] SPA click failed, falling back to goto:', e.message);
                 }
             }
 
-            // Detect Cloudflare IUAM challenge — it auto-solves via JS and then
-            // redirects to the real page. Wait for that redirect to complete.
-            const landedUrl = page.url();
-            console.log('[DoorDash] Landed URL:', landedUrl);
-            if (landedUrl.includes('__cf_chl') || landedUrl.includes('cf_chl')) {
-                console.log('[DoorDash] CF challenge detected — waiting up to 45s for auto-solve...');
+            if (!navigationDone) {
+                // Fall back to full page.goto() with a DoorDash referer
+                const referer = page.url().includes('doordash.com')
+                    ? page.url()
+                    : 'https://www.doordash.com/';
+                console.log(`[DoorDash] goto navigation with referer: ${referer}`);
                 try {
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 });
-                    console.log('[DoorDash] CF resolved, now at:', page.url());
-                    await delay(3000);
+                    await page.goto(indexOrUrl, { waitUntil: 'domcontentloaded', timeout: 30000, referer });
                 } catch (e) {
-                    console.log('[DoorDash] CF challenge did not resolve:', e.message);
+                    if (e.message.includes('ERR_ABORTED') || e.message.includes('ERR_FAILED')) {
+                        console.log('[DoorDash] Navigation aborted (SPA redirect), waiting...');
+                        await delay(4000);
+                    } else {
+                        throw e;
+                    }
                 }
             }
+
+            // Wait for CF challenge to auto-resolve (checks content, not just URL)
+            await waitForCFChallenge(60000);
+            console.log('[DoorDash] Landed URL after CF check:', page.url());
         } else {
             // It's an index - find and click the store link
             const storeLinks = await page.$$('a[href*="/store/"]');
@@ -4831,6 +4904,7 @@ async function navigateToRestaurantPage(url) {
     }
     console.log(`[DoorDash] Navigating to restaurant page for recovery: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForCFChallenge(60000);
     await delay(2000);
     await handlePopups();
     console.log('[DoorDash] Restaurant page loaded');

@@ -102,3 +102,23 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 - Checkbox topping selection (Lettuce, Tomato, Pickle, Ketchup all checked) ✅
 - Cart shows once, no duplication ✅
 - Checkout placed real order to 12447 S Deer Cove ✅
+
+## What Was Fixed (2026-03-20 session — Railway deployment)
+1. **Search 0 restaurants** — DoorDash URL format changed from `/store/12345/` to `/store/slug/12345?cursor=...`; fixed regex in `extractRestaurantList` + strip query params
+2. **Headed browser on Railway** — `headless: false` hardcoded in both `doordash.js` and `doordash-api.js`; both now use env-based headless flag
+3. **Windows-only profile path** — Both files now use `BROWSER_DATA_DIR` env var for browser profile on non-Windows
+4. **Login OTP loop** — DoorDash sends OTP on Railway; improved "Use password instead" link detection
+5. **Fragile isLoggedIn check** — Replaced inline `!pageContent.includes('sign-in')` with proper `isLoggedIn()` function
+6. **networkidle timeouts** — All 6 occurrences replaced with `domcontentloaded`
+7. **CF cookie fingerprint** — `cf_clearance`/`__cf_bm`/`_cfuvid` are browser-fingerprint-specific; now filtered out when importing DOORDASH_COOKIES env var
+8. **Crash recovery** — Auth cookies re-imported in every `launchBrowser()` call so session survives browser crash/restart
+9. **Menu extraction rewrite** — Old viewport-based filtering failed in headless; rewritten to scroll full page then extract all price-containing elements
+10. **Remote logging** — Added in-memory log buffer + `/logs` HTTP endpoint for Railway debugging
+11. **DOORDASH_COOKIES env** — 110 session cookies exported locally, set in Railway env vars, auto-imported on startup and browser launch
+
+## Current Blocker (as of 2026-03-20)
+**Menu page hits Cloudflare "security verification"** — restaurant pages (`/store/ID/`) show CF challenge, no prices load.
+- Search works fine (10 restaurants returned)
+- CF challenge iframe appears on restaurant page navigation in Railway's headless Chromium
+- `cf_clearance` cookie can't be reused (fingerprint-tied to local Chrome)
+- Next session: detect CF challenge and wait for auto-resolution, or find workaround
