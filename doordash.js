@@ -2316,6 +2316,32 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('5-search-results');
         console.log('[DoorDash] Current URL:', page.url());
 
+        // Step 5b: Extract __NEXT_DATA__ from the page — DoorDash uses SSR so all search
+        // results data (including featured items per restaurant) is embedded here.
+        try {
+            const nextDataStr = await page.evaluate(() => {
+                const el = document.getElementById('__NEXT_DATA__');
+                return el ? el.textContent : null;
+            });
+            if (nextDataStr) {
+                const nextData = JSON.parse(nextDataStr);
+                console.log('[DoorDash] Got __NEXT_DATA__, parsing for store menus...');
+                _extractAndCacheMenuData(nextData);
+                const captured = Object.keys(_capturedStoreMenus).length;
+                console.log(`[DoorDash] __NEXT_DATA__ yielded menu data for ${captured} stores`);
+                if (captured === 0) {
+                    // Log top-level keys to understand structure for future debugging
+                    const topKeys = Object.keys(nextData).join(', ');
+                    const propsKeys = nextData.props ? Object.keys(nextData.props).join(', ') : 'no props';
+                    console.log(`[DoorDash] __NEXT_DATA__ keys: ${topKeys} | props keys: ${propsKeys}`);
+                }
+            } else {
+                console.log('[DoorDash] No __NEXT_DATA__ found on page');
+            }
+        } catch (e) {
+            console.log('[DoorDash] __NEXT_DATA__ extraction error:', e.message);
+        }
+
         // Step 6: Extract restaurants
         console.log('[DoorDash] Extracting restaurants...');
         const restaurants = await extractRestaurantList();
