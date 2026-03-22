@@ -107,6 +107,73 @@ let page = null;
 // Pre-fetched menu items from in-context API (fetched on search page before navigating away)
 let _preloadedMenuItems = null;
 
+// Intercepted DoorDash API responses captured during search page load.
+// DoorDash's own JavaScript makes API calls that pass CF — we capture those responses.
+// keyed by store ID (string) → array of {name, price} items from featured_items / popular items
+let _capturedStoreMenus = {};
+
+/**
+ * Parse a DoorDash API response and cache any menu items found for each store ID.
+ * Handles search response shapes, store detail shapes, and GraphQL wrappers.
+ */
+function _extractAndCacheMenuData(data) {
+    if (!data || typeof data !== 'object') return;
+
+    // Walk the object tree looking for store_id + items/menus
+    function walk(obj, depth) {
+        if (depth > 8 || !obj || typeof obj !== 'object') return;
+
+        // Shape: { id: "12345", menus: [...] } or { store_id: "12345", menus: [...] }
+        const storeId = String(obj.id || obj.store_id || '');
+        const menus = obj.menus || obj.menu || [];
+        if (storeId && storeId.length >= 5 && Array.isArray(menus) && menus.length > 0) {
+            const items = [];
+            for (const menu of menus) {
+                for (const cat of (menu.menu_categories || menu.categories || [])) {
+                    for (const item of (cat.items || cat.menu_items || [])) {
+                        const name = item.name || item.title || '';
+                        const rawPrice = item.price || item.display_price || item.displayPrice || 0;
+                        const price = typeof rawPrice === 'number'
+                            ? (rawPrice > 200 ? rawPrice / 100 : rawPrice)
+                            : parseFloat(String(rawPrice).replace(/[^0-9.]/g, ''));
+                        if (name && price > 0) items.push({ name, price, description: item.description || '' });
+                    }
+                }
+            }
+            if (items.length > 0) {
+                _capturedStoreMenus[storeId] = items;
+                console.log(`[DoorDash] Intercepted ${items.length} menu items for store ${storeId}`);
+                return;
+            }
+        }
+
+        // Shape: { featured_items: [{name, price}] } (search result cards)
+        const storeId2 = String(obj.id || obj.store_id || '');
+        const featured = obj.featured_items || obj.featuredItems || obj.popularItems || [];
+        if (storeId2 && storeId2.length >= 5 && Array.isArray(featured) && featured.length > 0) {
+            const items = featured.map(item => ({
+                name: item.name || item.title || '',
+                price: typeof item.price === 'number' ? (item.price > 200 ? item.price / 100 : item.price) : parseFloat(String(item.price || 0)),
+                description: item.description || ''
+            })).filter(i => i.name && i.price > 0);
+            if (items.length > 0) {
+                _capturedStoreMenus[storeId2] = (_capturedStoreMenus[storeId2] || []).concat(items);
+                console.log(`[DoorDash] Intercepted ${items.length} featured items for store ${storeId2}`);
+                return;
+            }
+        }
+
+        // Recurse into arrays and objects
+        if (Array.isArray(obj)) {
+            for (const el of obj) walk(el, depth + 1);
+        } else {
+            for (const key of Object.keys(obj)) walk(obj[key], depth + 1);
+        }
+    }
+
+    walk(data, 0);
+}
+
 // Session state tracking
 const sessionState = {
     launched: false,
@@ -2125,6 +2192,27 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             }
         }
 
+        // Set up network response interceptor to capture DoorDash's own API responses.
+        // DoorDash's JavaScript makes authenticated API calls that pass CF — we intercept those.
+        _capturedStoreMenus = {}; // clear old data for this search
+        const _apiInterceptor = async (response) => {
+            const url = response.url();
+            if (!url.includes('doordash.com') || response.status() !== 200) return;
+            const ct = response.headers()['content-type'] || '';
+            if (!ct.includes('json')) return;
+            // Log what DoorDash API calls are being made
+            if (url.includes('/api/') || url.includes('/graphql') || url.includes('/v2/') || url.includes('consumer-')) {
+                console.log(`[DoorDash Intercept] ${url.replace('https://www.doordash.com', '')} (${response.status()})`);
+            }
+            try {
+                const data = await response.json().catch(() => null);
+                if (!data) return;
+                // Try to extract menu item data for any store ID we find
+                _extractAndCacheMenuData(data);
+            } catch (e) {}
+        };
+        page.on('response', _apiInterceptor);
+
         // Step 2: Go to DoorDash
         console.log('[DoorDash] Navigating to DoorDash...');
         await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -2245,6 +2333,13 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             const diagMsg = `0 restaurants extracted. URL: ${currentUrl}. Store links: ${storeLinks.length}. Sample hrefs: ${JSON.stringify(sampleHrefs)}`;
             console.log('[DoorDash] DIAG:', diagMsg);
             return { success: false, error: diagMsg, restaurants: [] };
+        }
+
+        // Stop intercepting responses
+        page.off('response', _apiInterceptor);
+        const capturedCount = Object.keys(_capturedStoreMenus).length;
+        if (capturedCount > 0) {
+            console.log(`[DoorDash] Intercepted menu data for ${capturedCount} stores during search`);
         }
 
         // Sort by rating and return top 5
@@ -2951,6 +3046,12 @@ async function extractMenuItems() {
  */
 async function fetchMenuFromInContextAPI(storeId) {
     console.log(`[DoorDash API] Fetching menu for store ${storeId} via in-context fetch...`);
+
+    // Check if we already captured this store's menu from DoorDash's own API calls during search
+    if (_capturedStoreMenus[storeId] && _capturedStoreMenus[storeId].length > 0) {
+        console.log(`[DoorDash API] Using ${_capturedStoreMenus[storeId].length} items intercepted from DoorDash's own API calls`);
+        return _capturedStoreMenus[storeId];
+    }
 
     const result = await page.evaluate(async (storeId) => {
         const logs = [];
