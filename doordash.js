@@ -2473,8 +2473,23 @@ async function extractMenuItems() {
             pricesFound = true;
             console.log('[DoorDash] Prices detected on page ✓');
         } catch (e) {
-            console.log('[DoorDash] No prices after 60s — page content:', await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'eval failed'));
+            const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'eval failed');
+            console.log('[DoorDash] No prices after 60s — page content:', pageContent);
             await takeScreenshot('extract-menu-no-prices');
+
+            // CF is blocking the page — try in-context API as fallback
+            const storeIdMatch = page.url().match(/\/store\/[^/?#]*?\/(\d{5,})/) || page.url().match(/\/store\/(\d+)/);
+            if (storeIdMatch) {
+                console.log('[DoorDash] Trying in-context API fallback for store', storeIdMatch[1]);
+                const apiItems = await fetchMenuFromInContextAPI(storeIdMatch[1]);
+                if (apiItems && apiItems.length > 0) {
+                    for (let i = 0; i < apiItems.length; i++) {
+                        menuItems.push({ id: `item-${i}`, index: i, name: apiItems[i].name, price: apiItems[i].price, description: apiItems[i].description || '', x: 0, y: 0 });
+                    }
+                    console.log(`[DoorDash] API fallback returned ${menuItems.length} items`);
+                    return menuItems;
+                }
+            }
             return menuItems;
         }
 
@@ -2897,6 +2912,129 @@ async function extractMenuItems() {
  * auto-solve via JS — we just need to wait for the real page to appear.
  * Returns true if no challenge or challenge resolved; false if timed out.
  */
+/**
+ * Fetch menu items directly from DoorDash's internal API via an in-context fetch
+ * call made from within the already-loaded DoorDash page (search results page).
+ * Because the browser already passed CF for doordash.com, same-origin XHR/fetch
+ * requests carry the existing CF clearance + session cookies and are NOT blocked
+ * by the Turnstile that fires on full page navigations to /store/*.
+ *
+ * Returns an array of { name, price } items, or null if all endpoints failed.
+ */
+async function fetchMenuFromInContextAPI(storeId) {
+    console.log(`[DoorDash API] Fetching menu for store ${storeId} via in-context fetch...`);
+
+    const result = await page.evaluate(async (storeId) => {
+        const logs = [];
+        const items = [];
+
+        // Helper: try to extract menu items from various known DoorDash response shapes
+        function parseItems(data) {
+            const found = [];
+            // Shape 1: { store: { menus: [{ menu_categories: [{ items: [...] }] }] } }
+            const menus = data?.store?.menus || data?.menus || [];
+            for (const menu of menus) {
+                const cats = menu.menu_categories || menu.categories || [];
+                for (const cat of cats) {
+                    const catItems = cat.items || cat.menu_items || [];
+                    for (const item of catItems) {
+                        const name = item.name || item.title || '';
+                        // price may be in cents (int) or dollars (float string)
+                        const rawPrice = item.price || item.display_price || item.displayPrice || 0;
+                        const price = typeof rawPrice === 'number'
+                            ? (rawPrice > 200 ? rawPrice / 100 : rawPrice) // cents vs dollars heuristic
+                            : parseFloat(String(rawPrice).replace(/[^0-9.]/g, ''));
+                        if (name && price > 0) found.push({ name, price });
+                    }
+                }
+            }
+            // Shape 2: { data: { store: { menus: [...] } } } (GraphQL wrapper)
+            if (found.length === 0 && data?.data) return parseItems(data.data);
+            return found;
+        }
+
+        // Endpoint 1: REST v2 store details (includes menus)
+        const restEndpoints = [
+            `/api/v2/store/${storeId}/`,
+            `/api/v2/store/${storeId}`,
+        ];
+
+        for (const url of restEndpoints) {
+            try {
+                const resp = await fetch(url, {
+                    credentials: 'include',
+                    headers: { 'Accept': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+                });
+                const text = await resp.text();
+                logs.push(`REST ${url}: ${resp.status} | ${text.substring(0, 200)}`);
+                if (resp.status === 200) {
+                    const data = JSON.parse(text);
+                    const parsed = parseItems(data);
+                    if (parsed.length > 0) return { ok: true, items: parsed, logs };
+                    // Even if no items parsed, log structure for debugging
+                    logs.push(`REST parsed 0 items. Top-level keys: ${Object.keys(data).join(', ')}`);
+                    // Try to return raw data for further analysis
+                    return { ok: false, items: [], rawData: JSON.stringify(data).substring(0, 500), logs };
+                }
+            } catch (e) {
+                logs.push(`REST ${url}: error - ${e.message}`);
+            }
+        }
+
+        // Endpoint 2: GraphQL — getStore query (common DoorDash operation)
+        const gqlQueries = [
+            {
+                operationName: 'getStore',
+                variables: { id: String(storeId) },
+                query: `query getStore($id: ID!) {
+                    store(id: $id) {
+                        name
+                        menus { menu_categories { name items { name price description } } }
+                    }
+                }`,
+            },
+        ];
+
+        for (const payload of gqlQueries) {
+            try {
+                const resp = await fetch('/graphql', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const text = await resp.text();
+                logs.push(`GQL ${payload.operationName}: ${resp.status} | ${text.substring(0, 300)}`);
+                if (resp.status === 200) {
+                    const data = JSON.parse(text);
+                    const parsed = parseItems(data);
+                    if (parsed.length > 0) return { ok: true, items: parsed, logs };
+                    logs.push(`GQL parsed 0 items. Raw: ${text.substring(0, 300)}`);
+                    return { ok: false, items: [], rawData: text.substring(0, 500), logs };
+                }
+            } catch (e) {
+                logs.push(`GQL error: ${e.message}`);
+            }
+        }
+
+        return { ok: false, items: [], logs };
+    }, storeId);
+
+    for (const line of result.logs) {
+        console.log('[DoorDash API]', line);
+    }
+    if (result.rawData) {
+        console.log('[DoorDash API] Raw response data:', result.rawData);
+    }
+
+    if (result.ok && result.items.length > 0) {
+        console.log(`[DoorDash API] Got ${result.items.length} menu items from in-context API`);
+        return result.items;
+    }
+
+    return null;
+}
+
 async function waitForCFChallenge(timeoutMs = 60000) {
     const isCFChallenge = async () => {
         try {
