@@ -2316,30 +2316,42 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await takeScreenshot('5-search-results');
         console.log('[DoorDash] Current URL:', page.url());
 
-        // Step 5b: Extract __NEXT_DATA__ from the page — DoorDash uses SSR so all search
-        // results data (including featured items per restaurant) is embedded here.
+        // Step 5b: Check what page data DoorDash embeds (for finding store/menu data).
         try {
-            const nextDataStr = await page.evaluate(() => {
-                const el = document.getElementById('__NEXT_DATA__');
-                return el ? el.textContent : null;
-            });
-            if (nextDataStr) {
-                const nextData = JSON.parse(nextDataStr);
-                console.log('[DoorDash] Got __NEXT_DATA__, parsing for store menus...');
-                _extractAndCacheMenuData(nextData);
-                const captured = Object.keys(_capturedStoreMenus).length;
-                console.log(`[DoorDash] __NEXT_DATA__ yielded menu data for ${captured} stores`);
-                if (captured === 0) {
-                    // Log top-level keys to understand structure for future debugging
-                    const topKeys = Object.keys(nextData).join(', ');
-                    const propsKeys = nextData.props ? Object.keys(nextData.props).join(', ') : 'no props';
-                    console.log(`[DoorDash] __NEXT_DATA__ keys: ${topKeys} | props keys: ${propsKeys}`);
+            const pageDataInfo = await page.evaluate(() => {
+                // Check Next.js data
+                const nextEl = document.getElementById('__NEXT_DATA__');
+                // Check for script tags with JSON data
+                const scripts = Array.from(document.querySelectorAll('script[type="application/json"], script[id]'));
+                const scriptInfo = scripts.slice(0, 5).map(s => `id=${s.id || 'none'}, len=${s.textContent.length}`);
+                // Check global variables DoorDash might set
+                const globals = [];
+                const candidates = ['__data__', '__STORE__', '__INITIAL_STATE__', 'DD_FRONTEND', '__DD_DATA__', '__DOORDASH__'];
+                for (const k of candidates) {
+                    if (window[k]) globals.push(k);
                 }
-            } else {
-                console.log('[DoorDash] No __NEXT_DATA__ found on page');
+                // Check window keys that look like data stores
+                const windowKeys = Object.keys(window).filter(k => k.startsWith('__') && k.endsWith('__')).slice(0, 10);
+                return {
+                    hasNextData: !!nextEl,
+                    nextDataLen: nextEl ? nextEl.textContent.length : 0,
+                    scriptTags: scriptInfo,
+                    globals,
+                    windowKeys
+                };
+            });
+            console.log('[DoorDash] Page data check:', JSON.stringify(pageDataInfo));
+
+            // Check all JSON-like script tags for store menu data
+            const jsonScripts = await page.evaluate(() => {
+                const scripts = document.querySelectorAll('script[type="application/json"]');
+                return Array.from(scripts).map(s => s.textContent.substring(0, 100));
+            });
+            if (jsonScripts.length > 0) {
+                console.log(`[DoorDash] Found ${jsonScripts.length} JSON script tags`);
             }
         } catch (e) {
-            console.log('[DoorDash] __NEXT_DATA__ extraction error:', e.message);
+            console.log('[DoorDash] Page data check error:', e.message);
         }
 
         // Step 6: Extract restaurants
