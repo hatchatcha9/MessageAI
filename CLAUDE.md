@@ -116,9 +116,51 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 10. **Remote logging** — Added in-memory log buffer + `/logs` HTTP endpoint for Railway debugging
 11. **DOORDASH_COOKIES env** — 110 session cookies exported locally, set in Railway env vars, auto-imported on startup and browser launch
 
-## Current Blocker (as of 2026-03-20)
-**Menu page hits Cloudflare "security verification"** — restaurant pages (`/store/ID/`) show CF challenge, no prices load.
-- Search works fine (10 restaurants returned)
-- CF challenge iframe appears on restaurant page navigation in Railway's headless Chromium
-- `cf_clearance` cookie can't be reused (fingerprint-tied to local Chrome)
-- Next session: detect CF challenge and wait for auto-resolution, or find workaround
+## What Was Fixed (2026-03-22 session — CF bypass attempts)
+1. **Xvfb / headed Chrome disabled** — `start.sh` reverted to headless mode; headed Chrome under Xvfb crashes with SIGSEGV in compositor (`--disable-gpu` causes null pointer deref in rendering pipeline)
+2. **Log buffer increased** — 300 → 2000 lines in server.js
+3. **extractMenuItems LI bug** — old child-price check walked ALL descendants; large flex-container divs caused parent LIs to be incorrectly skipped; fixed to check only child LI elements
+4. **railway.toml startCommand removed** — `startCommand = "node server.js"` was overriding the Dockerfile CMD, bypassing xvfb-run; removed
+5. **Chrome SingletonLock** — delete `SingletonLock`/`SingletonCookie`/`SingletonSocket` before `launchPersistentContext` to handle Railway redeploys on new hosts
+6. **Pre-fetch menu before navigation** — `selectRestaurantFromSearch` now calls `fetchMenuFromInContextAPI(storeId)` BEFORE navigating; result cached in `_preloadedMenuItems`; `extractMenuItems` returns immediately if preloaded
+7. **CF wait reduced** — `waitForCFChallenge` in `selectRestaurantFromSearch` reduced to 5s if preloaded, 30s otherwise (was 60s)
+8. **Page price wait reduced** — `waitForFunction` in `extractMenuItems` reduced from 60s → 15s (faster fallback to API)
+9. **Network response interceptor** — `page.on('response', ...)` set up during search to capture DoorDash's own API responses; result: DoorDash makes NO XHR calls (SSR only), interceptor captures nothing
+10. **`__NEXT_DATA__` check** — DoorDash does NOT use Next.js `__NEXT_DATA__`; confirmed by log
+11. **Apollo Client found** — `window.__APOLLO_CLIENT__` exists! DoorDash uses Apollo GraphQL client
+12. **Apollo cache extraction** — `_extractAndCacheMenuData()` added; called on Apollo `cache.extract()` after search results load; walks the cache tree looking for store ID + menus/featured_items
+
+## Current State (as of 2026-03-22)
+- **Last commit**: `602a2ad` — Apollo cache extraction (not yet tested, session ended before test)
+- **Search**: Works ✓ — 10 pizza restaurants returned
+- **Menu**: Still broken — all DoorDash API endpoints (`/api/v2/store/ID/`, `/graphql`) return **403** with CF challenge HTML from Railway IP, even from within browser context (XHR)
+- **Apollo approach**: Most promising — `window.__APOLLO_CLIENT__` confirmed present. `cache.extract()` should contain store data DoorDash's JS has fetched. **This is the next thing to test.**
+
+## Architecture of CF Problem
+- CF allows: `/search/store/pizza/` page navigation ✓
+- CF blocks: `/store/ID/` page navigation ✗ (Turnstile challenge)
+- CF blocks: `/api/v2/store/ID/` XHR ✗ (403 even from browser context)
+- CF blocks: `/graphql` POST ✗ (403 even from browser context)
+- DoorDash uses Apollo Client (`window.__APOLLO_CLIENT__`) — cache stores all fetched data
+- **Key**: Extract Apollo cache after search — no new requests needed
+
+## Next Session TODO
+1. **Deploy is live** — last push (`602a2ad`) should be deployed; test immediately
+2. **Test Apollo approach**:
+   ```bash
+   curl -X POST "https://messageai-production.up.railway.app/api/twilio/webhook" -d "From=%2B18018006072&Body=pizza+near+me"
+   # wait ~45s
+   curl "https://messageai-production.up.railway.app/logs" | grep "Apollo\|Intercepted\|keyTypes\|menus for stores"
+   ```
+3. If Apollo cache has menu data → check log for `Apollo cache: X keys, types: {...}` and `menus for stores: 12345, ...`
+4. If `_extractAndCacheMenuData` doesn't find items → log will show key types (e.g., `Store:12345`, `MenuItem:abc`) — use those types to write targeted extraction
+5. Then select a restaurant and verify menu appears: `curl -X POST ... -d "From=...&Body=1"` → check for menu items in response
+
+## Railway Testing (no Twilio needed)
+```bash
+# Send test message directly (no Twilio signature check)
+curl -X POST "https://messageai-production.up.railway.app/api/twilio/webhook" \
+  -d "From=%2B18018006072&Body=MESSAGE_HERE"
+# Check logs
+curl "https://messageai-production.up.railway.app/logs"
+```

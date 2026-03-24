@@ -2348,9 +2348,10 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     const capturedIds = Object.keys(_capturedStoreMenus);
                     console.log(`[DoorDash] Apollo cache yielded menus for stores: ${capturedIds.join(', ') || 'none'}`);
                     if (capturedIds.length === 0) {
-                        // Log a sample of cache entries to understand structure
-                        const sample = Object.entries(apolloCache).slice(0, 3).map(([k, v]) => `${k}: ${JSON.stringify(v).substring(0, 100)}`);
-                        console.log('[DoorDash] Apollo cache sample:', sample.join(' | '));
+                        // Log all keys with truncated content so we can understand the structure
+                        for (const [k, v] of Object.entries(apolloCache)) {
+                            console.log(`[DoorDash] CACHE KEY "${k}": ${JSON.stringify(v).substring(0, 300)}`);
+                        }
                     }
                 } catch (e) {
                     console.log('[DoorDash] Apollo cache parse error:', e.message);
