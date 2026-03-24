@@ -2505,9 +2505,22 @@ async function extractRestaurantList() {
                 const textContent = await link.textContent();
                 if (!textContent || textContent.trim().length < 3) continue;
 
-                // Log first 3 card text contents to see if featured items are included
-                if (restaurants.length < 3) {
-                    console.log(`[DoorDash] Card[${restaurants.length}] full text (${textContent.length} chars): ${JSON.stringify(textContent.substring(0, 400))}`);
+                // Log first card's parent HTML to understand featured items structure
+                if (restaurants.length === 0) {
+                    const parentHtml = await link.evaluate(el => {
+                        // Walk up to find the card container (usually 2-3 levels up)
+                        let p = el.parentElement;
+                        for (let i = 0; i < 4; i++) {
+                            if (!p) break;
+                            const h = p.innerHTML;
+                            if (h.length > 200 && h.length < 5000) { // reasonable card size
+                                return h.substring(0, 1500);
+                            }
+                            p = p.parentElement;
+                        }
+                        return el.outerHTML.substring(0, 1500);
+                    });
+                    console.log(`[DoorDash] Card[0] parent HTML: ${parentHtml}`);
                 }
 
                 // Parse out the restaurant name (usually the first meaningful text)
