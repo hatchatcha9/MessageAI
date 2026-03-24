@@ -183,6 +183,21 @@ const sessionState = {
     loginEmail: null
 };
 
+// Serial operation lock — prevents concurrent browser requests that trigger CF rate-limiting
+let _opLockPromise = Promise.resolve();
+
+/**
+ * Run an async function serially (one at a time). If another op is in flight,
+ * this queues behind it. This prevents concurrent DoorDash requests that confuse
+ * the shared browser page and trigger CF bot detection.
+ */
+function withOpLock(fn) {
+    const next = _opLockPromise.then(() => fn()).catch(e => { throw e; });
+    // Allow the queue to drain even if an individual op throws
+    _opLockPromise = next.catch(() => {});
+    return next;
+}
+
 /**
  * Get current session state
  */
@@ -2169,6 +2184,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
     console.log(`[DoorDash] === STARTING SEARCH ===`);
     console.log(`[DoorDash] Query: ${query || 'all'}`);
     console.log(`[DoorDash] Address: ${address}`);
+    let _browserRestartedThisSearch = false;
 
     // API search is blocked by DoorDash WAF (GraphQL 403, REST 404) and launches extra
     // browser instances that consume memory on Railway — skip it, go straight to browser.
@@ -2348,10 +2364,8 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     const capturedIds = Object.keys(_capturedStoreMenus);
                     console.log(`[DoorDash] Apollo cache yielded menus for stores: ${capturedIds.join(', ') || 'none'}`);
                     if (capturedIds.length === 0) {
-                        // Log all keys with truncated content so we can understand the structure
-                        for (const [k, v] of Object.entries(apolloCache)) {
-                            console.log(`[DoorDash] CACHE KEY "${k}": ${JSON.stringify(v).substring(0, 300)}`);
-                        }
+                        // Apollo cache has no menu data (search page is SSR, cache is user/cart data only)
+                        console.log('[DoorDash] Apollo cache has no menu data (expected for search page)');
                     }
                 } catch (e) {
                     console.log('[DoorDash] Apollo cache parse error:', e.message);
@@ -2369,14 +2383,42 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         console.log(`[DoorDash] Extracted ${restaurants.length} restaurants`);
         await takeScreenshot('6-extraction-done');
 
-        // If nothing found, gather diagnostics
+        // If nothing found, try a browser restart (likely CF challenge/session stale)
         if (restaurants.length === 0) {
             const currentUrl = page.url();
+            const bodyText = await page.evaluate(() => document.body ? document.body.innerText.substring(0, 200) : '').catch(() => '');
             const storeLinks = await page.$$('a[href*="/store/"]');
             const sampleHrefs = [];
             for (let i = 0; i < Math.min(3, storeLinks.length); i++) {
                 sampleHrefs.push(await storeLinks[i].getAttribute('href'));
             }
+            console.log(`[DoorDash] 0 restaurants — body: "${bodyText}" | URL: ${currentUrl} | links: ${storeLinks.length}`);
+
+            // If the body looks like a CF challenge, restart the browser and retry once
+            const isCFPage = bodyText.includes('Just a moment') || bodyText.includes('security') || bodyText.includes('challenge') || storeLinks.length === 0;
+            if (isCFPage && !_browserRestartedThisSearch) {
+                console.log('[DoorDash] CF/stale page detected — restarting browser and retrying search...');
+                _browserRestartedThisSearch = true;
+                try {
+                    await closeBrowser();
+                    await delay(3000);
+                    await launchBrowser();
+                    await delay(2000);
+                    // Retry the search by navigating again
+                    await page.goto(`${DOORDASH_URL}/search/store/${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded' });
+                    await delay(3000);
+                    await handlePopups();
+                    const retryRestaurants = await extractRestaurantList();
+                    console.log(`[DoorDash] After restart: extracted ${retryRestaurants.length} restaurants`);
+                    if (retryRestaurants.length > 0) {
+                        const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
+                        return { success: true, restaurants: sorted };
+                    }
+                } catch (restartErr) {
+                    console.log('[DoorDash] Restart error:', restartErr.message);
+                }
+            }
+
             const diagMsg = `0 restaurants extracted. URL: ${currentUrl}. Store links: ${storeLinks.length}. Sample hrefs: ${JSON.stringify(sampleHrefs)}`;
             console.log('[DoorDash] DIAG:', diagMsg);
             return { success: false, error: diagMsg, restaurants: [] };
@@ -2505,26 +2547,6 @@ async function extractRestaurantList() {
                 const textContent = await link.textContent();
                 if (!textContent || textContent.trim().length < 3) continue;
 
-                // Diagnostic: log page-level data for first card
-                if (restaurants.length === 0) {
-                    const pageData = await link.evaluate(el => {
-                        // Check for JSON-LD structured data
-                        const jsonLdScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-                        // Check for item links
-                        const itemLinks = Array.from(document.querySelectorAll('a[href*="itemId="]'));
-                        // Check for embedded search data
-                        const scripts = Array.from(document.querySelectorAll('script:not([src])'));
-                        const dataScript = scripts.find(s => s.textContent.includes('"item_ids"') || s.textContent.includes('"featured_items"'));
-                        return {
-                            jsonLdCount: jsonLdScripts.length,
-                            jsonLdSample: jsonLdScripts[0] ? jsonLdScripts[0].textContent.substring(0, 300) : null,
-                            itemLinkCount: itemLinks.length,
-                            itemLinkSample: itemLinks.slice(0, 3).map(a => ({ href: a.href.substring(0, 100), text: a.textContent.trim().substring(0, 60) })),
-                            hasDataScript: !!dataScript,
-                        };
-                    });
-                    console.log('[DoorDash] Page data diagnostic:', JSON.stringify(pageData));
-                }
 
                 // Parse out the restaurant name (usually the first meaningful text)
                 const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
@@ -5360,6 +5382,12 @@ async function importCookies(cookies) {
     return { success: true };
 }
 
+// Wrap browser-touching exports with the serial op lock to prevent concurrent requests
+// that confuse the shared browser page and trigger CF rate-limiting.
+function locked(fn) {
+    return function(...args) { return withOpLock(() => fn(...args)); };
+}
+
 module.exports = {
     launchBrowser,
     closeBrowser,
@@ -5369,10 +5397,10 @@ module.exports = {
     searchRestaurant,
     addItemToCart,
     checkout,
-    placeOrder,
+    placeOrder: locked(placeOrder),
     getOrderConfirmation,
     placeFullOrder,
-    checkoutCurrentCart,
+    checkoutCurrentCart: locked(checkoutCurrentCart),
     placeAdditionalOrder,
     handlePopups,
     takeScreenshot,
@@ -5387,18 +5415,18 @@ module.exports = {
     detectPageErrors,
     withRetry,
     // Real restaurant search functions
-    searchRestaurantsNearAddress,
+    searchRestaurantsNearAddress: locked(searchRestaurantsNearAddress),
     extractRestaurantList,
     sortRestaurantsByRating,
     sortRestaurantsByRelevance,
-    getRestaurantMenu,
+    getRestaurantMenu: locked(getRestaurantMenu),
     extractMenuItems,
     extractMenuCategories,
     getMenuItemsInCategory,
-    selectRestaurantFromSearch,
-    addItemByIndex,
-    navigateToRestaurantPage,
-    clearBrowserCart,
+    selectRestaurantFromSearch: locked(selectRestaurantFromSearch),
+    addItemByIndex: locked(addItemByIndex),
+    navigateToRestaurantPage: locked(navigateToRestaurantPage),
+    clearBrowserCart: locked(clearBrowserCart),
     getOrderStatus,
     exportCookies,
     importCookies
