@@ -2505,30 +2505,25 @@ async function extractRestaurantList() {
                 const textContent = await link.textContent();
                 if (!textContent || textContent.trim().length < 3) continue;
 
-                // Diagnostic: log all item-link hrefs near first store (to find featured items structure)
+                // Diagnostic: log page-level data for first card
                 if (restaurants.length === 0) {
-                    const nearbyItems = await link.evaluate(el => {
-                        // Walk up to find a container that has both the store link + any item links
-                        let container = el.parentElement;
-                        for (let i = 0; i < 6 && container; i++) {
-                            const itemLinks = container.querySelectorAll('a[href*="/item/"]');
-                            if (itemLinks.length > 0) {
-                                return Array.from(itemLinks).slice(0, 5).map(a => ({
-                                    href: a.href,
-                                    text: a.textContent.trim().substring(0, 100)
-                                }));
-                            }
-                            container = container.parentElement;
-                        }
-                        // No item links found — log the full page item link count
-                        const allItemLinks = document.querySelectorAll('a[href*="/item/"]');
-                        return { noNearby: true, totalItemLinks: allItemLinks.length,
-                            sample: Array.from(allItemLinks).slice(0, 3).map(a => ({
-                                href: a.href, text: a.textContent.trim().substring(0, 100)
-                            }))
+                    const pageData = await link.evaluate(el => {
+                        // Check for JSON-LD structured data
+                        const jsonLdScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+                        // Check for item links
+                        const itemLinks = Array.from(document.querySelectorAll('a[href*="itemId="]'));
+                        // Check for embedded search data
+                        const scripts = Array.from(document.querySelectorAll('script:not([src])'));
+                        const dataScript = scripts.find(s => s.textContent.includes('"item_ids"') || s.textContent.includes('"featured_items"'));
+                        return {
+                            jsonLdCount: jsonLdScripts.length,
+                            jsonLdSample: jsonLdScripts[0] ? jsonLdScripts[0].textContent.substring(0, 300) : null,
+                            itemLinkCount: itemLinks.length,
+                            itemLinkSample: itemLinks.slice(0, 3).map(a => ({ href: a.href.substring(0, 100), text: a.textContent.trim().substring(0, 60) })),
+                            hasDataScript: !!dataScript,
                         };
                     });
-                    console.log('[DoorDash] Nearby item links for card[0]:', JSON.stringify(nearbyItems));
+                    console.log('[DoorDash] Page data diagnostic:', JSON.stringify(pageData));
                 }
 
                 // Parse out the restaurant name (usually the first meaningful text)
