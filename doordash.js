@@ -2505,22 +2505,30 @@ async function extractRestaurantList() {
                 const textContent = await link.textContent();
                 if (!textContent || textContent.trim().length < 3) continue;
 
-                // Log first card's parent HTML to understand featured items structure
+                // Diagnostic: log all item-link hrefs near first store (to find featured items structure)
                 if (restaurants.length === 0) {
-                    const parentHtml = await link.evaluate(el => {
-                        // Walk up to find the card container (usually 2-3 levels up)
-                        let p = el.parentElement;
-                        for (let i = 0; i < 4; i++) {
-                            if (!p) break;
-                            const h = p.innerHTML;
-                            if (h.length > 200 && h.length < 5000) { // reasonable card size
-                                return h.substring(0, 1500);
+                    const nearbyItems = await link.evaluate(el => {
+                        // Walk up to find a container that has both the store link + any item links
+                        let container = el.parentElement;
+                        for (let i = 0; i < 6 && container; i++) {
+                            const itemLinks = container.querySelectorAll('a[href*="/item/"]');
+                            if (itemLinks.length > 0) {
+                                return Array.from(itemLinks).slice(0, 5).map(a => ({
+                                    href: a.href,
+                                    text: a.textContent.trim().substring(0, 100)
+                                }));
                             }
-                            p = p.parentElement;
+                            container = container.parentElement;
                         }
-                        return el.outerHTML.substring(0, 1500);
+                        // No item links found — log the full page item link count
+                        const allItemLinks = document.querySelectorAll('a[href*="/item/"]');
+                        return { noNearby: true, totalItemLinks: allItemLinks.length,
+                            sample: Array.from(allItemLinks).slice(0, 3).map(a => ({
+                                href: a.href, text: a.textContent.trim().substring(0, 100)
+                            }))
+                        };
                     });
-                    console.log(`[DoorDash] Card[0] parent HTML: ${parentHtml}`);
+                    console.log('[DoorDash] Nearby item links for card[0]:', JSON.stringify(nearbyItems));
                 }
 
                 // Parse out the restaurant name (usually the first meaningful text)
