@@ -2550,23 +2550,33 @@ async function extractRestaurantList() {
                     continue;
                 }
 
-                // Get the text content of the link (restaurant name is usually in here)
+                // Prefer DoorDash's telemetry attribute for the restaurant name —
+                // this avoids picking up promo banners like "Enjoy 50% off" that also link to stores.
+                let name = await link.evaluate(el => {
+                    const span = el.querySelector('[data-telemetry-id="store.name"]');
+                    return span ? span.textContent.trim() : null;
+                });
+
+                if (!name) {
+                    // Fallback: use first line of text content and clean it up
+                    const textContent = await link.textContent();
+                    if (!textContent || textContent.trim().length < 3) continue;
+                    const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+                    name = lines[0] || '';
+                    name = name.replace(/^\d+\.\d+\s*/, '');
+                    name = name.replace(/\d+\.\d+\(.*$/, '');
+                    name = name.replace(/\s*[•(].*$/, '');
+                    name = name.replace(/\$+.*$/, '');
+                    name = name.replace(/\d+[-–]\d+\s*min.*$/i, '');
+                    name = name.replace(/\d+\s*min.*$/i, '');
+                    name = name.trim();
+                }
+
+                // Skip promo links (no real restaurant name found)
+                const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
+                if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+
                 const textContent = await link.textContent();
-                if (!textContent || textContent.trim().length < 3) continue;
-
-
-                // Parse out the restaurant name (usually the first meaningful text)
-                const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
-                let name = lines[0] || '';
-
-                // Clean up the name - remove ratings, prices, delivery info appended after restaurant name
-                name = name.replace(/^\d+\.\d+\s*/, ''); // Remove leading rating like "4.5 "
-                name = name.replace(/\d+\.\d+\(.*$/, ''); // Remove "4.5(2k+)•..." appended after name
-                name = name.replace(/\s*[•(].*$/, ''); // Remove anything after • or ( (reviews, distance, time)
-                name = name.replace(/\$+.*$/, ''); // Remove price indicators
-                name = name.replace(/\d+[-–]\d+\s*min.*$/i, ''); // Remove delivery time range
-                name = name.replace(/\d+\s*min.*$/i, ''); // Remove single delivery time
-                name = name.trim();
 
                 if (!name || name.length < 3 || seenNames.has(name.toLowerCase())) continue;
                 seenNames.add(name.toLowerCase());
