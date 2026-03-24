@@ -386,6 +386,13 @@ async function launchBrowser(headless = HEADLESS) {
         launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     }
 
+    // If a residential proxy is configured, use it to bypass CF's datacenter IP block
+    // on DoorDash store pages. Set PROXY_URL=http://user:pass@host:port in Railway env vars.
+    if (process.env.PROXY_URL) {
+        launchOptions.proxy = { server: process.env.PROXY_URL };
+        console.log(`[DoorDash] Using proxy: ${process.env.PROXY_URL.replace(/:([^:@]+)@/, ':***@')}`);
+    }
+
     console.log(`[DoorDash] Launching ${CHROME_INSTALLED ? 'real Chrome' : 'bundled Chromium'} with dedicated MessageAI profile (headless=${headless}, DISPLAY=${process.env.DISPLAY || 'unset'})`);
     context = await chromium.launchPersistentContext(BOT_PROFILE_DIR, launchOptions);
 
