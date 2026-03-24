@@ -2505,6 +2505,11 @@ async function extractRestaurantList() {
                 const textContent = await link.textContent();
                 if (!textContent || textContent.trim().length < 3) continue;
 
+                // Log first 3 card text contents to see if featured items are included
+                if (restaurants.length < 3) {
+                    console.log(`[DoorDash] Card[${restaurants.length}] full text (${textContent.length} chars): ${JSON.stringify(textContent.substring(0, 400))}`);
+                }
+
                 // Parse out the restaurant name (usually the first meaningful text)
                 const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
                 let name = lines[0] || '';
