@@ -375,13 +375,11 @@ async function launchBrowser(headless = HEADLESS) {
             '--no-default-browser-check',
             '--window-size=1280,720',
             '--lang=en-US',
-            // Sandbox flags needed in containerized environments
             '--disable-setuid-sandbox',
-            '--no-zygote',
-            // Use software WebGL (SwiftShader) instead of disabling GPU entirely.
-            // --disable-gpu kills WebGL/Canvas completely, making fingerprints obviously bot-like.
-            // SwiftShader provides a more realistic rendering surface that CF fingerprinting accepts.
-            '--use-gl=swiftshader',
+            // --no-zygote and --use-gl=swiftshader are headless-only.
+            // In headed mode (Xvfb), these interfere with the real rendering pipeline.
+            // Xvfb provides a virtual display; Chrome uses Mesa/GLX naturally without extra flags.
+            ...(headless ? ['--no-zygote', '--use-gl=swiftshader'] : []),
         ],
         ignoreDefaultArgs: ['--enable-automation'],
     };
