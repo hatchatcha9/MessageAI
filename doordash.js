@@ -388,8 +388,16 @@ async function launchBrowser(headless = HEADLESS) {
 
     // If a residential proxy is configured, use it to bypass CF's datacenter IP block
     // on DoorDash store pages. Set PROXY_URL=http://user:pass@host:port in Railway env vars.
+    // Playwright requires credentials as separate fields, not embedded in the server URL.
     if (process.env.PROXY_URL) {
-        launchOptions.proxy = { server: process.env.PROXY_URL };
+        try {
+            const pu = new URL(process.env.PROXY_URL);
+            launchOptions.proxy = { server: `${pu.protocol}//${pu.host}` };
+            if (pu.username) launchOptions.proxy.username = decodeURIComponent(pu.username);
+            if (pu.password) launchOptions.proxy.password = decodeURIComponent(pu.password);
+        } catch (e) {
+            launchOptions.proxy = { server: process.env.PROXY_URL };
+        }
         console.log(`[DoorDash] Using proxy: ${process.env.PROXY_URL.replace(/:([^:@]+)@/, ':***@')}`);
     }
 
