@@ -2736,32 +2736,17 @@ async function extractMenuItems() {
             return menuItems;
         }
 
-        // Step-scroll to trigger lazy loading (incremental, not jump-to-bottom)
-        const pageHeight = await page.evaluate(() => document.body.scrollHeight);
-        console.log(`[DoorDash] Page height: ${pageHeight}px, step-scrolling...`);
-        for (let pos = 0; pos < pageHeight; pos += 600) {
-            await page.evaluate((y) => window.scrollTo(0, y), pos);
-            await delay(250);
-        }
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await delay(2000);
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await delay(1000);
-        await takeScreenshot('extract-menu-scrolled');
-
-        // --- Strategy 1: LI-based extraction ---
-        // Key fix: use child-LI check instead of child-size check.
-        // The old approach walked ALL descendants and if any large flex container
-        // (which includes the price) was a child, the whole LI was skipped as a
-        // "wrapper". The new approach only skips an LI if it contains other LIs
-        // that also have prices — i.e., it's a category container, not a menu item.
-        const extracted = await page.evaluate(() => {
+        // DoorDash uses virtual scrolling — items are removed from the DOM when scrolled past.
+        // Solution: extract items at each viewport position WHILE scrolling, then deduplicate.
+        // This captures items regardless of whether they stay in the DOM after being scrolled past.
+        const extractAtViewport = () => page.evaluate(() => {
             const results = [];
-            const seen = new Set();
-
             const listItems = document.querySelectorAll('li, [role="listitem"]');
             for (const li of listItems) {
                 if (li.offsetWidth < 50 || li.offsetHeight < 30) continue;
+                // Only items in or near the current viewport
+                const rect = li.getBoundingClientRect();
+                if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
 
                 const text = (li.textContent || '').trim();
                 const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
@@ -2770,7 +2755,7 @@ async function extractMenuItems() {
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
 
-                // Skip if a child LI also has a price (this is a parent/category LI)
+                // Skip if a child LI also has a price (parent/category container)
                 const childLIs = li.querySelectorAll('li, [role="listitem"]');
                 let childLIHasPrice = false;
                 for (const cLI of childLIs) {
@@ -2778,7 +2763,6 @@ async function extractMenuItems() {
                 }
                 if (childLIHasPrice) continue;
 
-                // Extract name: text before the first '$' sign, first meaningful line
                 const beforePrice = text.split('$')[0];
                 const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
                 let name = '';
@@ -2790,17 +2774,42 @@ async function extractMenuItems() {
                 }
                 if (!name || name.length < 3) continue;
 
-                const key = name.toLowerCase();
-                if (seen.has(key)) continue;
-                seen.add(key);
-
-                const rect = li.getBoundingClientRect();
-                results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + window.scrollY + rect.height / 2 });
             }
             return results;
         });
 
-        console.log(`[DoorDash] Strategy 1 (LI-based): ${extracted.length} items`);
+        // Scroll through the full page, extracting at each stop
+        const allItemsMap = new Map(); // name.toLowerCase() -> item
+        let pageHeight = await page.evaluate(() => document.body.scrollHeight);
+        console.log(`[DoorDash] Page height: ${pageHeight}px — scroll-extracting...`);
+
+        for (let pos = 0; pos <= pageHeight; pos += 400) {
+            await page.evaluate((y) => window.scrollTo(0, y), pos);
+            await delay(350);
+            const batch = await extractAtViewport();
+            for (const item of batch) {
+                const key = item.name.toLowerCase();
+                if (!allItemsMap.has(key)) allItemsMap.set(key, item);
+            }
+            // Re-check height in case new content loaded while scrolling
+            if (pos > 0 && pos % 2400 === 0) {
+                pageHeight = await page.evaluate(() => document.body.scrollHeight);
+            }
+        }
+
+        // Final pass at the top (items at top may have been unloaded while at bottom)
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await delay(800);
+        const topBatch = await extractAtViewport();
+        for (const item of topBatch) {
+            const key = item.name.toLowerCase();
+            if (!allItemsMap.has(key)) allItemsMap.set(key, item);
+        }
+        await takeScreenshot('extract-menu-scrolled');
+
+        const extracted = Array.from(allItemsMap.values());
+        console.log(`[DoorDash] Strategy 1 (scroll+extract): ${extracted.length} items`);
 
         // --- Strategy 2: Generic fallback (div/button/article) ---
         // Only run if LI approach got fewer than 3 items.
