@@ -2766,31 +2766,15 @@ async function extractMenuItems() {
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
 
-                // Item names are bolded on DoorDash — grab the bold element directly
+                // innerText gives "Name\nDescription\n$Price" (respects block boundaries).
+                // The item name is the first non-calorie line before the price.
                 let name = '';
-                const boldEl = el.querySelector('b, strong, [style*="font-weight: 700"], [style*="font-weight:700"], [style*="font-weight: bold"]')
-                    || (() => {
-                        // Check computed style for bold elements (DoorDash uses CSS classes for bold)
-                        for (const child of el.querySelectorAll('span, p, div, h1, h2, h3, h4')) {
-                            if (child.children.length === 0) { // leaf node
-                                const fw = window.getComputedStyle(child).fontWeight;
-                                if (fw === 'bold' || parseInt(fw) >= 600) return child;
-                            }
-                        }
-                        return null;
-                    })();
-                if (boldEl) {
-                    name = (boldEl.innerText || boldEl.textContent || '').trim().split('\n')[0].trim();
-                }
-                // Fallback: first non-description line from innerText
-                if (!name || name.length < 3) {
-                    const beforePrice = text.split('$')[0];
-                    const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
-                    for (const line of lines) {
-                        if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
-                            name = line.split('•')[0].replace(/\s+/g, ' ').trim();
-                            break;
-                        }
+                const beforePrice = text.split('$')[0];
+                const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                for (const line of lines) {
+                    if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
+                        name = line.split('•')[0].replace(/\s+/g, ' ').trim();
+                        break;
                     }
                 }
                 if (!name || name.length < 3) continue;
