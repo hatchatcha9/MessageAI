@@ -2744,12 +2744,11 @@ async function extractMenuItems() {
             const results = [];
             const seen = new Set();
 
-            // Fast path: DoorDash-specific menu item elements (avoids scanning thousands of li/button)
-            let candidates = document.querySelectorAll('[data-anchor-id="MenuItem"], [data-testid="menu-item"]');
-            // Fallback: generic list/article elements (Five Guys, etc. that don't use data-anchor-id)
-            if (candidates.length === 0) {
-                candidates = document.querySelectorAll('li, article');
-            }
+            // Always query both DoorDash-specific and generic elements.
+            // Some restaurants (or menu sections like Salads) may not use data-anchor-id.
+            const candidates = document.querySelectorAll(
+                '[data-anchor-id="MenuItem"], [data-testid="menu-item"], li, article'
+            );
 
             for (const el of candidates) {
                 // Viewport filter first (cheap) before layout-triggering calls
