@@ -116,6 +116,13 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 10. **Remote logging** — Added in-memory log buffer + `/logs` HTTP endpoint for Railway debugging
 11. **DOORDASH_COOKIES env** — 110 session cookies exported locally, set in Railway env vars, auto-imported on startup and browser launch
 
+## What Was Fixed (2026-03-26 session — CF bypass SOLVED)
+1. **Residential proxy** — IPRoyal `geo.iproyal.com:12321` set as `PROXY_URL` Railway env var; Playwright proxy URL parsing fixed to extract username/password as separate fields
+2. **Xvfb + headed Chrome** — Re-enabled Xvfb in `start.sh`; headed mode is the key bypass (CF Turnstile fingerprints headless browsers); startup confirms `headless=false, DISPLAY=:99`
+3. **GPU flags fixed** — Previous crash (SIGSEGV) was `--disable-gpu` + headed + Xvfb; removed that flag; `--no-zygote`/`--use-gl=swiftshader` now headless-only (spread in args conditional on `headless`)
+4. **User agent fixed** — Was `Chrome/131` but actual Chromium is v145; updated to `Chrome/145.0.0.0`
+5. **Menu now loads** — `No CF challenge detected`, 10 menu categories, prices detected, items returned
+
 ## What Was Fixed (2026-03-22 session — CF bypass attempts)
 1. **Xvfb / headed Chrome disabled** — `start.sh` reverted to headless mode; headed Chrome under Xvfb crashes with SIGSEGV in compositor (`--disable-gpu` causes null pointer deref in rendering pipeline)
 2. **Log buffer increased** — 300 → 2000 lines in server.js
@@ -130,11 +137,10 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 11. **Apollo Client found** — `window.__APOLLO_CLIENT__` exists! DoorDash uses Apollo GraphQL client
 12. **Apollo cache extraction** — `_extractAndCacheMenuData()` added; called on Apollo `cache.extract()` after search results load; walks the cache tree looking for store ID + menus/featured_items
 
-## Current State (as of 2026-03-22)
-- **Last commit**: `602a2ad` — Apollo cache extraction (not yet tested, session ended before test)
-- **Search**: Works ✓ — 10 pizza restaurants returned
-- **Menu**: Still broken — all DoorDash API endpoints (`/api/v2/store/ID/`, `/graphql`) return **403** with CF challenge HTML from Railway IP, even from within browser context (XHR)
-- **Apollo approach**: Most promising — `window.__APOLLO_CLIENT__` confirmed present. `cache.extract()` should contain store data DoorDash's JS has fetched. **This is the next thing to test.**
+## Current State (as of 2026-03-26)
+- **Search**: Works ✓ — 10 restaurants returned
+- **Menu**: **FIXED** ✓ — Xvfb + headed Chrome + IPRoyal residential proxy bypasses CF Turnstile
+- **Orders**: Should work end-to-end (menu loads, items visible)
 
 ## Architecture of CF Problem
 - CF allows: `/search/store/pizza/` page navigation ✓
@@ -145,16 +151,9 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 - **Key**: Extract Apollo cache after search — no new requests needed
 
 ## Next Session TODO
-1. **Deploy is live** — last push (`602a2ad`) should be deployed; test immediately
-2. **Test Apollo approach**:
-   ```bash
-   curl -X POST "https://messageai-production.up.railway.app/api/twilio/webhook" -d "From=%2B18018006072&Body=pizza+near+me"
-   # wait ~45s
-   curl "https://messageai-production.up.railway.app/logs" | grep "Apollo\|Intercepted\|keyTypes\|menus for stores"
-   ```
-3. If Apollo cache has menu data → check log for `Apollo cache: X keys, types: {...}` and `menus for stores: 12345, ...`
-4. If `_extractAndCacheMenuData` doesn't find items → log will show key types (e.g., `Store:12345`, `MenuItem:abc`) — use those types to write targeted extraction
-5. Then select a restaurant and verify menu appears: `curl -X POST ... -d "From=...&Body=1"` → check for menu items in response
+1. **Test full ordering flow** — select restaurant → add item → checkout → confirm order goes through
+2. **Only 6 menu items extracted** — `extractMenuItems` returning fewer items than the 10 categories suggest; may need to scroll/click categories to load more items
+3. **Bandwidth optimization** — block images/fonts in Playwright to reduce proxy bandwidth usage
 
 ## Railway Testing (no Twilio needed)
 ```bash
