@@ -2738,30 +2738,44 @@ async function extractMenuItems() {
 
         // DoorDash uses virtual scrolling — items are removed from the DOM when scrolled past.
         // Solution: extract items at each viewport position WHILE scrolling, then deduplicate.
-        // This captures items regardless of whether they stay in the DOM after being scrolled past.
+        // Uses a broad selector set since DoorDash's DOM structure varies by restaurant
+        // (some use <li>, some use <article>, some use <div role="button">).
         const extractAtViewport = () => page.evaluate(() => {
             const results = [];
-            const listItems = document.querySelectorAll('li, [role="listitem"]');
-            for (const li of listItems) {
-                if (li.offsetWidth < 50 || li.offsetHeight < 30) continue;
+            const seen = new Set();
+            // Cast wide net: DoorDash-specific anchors, list items, articles, interactive cards
+            const candidates = document.querySelectorAll(
+                '[data-anchor-id="MenuItem"], [data-testid="menu-item"], ' +
+                'li, [role="listitem"], article, ' +
+                'button, [role="button"]'
+            );
+            for (const el of candidates) {
+                if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
+                if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
                 // Only items in or near the current viewport
-                const rect = li.getBoundingClientRect();
+                const rect = el.getBoundingClientRect();
                 if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
 
-                const text = (li.textContent || '').trim();
+                const text = (el.textContent || '').trim();
+                if (text.length > 700) continue; // skip large wrapper containers
                 const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
                 if (!priceMatch) continue;
 
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
 
-                // Skip if a child LI also has a price (parent/category container)
-                const childLIs = li.querySelectorAll('li, [role="listitem"]');
-                let childLIHasPrice = false;
-                for (const cLI of childLIs) {
-                    if ((cLI.textContent || '').match(/\$\d+/)) { childLIHasPrice = true; break; }
+                // Skip if a child of the same element types also has a price (parent container)
+                const childCandidates = el.querySelectorAll(
+                    '[data-anchor-id="MenuItem"], [data-testid="menu-item"], ' +
+                    'li, [role="listitem"], article, button, [role="button"]'
+                );
+                let childHasPrice = false;
+                for (const child of childCandidates) {
+                    if (child.offsetWidth > 80 && child.offsetHeight > 50 && (child.textContent || '').match(/\$\d+/)) {
+                        childHasPrice = true; break;
+                    }
                 }
-                if (childLIHasPrice) continue;
+                if (childHasPrice) continue;
 
                 const beforePrice = text.split('$')[0];
                 const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
@@ -2774,7 +2788,11 @@ async function extractMenuItems() {
                 }
                 if (!name || name.length < 3) continue;
 
-                results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + window.scrollY + rect.height / 2 });
+                const key = name.toLowerCase();
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + window.scrollY + rect.height / 2 });
+                }
             }
             return results;
         });
@@ -2811,10 +2829,11 @@ async function extractMenuItems() {
         const extracted = Array.from(allItemsMap.values());
         console.log(`[DoorDash] Strategy 1 (scroll+extract): ${extracted.length} items`);
 
-        // --- Strategy 2: Generic fallback (div/button/article) ---
-        // Only run if LI approach got fewer than 3 items.
+        // --- Strategy 2: Full-page generic scan as a catch-all ---
+        // Always runs to catch anything missed during the scroll loop (e.g. items
+        // that were in-DOM during the final top-scroll but not caught by viewport filter).
         let fallback = [];
-        if (extracted.length < 3) {
+        if (extracted.length < 15) {
             console.log('[DoorDash] Trying strategy 2 (generic elements)...');
             fallback = await page.evaluate(() => {
                 const results = [];
