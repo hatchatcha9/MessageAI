@@ -2757,21 +2757,40 @@ async function extractMenuItems() {
                 if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
                 if (rect.width < 80 || rect.height < 50) continue;
 
-                const text = (el.textContent || '').trim();
-                if (text.length > 700) continue;
+                // Get full text for price extraction
+                const text = (el.innerText || el.textContent || '').trim();
+                if (text.length > 1000) continue;
                 const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
                 if (!priceMatch) continue;
 
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
 
-                const beforePrice = text.split('$')[0];
-                const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                // Item names are bolded on DoorDash — grab the bold element directly
                 let name = '';
-                for (const line of lines) {
-                    if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
-                        name = line.split('•')[0].replace(/\s+/g, ' ').trim();
-                        break;
+                const boldEl = el.querySelector('b, strong, [style*="font-weight: 700"], [style*="font-weight:700"], [style*="font-weight: bold"]')
+                    || (() => {
+                        // Check computed style for bold elements (DoorDash uses CSS classes for bold)
+                        for (const child of el.querySelectorAll('span, p, div, h1, h2, h3, h4')) {
+                            if (child.children.length === 0) { // leaf node
+                                const fw = window.getComputedStyle(child).fontWeight;
+                                if (fw === 'bold' || parseInt(fw) >= 600) return child;
+                            }
+                        }
+                        return null;
+                    })();
+                if (boldEl) {
+                    name = (boldEl.innerText || boldEl.textContent || '').trim().split('\n')[0].trim();
+                }
+                // Fallback: first non-description line from innerText
+                if (!name || name.length < 3) {
+                    const beforePrice = text.split('$')[0];
+                    const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
+                    for (const line of lines) {
+                        if (!line.match(/^\d+\s*(cal|kcal|g|oz)?$/i) && line.length < 100) {
+                            name = line.split('•')[0].replace(/\s+/g, ' ').trim();
+                            break;
+                        }
                     }
                 }
                 if (!name || name.length < 3) continue;
@@ -2832,20 +2851,20 @@ async function extractMenuItems() {
                     if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
                     if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
 
-                    const text = (el.textContent || '').trim();
+                    const text = (el.innerText || el.textContent || '').trim();
                     const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
                     if (!priceMatch) continue;
 
                     const price = parseFloat(priceMatch[1]);
                     if (price < 1 || price > 100) continue;
-                    if (text.length > 600) continue;
+                    if (text.length > 800) continue;
 
                     // Skip if a child div larger than 200x80 also has a price
                     const children = el.querySelectorAll('div, article, button');
                     let childHasPrice = false;
                     for (const child of children) {
                         if (child.offsetWidth < 200 || child.offsetHeight < 80) continue;
-                        if ((child.textContent || '').match(/\$\d+/)) { childHasPrice = true; break; }
+                        if ((child.innerText || child.textContent || '').match(/\$\d+/)) { childHasPrice = true; break; }
                     }
                     if (childHasPrice) continue;
 
