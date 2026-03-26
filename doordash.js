@@ -3399,10 +3399,12 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     return link ? link.href : null;
                 }, storeId);
                 if (fullHref) {
-                    // Strip cursor/session params but keep the slug
+                    // Keep cursor param — CF uses it as session context to whitelist navigation
+                    // from a legitimate search. Without it, ID-only URLs get CF-challenged.
                     try {
                         const u = new URL(fullHref);
-                        targetUrl = u.origin + u.pathname; // drop all query params
+                        const cursor = u.searchParams.get('cursor');
+                        targetUrl = u.origin + u.pathname + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : '');
                     } catch (e) {}
                     console.log(`[DoorDash] Using full slug URL: ${targetUrl}`);
                 }
