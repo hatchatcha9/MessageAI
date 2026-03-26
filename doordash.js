@@ -2743,39 +2743,27 @@ async function extractMenuItems() {
         const extractAtViewport = () => page.evaluate(() => {
             const results = [];
             const seen = new Set();
-            // Cast wide net: DoorDash-specific anchors, list items, articles, interactive cards
-            const candidates = document.querySelectorAll(
-                '[data-anchor-id="MenuItem"], [data-testid="menu-item"], ' +
-                'li, [role="listitem"], article, ' +
-                'button, [role="button"]'
-            );
+
+            // Fast path: DoorDash-specific menu item elements (avoids scanning thousands of li/button)
+            let candidates = document.querySelectorAll('[data-anchor-id="MenuItem"], [data-testid="menu-item"]');
+            // Fallback: generic list/article elements (Five Guys, etc. that don't use data-anchor-id)
+            if (candidates.length === 0) {
+                candidates = document.querySelectorAll('li, article');
+            }
+
             for (const el of candidates) {
-                if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
-                if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
-                // Only items in or near the current viewport
+                // Viewport filter first (cheap) before layout-triggering calls
                 const rect = el.getBoundingClientRect();
                 if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
+                if (rect.width < 80 || rect.height < 50) continue;
 
                 const text = (el.textContent || '').trim();
-                if (text.length > 700) continue; // skip large wrapper containers
+                if (text.length > 700) continue;
                 const priceMatch = text.match(/\$(\d+(?:\.\d{2})?)/);
                 if (!priceMatch) continue;
 
                 const price = parseFloat(priceMatch[1]);
                 if (price < 1 || price > 100) continue;
-
-                // Skip if a child of the same element types also has a price (parent container)
-                const childCandidates = el.querySelectorAll(
-                    '[data-anchor-id="MenuItem"], [data-testid="menu-item"], ' +
-                    'li, [role="listitem"], article, button, [role="button"]'
-                );
-                let childHasPrice = false;
-                for (const child of childCandidates) {
-                    if (child.offsetWidth > 80 && child.offsetHeight > 50 && (child.textContent || '').match(/\$\d+/)) {
-                        childHasPrice = true; break;
-                    }
-                }
-                if (childHasPrice) continue;
 
                 const beforePrice = text.split('$')[0];
                 const lines = beforePrice.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 2);
@@ -2810,6 +2798,7 @@ async function extractMenuItems() {
                 const key = item.name.toLowerCase();
                 if (!allItemsMap.has(key)) allItemsMap.set(key, item);
             }
+            if (batch.length > 0) console.log(`[DoorDash] scroll@${pos}: +${batch.length} items (total ${allItemsMap.size})`);
             // Re-check height in case new content loaded while scrolling
             if (pos > 0 && pos % 2400 === 0) {
                 pageHeight = await page.evaluate(() => document.body.scrollHeight);
