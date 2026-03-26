@@ -339,9 +339,13 @@ async function launchBrowser(headless = HEADLESS) {
     }
 
     // Use real Chrome if available (local dev), otherwise fall back to bundled Chromium (Railway)
-    const CHROME_INSTALLED = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+    const CHROME_INSTALLED = fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')
+        || fs.existsSync('/usr/bin/google-chrome-stable')
+        || fs.existsSync('/usr/bin/google-chrome');
     const BOT_PROFILE_DIR = CHROME_INSTALLED
-        ? 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile'
+        ? (fs.existsSync('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe')
+            ? 'C:\\Users\\hatch\\AppData\\Local\\MessageAI\\ChromeProfile'
+            : path.join(BROWSER_DATA_DIR, 'ChromeProfile'))
         : path.join(BROWSER_DATA_DIR, 'ChromeProfile');
 
     if (!fs.existsSync(BOT_PROFILE_DIR)) {
@@ -371,19 +375,22 @@ async function launchBrowser(headless = HEADLESS) {
             '--no-default-browser-check',
             '--window-size=1280,720',
             '--lang=en-US',
-            // Needed for Xvfb (no real GPU) — prevents renderer crashes under virtual display
-            '--disable-gpu',
-            '--disable-gpu-sandbox',
+            // Sandbox flags needed in containerized environments
             '--disable-setuid-sandbox',
             '--no-zygote',
+            // Use software WebGL (SwiftShader) instead of disabling GPU entirely.
+            // --disable-gpu kills WebGL/Canvas completely, making fingerprints obviously bot-like.
+            // SwiftShader provides a more realistic rendering surface that CF fingerprinting accepts.
+            '--use-gl=swiftshader',
         ],
         ignoreDefaultArgs: ['--enable-automation'],
     };
 
     if (!CHROME_INSTALLED) {
         launchOptions.viewport = { width: 1280, height: 720 };
-        // Keep user agent current — CF checks UA for recognizable Chrome versions
-        launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+        // UA must match actual Chromium version — CF cross-checks UA vs browser capabilities.
+        // Playwright's bundled Chromium is v145; using Chrome/131 was a detectable mismatch.
+        launchOptions.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
     }
 
     // If a residential proxy is configured, use it to bypass CF's datacenter IP block
