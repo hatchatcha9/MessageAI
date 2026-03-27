@@ -2032,29 +2032,42 @@ async function checkoutCurrentCart() {
         const findCheckoutBtn = async () => {
             return await page.evaluate(() => {
                 const buttons = document.querySelectorAll('button, a');
-                // Priority order: exact data-anchor-id → text match
+                // Priority 1: data-anchor-id contains "checkout" — works regardless of position/scroll
                 for (const btn of buttons) {
                     const anchorId = (btn.getAttribute('data-anchor-id') || '').toLowerCase();
                     if (anchorId.includes('checkout') || anchorId.includes('cartcheckout')) {
                         const rect = btn.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: btn.textContent.trim().substring(0, 40) };
+                        if (rect.width > 0) {
+                            const text = btn.textContent.trim().substring(0, 50);
+                            console.log('[Cart] Found by anchor-id:', anchorId, '| text:', text, '| y:', Math.round(rect.top));
+                            // Scroll button into view then return its new position
+                            btn.scrollIntoView({ block: 'center' });
+                            const r2 = btn.getBoundingClientRect();
+                            return { found: true, x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, text, disabled: btn.disabled };
                         }
                     }
                 }
+                // Priority 2: text match — no viewport filter (button may be in sticky footer below fold)
                 for (const btn of buttons) {
                     const text = (btn.textContent || '').trim().toLowerCase();
                     const rect = btn.getBoundingClientRect();
-                    if (rect.width < 60 || rect.height < 28) continue;
-                    if (rect.top < 0 || rect.top > window.innerHeight) continue;
+                    if (rect.width < 60 || rect.height < 20) continue;
                     const isCheckout = text.includes('go to checkout') || text.includes('checkout') ||
                                        text === 'continue' || text.includes('continue to checkout') ||
                                        text.includes('view cart') || text.includes('place order');
                     if (isCheckout) {
-                        console.log('[Cart] Found checkout button:', text.substring(0, 40), 'at', Math.round(rect.left), Math.round(rect.top));
-                        return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.substring(0, 40) };
+                        console.log('[Cart] Found by text:', text.substring(0, 40), 'at y=', Math.round(rect.top));
+                        btn.scrollIntoView({ block: 'center' });
+                        const r2 = btn.getBoundingClientRect();
+                        return { found: true, x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, text: text.substring(0, 40), disabled: btn.disabled };
                     }
                 }
+                // Debug: log all visible buttons so we know what's on the page
+                const allBtns = Array.from(buttons).filter(b => {
+                    const r = b.getBoundingClientRect();
+                    return r.width > 40 && r.height > 20;
+                }).map(b => (b.textContent || '').trim().substring(0, 30)).filter(t => t);
+                console.log('[Cart] No checkout button found. All buttons:', JSON.stringify(allBtns.slice(0, 20)));
                 return { found: false };
             });
         };
