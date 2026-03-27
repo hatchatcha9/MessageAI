@@ -1513,7 +1513,8 @@ app.post('/api/doordash/manual-login', async (req, res) => {
 
 // Remote log viewer
 app.get('/logs', (req, res) => {
-    res.type('text/plain').send(logBuffer.slice(-150).join('\n'));
+    const n = parseInt(req.query.n) || 500;
+    res.type('text/plain').send(logBuffer.slice(-n).join('\n'));
 });
 
 // Export DoorDash cookies (run locally, paste into Railway env)

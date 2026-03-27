@@ -3451,7 +3451,9 @@ async function selectRestaurantFromSearch(indexOrUrl) {
 
             // If CF challenge did NOT resolve, restart the browser (fresh proxy IP) and retry once.
             // IPRoyal rotates residential IPs on reconnect — a new IP is more likely to pass CF.
-            if (!cfResolved && bodySnippet.includes('security verification')) {
+            const stillCFBlocked = !cfResolved || bodySnippet.includes('security verification') ||
+                bodySnippet.includes('Just a moment') || bodySnippet.toLowerCase().startsWith('www.doordash.com\n');
+            if (stillCFBlocked) {
                 console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
                 await closeBrowser();
                 await launchBrowser();
