@@ -376,10 +376,14 @@ async function launchBrowser(headless = HEADLESS) {
             '--window-size=1280,720',
             '--lang=en-US',
             '--disable-setuid-sandbox',
-            // --no-zygote and --use-gl=swiftshader are headless-only.
-            // In headed mode (Xvfb), these interfere with the real rendering pipeline.
-            // Xvfb provides a virtual display; Chrome uses Mesa/GLX naturally without extra flags.
-            ...(headless ? ['--no-zygote', '--use-gl=swiftshader'] : []),
+            // --no-zygote is headless-only (causes issues in headed+Xvfb).
+            // --use-gl=swiftshader is needed in BOTH modes:
+            //   headless: no display, must use software GL
+            //   headed+Xvfb: Railway has no GPU; Mesa's llvmpipe crashes on GL_CLOSE_PATH_NV
+            //                (NV path extension) during screenshot ReadPixels. SwiftShader is
+            //                stable Google-maintained software GL that doesn't trigger this.
+            '--use-gl=swiftshader',
+            ...(headless ? ['--no-zygote'] : []),
         ],
         ignoreDefaultArgs: ['--enable-automation'],
     };
@@ -418,11 +422,23 @@ async function launchBrowser(headless = HEADLESS) {
     if (!CHROME_INSTALLED) {
         await context.setExtraHTTPHeaders({
             'Accept-Language': 'en-US,en;q=0.9',
-            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua': '"Google Chrome";v="145", "Chromium";v="145", "Not_A Brand";v="24"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"Windows"',
         });
     }
+
+    // Block images, fonts, and media to reduce proxy bandwidth.
+    // These are never needed for scraping — DoorDash content is text-based.
+    // Doing this at context level so it applies to all pages (including popups).
+    await context.route('**/*', (route) => {
+        const rt = route.request().resourceType();
+        if (rt === 'image' || rt === 'font' || rt === 'media') {
+            route.abort();
+        } else {
+            route.continue();
+        }
+    });
 
     page = context.pages()[0] || await context.newPage();
 
@@ -2820,11 +2836,12 @@ async function extractMenuItems() {
         const extracted = Array.from(allItemsMap.values());
         console.log(`[DoorDash] Strategy 1 (scroll+extract): ${extracted.length} items`);
 
-        // --- Strategy 2: Full-page generic scan as a catch-all ---
-        // Always runs to catch anything missed during the scroll loop (e.g. items
-        // that were in-DOM during the final top-scroll but not caught by viewport filter).
+        // --- Strategy 2: Full-page generic scan (no viewport filter) ---
+        // Always runs to catch items missed by the scroll loop. After scrolling through
+        // the full page, all loaded items are still in the DOM — a full querySelectorAll
+        // scan picks up anything the viewport-filtered scroll pass missed.
         let fallback = [];
-        if (extracted.length < 15) {
+        {
             console.log('[DoorDash] Trying strategy 2 (generic elements)...');
             fallback = await page.evaluate(() => {
                 const results = [];
@@ -2869,12 +2886,21 @@ async function extractMenuItems() {
                     const rect = el.getBoundingClientRect();
                     results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
                 }
-                return results.slice(0, 30);
+                return results.slice(0, 60);
             });
             console.log(`[DoorDash] Strategy 2 (generic): ${fallback.length} items`);
         }
 
-        const combined = extracted.length >= 3 ? extracted : fallback;
+        // Merge both strategies — keep whichever found more, but deduplicate.
+        // Previously this discarded fallback if extracted >= 3, which caused "6 items"
+        // when the full-page scan found more. Now we take the union of both.
+        const combined = [...extracted];
+        const extractedNames = new Set(extracted.map(i => i.name.toLowerCase()));
+        for (const item of fallback) {
+            if (!extractedNames.has(item.name.toLowerCase())) combined.push(item);
+        }
+        console.log(`[DoorDash] Combined (scroll+generic): ${combined.length} items`);
+
         const deduped = [];
         const seenNames = new Set();
         for (const item of combined) {
