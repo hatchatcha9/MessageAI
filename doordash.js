@@ -2473,6 +2473,8 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // Sort by rating and return top 5
         const sortedRestaurants = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
 
+        // Save search URL so restaurant selection can navigate back here on CF retry
+        updateSessionState({ lastSearchUrl: page.url() });
         console.log('[DoorDash] === SEARCH COMPLETE ===');
         return {
             success: true,
@@ -3442,10 +3444,30 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             // If not pre-fetched, wait up to 30s for CF to potentially auto-resolve.
             const cfWait = _preloadedMenuItems ? 5000 : 30000;
             await delay(1000); // brief settle before checking
-            await waitForCFChallenge(cfWait);
-            const finalUrl = page.url();
-            const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
+            const cfResolved = await waitForCFChallenge(cfWait);
+            let finalUrl = page.url();
+            let bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
             console.log('[DoorDash] After CF check — URL:', finalUrl, '| Body:', bodySnippet);
+
+            // If CF challenge did NOT resolve, restart the browser (fresh proxy IP) and retry once.
+            // IPRoyal rotates residential IPs on reconnect — a new IP is more likely to pass CF.
+            if (!cfResolved && bodySnippet.includes('security verification')) {
+                console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
+                await closeBrowser();
+                await launchBrowser();
+                // Re-navigate to search page first to establish a valid search session
+                const searchUrl = sessionState.lastSearchUrl || 'https://www.doordash.com/';
+                await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await delay(3000);
+                // Then navigate to store page via JS (same-origin navigation from search page)
+                await page.evaluate((url) => { window.location.href = url; }, targetUrl);
+                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await delay(2000);
+                await waitForCFChallenge(30000);
+                finalUrl = page.url();
+                bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
+                console.log('[DoorDash] After retry — URL:', finalUrl, '| Body:', bodySnippet);
+            }
         } else {
             // It's an index - find and click the store link
             const storeLinks = await page.$$('a[href*="/store/"]');
