@@ -4897,65 +4897,57 @@ async function applyOptionSelections(selections) {
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}"`);
 
-            // Atomic find+click inside a single evaluate — eliminates the async gap where
-            // the modal can shift between getting coordinates and calling page.mouse.click().
-            // Uses label.click() + input.click() + dispatchEvent for full React compatibility.
-            const result = await page.evaluate(({ groupIdx, optIdx, optText }) => {
-                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                if (!modal) return { found: false, reason: 'no modal' };
+            // Use Playwright locator.click() — this fires a real CDP-level input event through
+            // Chrome's actual input pipeline, identical to a real user click. JS dispatchEvent
+            // and element.click() inside page.evaluate are synthetic and DoorDash's React
+            // components ignore them for state updates.
+            const modal = page.locator('[role="dialog"], [aria-modal="true"]').first();
+            const groups = modal.locator('[role="radiogroup"], [role="group"]');
+            const groupCount = await groups.count();
+            console.log(`[DoorDash] Modal has ${groupCount} option groups`);
 
-                const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
-                if (groupIdx >= groups.length) {
-                    return { found: false, reason: `group ${groupIdx} not found (only ${groups.length} groups)` };
-                }
-                const group = groups[groupIdx];
-                group.scrollIntoView({ block: 'nearest' });
+            if (sel.groupIndex >= groupCount) {
+                console.log(`[DoorDash] Group ${sel.groupIndex} not found`);
+                continue;
+            }
 
-                const labels = group.querySelectorAll('label');
-                if (labels.length === 0) return { found: false, reason: 'no labels in group' };
+            const group = groups.nth(sel.groupIndex);
+            const labels = group.locator('label');
+            const labelCount = await labels.count();
+            console.log(`[DoorDash] Group ${sel.groupIndex} has ${labelCount} labels`);
 
-                // Find best matching label by text score
-                let bestLabel = null, bestScore = -1, bestLabelText = '';
-                if (optText) {
-                    const lower = optText.toLowerCase();
-                    for (const label of labels) {
-                        const text = (label.textContent || '').trim().toLowerCase();
-                        let score = -1;
-                        if (text === lower) score = 3;
-                        else if (text.startsWith(lower + ' ') || text.startsWith(lower + '\n')) score = 2;
-                        else if (text.startsWith(lower)) score = 1;
-                        if (score > bestScore) { bestScore = score; bestLabel = label; bestLabelText = text; }
-                        if (bestScore === 3) break;
+            let clicked = false;
+
+            // Try text match first
+            if (sel.optionText) {
+                const lower = sel.optionText.toLowerCase();
+                for (let i = 0; i < labelCount; i++) {
+                    const label = labels.nth(i);
+                    const text = (await label.textContent().catch(() => '')).trim().toLowerCase();
+                    if (text === lower || text.startsWith(lower)) {
+                        console.log(`[DoorDash] Clicking label "${text}" (text match)`);
+                        await label.scrollIntoViewIfNeeded();
+                        await label.click({ timeout: 5000 });
+                        clicked = true;
+                        break;
                     }
                 }
-                if (!bestLabel || bestScore < 0) {
-                    const idx = Math.min(optIdx, labels.length - 1);
-                    bestLabel = labels[idx];
-                    bestLabelText = (bestLabel.textContent || '').trim().substring(0, 40);
-                }
+            }
 
-                bestLabel.scrollIntoView({ block: 'nearest' });
+            // Fall back to index
+            if (!clicked && labelCount > 0) {
+                const idx = Math.min(sel.optionIndex, labelCount - 1);
+                const label = labels.nth(idx);
+                const text = (await label.textContent().catch(() => '')).trim().substring(0, 40);
+                console.log(`[DoorDash] Clicking label index ${idx} "${text}" (index fallback)`);
+                await label.scrollIntoViewIfNeeded();
+                await label.click({ timeout: 5000 });
+                clicked = true;
+            }
 
-                // Click the label directly — this is what a real user does.
-                // Also click the underlying input for React synthetic event compatibility.
-                const inputEl = bestLabel.htmlFor ? document.getElementById(bestLabel.htmlFor)
-                              : bestLabel.querySelector('input');
-
-                const fireClick = (el) => {
-                    if (!el) return;
-                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                    el.click();
-                };
-
-                fireClick(bestLabel);
-                if (inputEl) fireClick(inputEl);
-
-                return { found: true, text: bestLabelText.substring(0, 40), score: bestScore };
-            }, { groupIdx: sel.groupIndex, optIdx: sel.optionIndex, optText: sel.optionText || '' });
-
-            console.log(`[DoorDash] Option click result:`, JSON.stringify(result));
+            if (!clicked) {
+                console.log(`[DoorDash] Could not find any label to click in group ${sel.groupIndex}`);
+            }
 
             await delay(600);
             await takeScreenshot('after-option-click');
