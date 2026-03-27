@@ -2074,13 +2074,17 @@ async function checkoutCurrentCart() {
         let clicked = await tryClickCheckout('current page');
 
         if (!clicked) {
-            // Step 2: open cart drawer via cart icon
+            // Step 2: open cart drawer via cart icon (skip if CF overlay is blocking)
             const cartIcon = page.locator('[aria-label*="cart" i], [data-anchor-id*="cart" i]').first();
             if (await cartIcon.count() > 0 && await cartIcon.isVisible().catch(() => false)) {
                 console.log('[DoorDash] Opening cart drawer...');
-                await cartIcon.click();
-                await delay(1500);
-                clicked = await tryClickCheckout('after cart open');
+                try {
+                    await cartIcon.click({ timeout: 5000 });
+                    await delay(1500);
+                    clicked = await tryClickCheckout('after cart open');
+                } catch (e) {
+                    console.log('[DoorDash] Cart icon click blocked (CF overlay?) — skipping to /cart/ nav');
+                }
             }
         }
 
@@ -3910,10 +3914,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     await delay(400);
                     await takeScreenshot(`found-item-scroll-${scrollAttempt}`);
 
-                    // Click directly at the card's center coordinates from scrollIntoView
-                    // Use Promise.race with timeout — page.mouse.click() has no built-in timeout
-                    // and can hang indefinitely if Chrome becomes unresponsive.
                     if (result.x && result.y) {
+                        // Wait for CF Turnstile overlay to clear before clicking.
+                        // The overlay (data-testid="turnstile/overlay") intercepts all pointer events
+                        // and silently absorbs card clicks — the click fires but nothing happens.
+                        const overlayGone = await page.waitForFunction(
+                            () => !document.querySelector('[data-testid="turnstile/overlay"]'),
+                            { timeout: 15000 }
+                        ).then(() => true).catch(() => false);
+                        if (!overlayGone) {
+                            console.log('[DoorDash] CF overlay still present after 15s — clicking anyway');
+                        } else {
+                            console.log('[DoorDash] CF overlay cleared, clicking card...');
+                        }
+
                         console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
                         try {
                             await Promise.race([
@@ -3921,8 +3935,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                                 new Promise((_, reject) => setTimeout(() => reject(new Error('mouse.click timeout')), 8000))
                             ]);
                         } catch (clickErr) {
-                            console.log(`[DoorDash] mouse.click failed/timed out: ${clickErr.message} — trying JS click fallback`);
-                            // JS click fallback: find element at coordinates and call .click()
+                            console.log(`[DoorDash] mouse.click failed/timed out: ${clickErr.message} — JS fallback`);
                             await page.evaluate(({x, y}) => {
                                 const el = document.elementFromPoint(x, y);
                                 if (el) el.click();
@@ -4163,9 +4176,48 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             stopDebugScreenshots();
             return { success: true, message: 'Attempted to add item' };
         } else {
-            // No modal - DoorDash adds simple items (drinks, sides, etc.) directly without a modal
-            // If we found the item and clicked it, assume it was added successfully
-            console.log('[DoorDash] No modal detected - item likely added directly to cart');
+            // No modal opened. Verify the cart actually has items (the click may have been
+            // absorbed by a CF Turnstile overlay which intercepts all pointer events).
+            await delay(800);
+            const cartCount = await page.evaluate(() => {
+                const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
+                const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
+                return match ? parseInt(match[1]) : 0;
+            });
+            console.log(`[DoorDash] No modal detected. Cart item count: ${cartCount}`);
+            if (cartCount === 0) {
+                // Check if CF overlay was blocking
+                const cfOverlay = await page.$('[data-testid="turnstile/overlay"]');
+                if (cfOverlay) {
+                    console.log('[DoorDash] CF overlay detected — click was blocked. Waiting for overlay to clear...');
+                    await page.waitForFunction(
+                        () => !document.querySelector('[data-testid="turnstile/overlay"]'),
+                        { timeout: 20000 }
+                    ).catch(() => {});
+                    console.log('[DoorDash] CF overlay gone, retrying card click...');
+                    await delay(500);
+                    // Re-click via the item locator
+                    await page.locator(`text="${searchName}"`).first().click({ timeout: 5000 }).catch(() => {});
+                    await delay(1500);
+                    const modalAfterRetry = await page.$('[role="dialog"], [aria-modal="true"]');
+                    if (modalAfterRetry) {
+                        console.log('[DoorDash] Modal opened after CF cleared — needs options');
+                        const requiredOpts = await extractRequiredOptions();
+                        stopDebugScreenshots();
+                        return { success: false, needsOptions: true, requiredOptions: requiredOpts, message: 'This item has required options' };
+                    }
+                    const cartCountAfter = await page.evaluate(() => {
+                        const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
+                        const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
+                        return match ? parseInt(match[1]) : 0;
+                    });
+                    if (cartCountAfter === 0) {
+                        stopDebugScreenshots();
+                        return { success: false, error: 'CF overlay blocked item add — try again' };
+                    }
+                }
+            }
+            console.log('[DoorDash] No modal detected - item added directly to cart');
             await takeScreenshot('no-modal-direct-add');
             stopDebugScreenshots();
             return { success: true, message: 'Item added to cart (no customization needed)' };
