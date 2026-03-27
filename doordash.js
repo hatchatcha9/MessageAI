@@ -2012,223 +2012,160 @@ async function checkoutCurrentCart() {
             return { success: false, error: 'Browser not open' };
         }
 
-        await takeScreenshot('checkout-start');
-
-        // First, close any open modals that might be blocking
-        const closeModalBtn = await page.$('[role="dialog"] button[aria-label*="close"], [role="dialog"] button:has-text("×"), [aria-modal="true"] button[aria-label*="close"]');
+        // Close any open modals
+        const closeModalBtn = await page.$('[role="dialog"] button[aria-label*="close"], [aria-modal="true"] button[aria-label*="close"]');
         if (closeModalBtn) {
             console.log('[DoorDash] Closing open modal first...');
             await closeModalBtn.click();
             await delay(1000);
         }
-
-        // Press Escape to close any modals
         await page.keyboard.press('Escape');
         await delay(500);
 
-        await takeScreenshot('after-close-modals');
-
-        // Look for a checkout/continue button anywhere on the page (DoorDash embeds cart in sidebar)
-        const findCheckoutBtn = async () => {
-            return await page.evaluate(() => {
-                const buttons = document.querySelectorAll('button, a');
-                // Priority 1: data-anchor-id contains "checkout" — works regardless of position/scroll
-                for (const btn of buttons) {
-                    const anchorId = (btn.getAttribute('data-anchor-id') || '').toLowerCase();
-                    if (anchorId.includes('checkout') || anchorId.includes('cartcheckout')) {
-                        const rect = btn.getBoundingClientRect();
-                        if (rect.width > 0) {
-                            const text = btn.textContent.trim().substring(0, 50);
-                            console.log('[Cart] Found by anchor-id:', anchorId, '| text:', text, '| y:', Math.round(rect.top));
-                            // Scroll button into view then return its new position
-                            btn.scrollIntoView({ block: 'center' });
-                            const r2 = btn.getBoundingClientRect();
-                            return { found: true, x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, text, disabled: btn.disabled };
-                        }
-                    }
+        // Use Playwright locators (not coordinate math) to find and click checkout button.
+        // Locators handle scrollIntoView + stable clicking internally.
+        const tryClickCheckout = async (label) => {
+            // Priority 1: data-anchor-id attribute
+            const byAnchor = page.locator('[data-anchor-id*="checkout" i], [data-anchor-id*="CartCheckout" i]').first();
+            if (await byAnchor.count() > 0 && await byAnchor.isVisible().catch(() => false)) {
+                const text = (await byAnchor.textContent().catch(() => '')).trim().substring(0, 50);
+                console.log(`[DoorDash] ${label}: found by anchor-id, text="${text}"`);
+                await byAnchor.scrollIntoViewIfNeeded();
+                await byAnchor.click();
+                return true;
+            }
+            // Priority 2: text match
+            const phrases = ['Go to checkout', 'Checkout', 'Continue to checkout', 'Place order', 'View cart'];
+            for (const phrase of phrases) {
+                const loc = page.locator('button, a').filter({ hasText: new RegExp(phrase, 'i') }).first();
+                if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
+                    const text = (await loc.textContent().catch(() => '')).trim().substring(0, 50);
+                    console.log(`[DoorDash] ${label}: found by text="${text}"`);
+                    await loc.scrollIntoViewIfNeeded();
+                    await loc.click();
+                    return true;
                 }
-                // Priority 2: text match — no viewport filter (button may be in sticky footer below fold)
-                for (const btn of buttons) {
-                    const text = (btn.textContent || '').trim().toLowerCase();
-                    const rect = btn.getBoundingClientRect();
-                    if (rect.width < 60 || rect.height < 20) continue;
-                    const isCheckout = text.includes('go to checkout') || text.includes('checkout') ||
-                                       text === 'continue' || text.includes('continue to checkout') ||
-                                       text.includes('view cart') || text.includes('place order');
-                    if (isCheckout) {
-                        console.log('[Cart] Found by text:', text.substring(0, 40), 'at y=', Math.round(rect.top));
-                        btn.scrollIntoView({ block: 'center' });
-                        const r2 = btn.getBoundingClientRect();
-                        return { found: true, x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, text: text.substring(0, 40), disabled: btn.disabled };
-                    }
-                }
-                // Debug: log all visible buttons so we know what's on the page
-                const allBtns = Array.from(buttons).filter(b => {
-                    const r = b.getBoundingClientRect();
-                    return r.width > 40 && r.height > 20;
-                }).map(b => (b.textContent || '').trim().substring(0, 30)).filter(t => t);
-                console.log('[Cart] No checkout button found. All buttons:', JSON.stringify(allBtns.slice(0, 20)));
-                return { found: false };
-            });
+            }
+            // Debug: return button list from evaluate (not console.log inside it — that goes to browser console)
+            const btnTexts = await page.evaluate(() =>
+                Array.from(document.querySelectorAll('button, a'))
+                    .filter(b => { const r = b.getBoundingClientRect(); return r.width > 40 && r.height > 20; })
+                    .map(b => (b.textContent || '').trim().substring(0, 40))
+                    .filter(t => t)
+                    .slice(0, 20)
+            );
+            console.log(`[DoorDash] ${label}: no checkout button found. Visible: ${JSON.stringify(btnTexts)}`);
+            return false;
         };
 
-        // Scroll to top first — the checkout button in the sidebar may be off-screen if
-        // the page was scrolled down during item search/extraction.
+        // Step 1: current page (restaurant page has sidebar cart with checkout button)
         await page.evaluate(() => window.scrollTo(0, 0));
         await delay(800);
+        let clicked = await tryClickCheckout('current page');
 
-        // First try: look for checkout button directly (DoorDash sidebar often has it)
-        let checkoutBtnCoords = await findCheckoutBtn();
-        console.log(`[DoorDash] Initial checkout button scan: found=${checkoutBtnCoords.found}`);
-
-        if (!checkoutBtnCoords.found) {
-            // Try clicking the cart icon in the header to open cart drawer
-            const cartCoords = await page.evaluate(() => {
-                const buttons = document.querySelectorAll('button, a');
-                for (const btn of buttons) {
-                    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    const anchorId = (btn.getAttribute('data-anchor-id') || '').toLowerCase();
-                    if (ariaLabel.includes('cart') || anchorId.includes('cart')) {
-                        const rect = btn.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-                        }
-                    }
-                }
-                return { found: false };
-            });
-            if (cartCoords.found) {
-                console.log('[DoorDash] Clicking cart icon to open cart drawer...');
-                await page.mouse.click(cartCoords.x, cartCoords.y);
+        if (!clicked) {
+            // Step 2: open cart drawer via cart icon
+            const cartIcon = page.locator('[aria-label*="cart" i], [data-anchor-id*="cart" i]').first();
+            if (await cartIcon.count() > 0 && await cartIcon.isVisible().catch(() => false)) {
+                console.log('[DoorDash] Opening cart drawer...');
+                await cartIcon.click();
                 await delay(1500);
+                clicked = await tryClickCheckout('after cart open');
             }
-            checkoutBtnCoords = await findCheckoutBtn();
         }
 
-        if (checkoutBtnCoords.found) {
-            console.log(`[DoorDash] Clicking checkout button: ${checkoutBtnCoords.text}`);
-            await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
+        if (clicked) {
             await delay(3000);
         } else {
-            // Fallback 1: navigate to /cart/ (more reliable on DoorDash than /checkout/)
-            console.log('[DoorDash] No checkout button found, navigating to /cart/...');
+            // Step 3: navigate to /cart/
+            console.log('[DoorDash] Navigating to /cart/...');
             await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 30000 });
             await delay(2000);
-            console.log('[DoorDash] /cart/ URL after nav:', page.url());
-            checkoutBtnCoords = await findCheckoutBtn();
-            if (checkoutBtnCoords.found) {
-                console.log(`[DoorDash] Found checkout button on /cart/: ${checkoutBtnCoords.text}`);
-                await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
-                await delay(3000);
-            }
+            console.log('[DoorDash] URL after /cart/ nav:', page.url());
+            clicked = await tryClickCheckout('/cart/ page');
+            if (clicked) await delay(3000);
         }
 
-        // Check if we're on checkout page
         let pageUrl = page.url();
-        console.log(`[DoorDash] Current URL after checkout attempt: ${pageUrl}`);
+        console.log(`[DoorDash] Current URL: ${pageUrl}`);
 
         if (!pageUrl.includes('checkout')) {
-            // Fallback 2: navigate back to main store page and try again
-            console.log('[DoorDash] Not on checkout yet, trying main store page...');
+            // Step 4: navigate to store page as last resort
             const storeUrl = sessionState.currentRestaurantUrl || sessionState.currentRestaurantPage;
             if (storeUrl && storeUrl.includes('doordash.com')) {
+                console.log('[DoorDash] Trying store page:', storeUrl);
                 await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            } else {
-                // Extract store path from current URL (strip trailing item ID)
-                const cleanUrl = page.url().replace(/\/(\d{6,})\/.*$/, '/');
-                await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await delay(2000);
+                await page.evaluate(() => window.scrollTo(0, 0));
+                await delay(500);
+                const clicked2 = await tryClickCheckout('store page');
+                if (clicked2) await delay(3000);
+                pageUrl = page.url();
+                console.log('[DoorDash] URL after store page retry:', pageUrl);
             }
-            await delay(2000);
-            await page.evaluate(() => window.scrollTo(0, 0));
-            await delay(500);
-            checkoutBtnCoords = await findCheckoutBtn();
-            if (checkoutBtnCoords.found) {
-                console.log(`[DoorDash] Found checkout button on store page: ${checkoutBtnCoords.text}`);
-                await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
-                await delay(3000);
-            }
-            pageUrl = page.url();
-            console.log(`[DoorDash] URL after store page retry: ${pageUrl}`);
         }
 
         if (!pageUrl.includes('checkout')) {
             return { success: false, error: 'Could not reach checkout page' };
         }
 
-        // Look for Place Order button
-        const placeOrderSelectors = [
-            'button:has-text("Place Order")',
-            'button:has-text("Submit Order")',
-            '[data-testid="PlaceOrderButton"]',
-            'button[type="submit"]',
-            '[data-anchor-id="CheckoutButton"]'
-        ];
+        // Place order — use locators here too
+        const placeOrderLoc = page.locator('button, [role="button"]')
+            .filter({ hasText: /place order|submit order/i })
+            .first();
+        const placeOrderByAttr = page.locator('[data-testid="PlaceOrderButton"], [data-anchor-id="CheckoutButton"]').first();
 
-        for (const selector of placeOrderSelectors) {
-            try {
-                const btn = await page.$(selector);
-                if (btn && await btn.isVisible()) {
-                    const btnText = await btn.textContent();
-                    console.log(`[DoorDash] Found order button: ${btnText}`);
-
-                    // Check if button is disabled (might need to select options)
-                    const isDisabled = await btn.getAttribute('disabled');
-                    if (isDisabled) {
-                        console.log('[DoorDash] Order button is disabled - may need payment/address');
-                        await takeScreenshot('checkout-button-disabled');
-                        return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
-                    }
-
-                    // Dry-run mode: stop before clicking
-                    const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
-                    if (DRY_RUN) {
-                        console.log('[DoorDash] DRY RUN — skipping Place Order click');
-                        await takeScreenshot('dry-run-place-order');
-                        return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.' };
-                    }
-
-                    // Click place order
-                    console.log('[DoorDash] Clicking Place Order...');
-                    await btn.click();
-                    await delay(5000);
-                    await takeScreenshot('after-place-order');
-
-                    // Check for confirmation
-                    const pageContent = await page.content();
-                    const isConfirmed = pageContent.includes('Order confirmed') ||
-                                       pageContent.includes('Order placed') ||
-                                       pageContent.includes('Your order is on') ||
-                                       pageContent.includes('Thanks for your order') ||
-                                       page.url().includes('confirmation');
-
-                    if (isConfirmed) {
-                        const orderUrl = page.url();
-                        console.log('[DoorDash] Order placed! URL:', orderUrl);
-                        await takeScreenshot('order-confirmed');
-                        return { success: true, message: 'Order placed!', orderUrl };
-                    } else {
-                        // Check for error messages
-                        const errorIndicators = ['error', 'failed', 'problem', 'unable', 'sorry'];
-                        const hasError = errorIndicators.some(e => pageContent.toLowerCase().includes(e));
-
-                        if (hasError) {
-                            await takeScreenshot('checkout-error');
-                            return { success: false, error: 'Order failed. Check DoorDash app for details.' };
-                        }
-
-                        return { success: true, message: 'Order submitted - check DoorDash app for confirmation' };
-                    }
-                }
-            } catch (e) {
-                console.log(`[DoorDash] Selector failed: ${selector}`, e.message);
+        let orderBtn = null;
+        if (await placeOrderLoc.count() > 0 && await placeOrderLoc.isVisible().catch(() => false)) {
+            orderBtn = placeOrderLoc;
+        } else if (await placeOrderByAttr.count() > 0 && await placeOrderByAttr.isVisible().catch(() => false)) {
+            orderBtn = placeOrderByAttr;
+        } else {
+            // fallback: first submit button
+            const submitBtn = page.locator('button[type="submit"]').first();
+            if (await submitBtn.count() > 0 && await submitBtn.isVisible().catch(() => false)) {
+                orderBtn = submitBtn;
             }
         }
 
-        return { success: false, error: 'Could not find Place Order button' };
+        if (!orderBtn) {
+            return { success: false, error: 'Could not find Place Order button' };
+        }
+
+        const btnText = (await orderBtn.textContent().catch(() => '')).trim();
+        console.log(`[DoorDash] Found order button: "${btnText}"`);
+
+        const isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
+        if (isDisabled !== null) {
+            console.log('[DoorDash] Order button is disabled');
+            return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
+        }
+
+        const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
+        if (DRY_RUN) {
+            console.log('[DoorDash] DRY RUN — skipping Place Order click');
+            return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.' };
+        }
+
+        console.log('[DoorDash] Clicking Place Order...');
+        await orderBtn.click();
+        await delay(5000);
+
+        const pageContent = await page.content();
+        const isConfirmed = pageContent.includes('Order confirmed') ||
+                           pageContent.includes('Order placed') ||
+                           pageContent.includes('Your order is on') ||
+                           pageContent.includes('Thanks for your order') ||
+                           page.url().includes('confirmation');
+
+        if (isConfirmed) {
+            console.log('[DoorDash] Order placed! URL:', page.url());
+            return { success: true, message: 'Order placed!', orderUrl: page.url() };
+        }
+        return { success: true, message: 'Order submitted - check DoorDash app for confirmation' };
 
     } catch (error) {
         console.error('[DoorDash] Checkout error:', error.message);
-        await takeScreenshot('checkout-exception');
         return { success: false, error: error.message };
     }
 }
