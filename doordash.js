@@ -179,6 +179,8 @@ const sessionState = {
     launched: false,
     loggedIn: false,
     currentRestaurantPage: null,
+    currentRestaurantUrl: null,
+    lastSearchUrl: null,
     lastActivity: null,
     loginEmail: null
 };
@@ -2057,8 +2059,14 @@ async function checkoutCurrentCart() {
             });
         };
 
+        // Scroll to top first — the checkout button in the sidebar may be off-screen if
+        // the page was scrolled down during item search/extraction.
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await delay(800);
+
         // First try: look for checkout button directly (DoorDash sidebar often has it)
         let checkoutBtnCoords = await findCheckoutBtn();
+        console.log(`[DoorDash] Initial checkout button scan: found=${checkoutBtnCoords.found}`);
 
         if (!checkoutBtnCoords.found) {
             // Try clicking the cart icon in the header to open cart drawer
@@ -2077,52 +2085,61 @@ async function checkoutCurrentCart() {
                 return { found: false };
             });
             if (cartCoords.found) {
+                console.log('[DoorDash] Clicking cart icon to open cart drawer...');
                 await page.mouse.click(cartCoords.x, cartCoords.y);
                 await delay(1500);
             }
             checkoutBtnCoords = await findCheckoutBtn();
         }
 
-        await takeScreenshot('after-cart-click');
-
         if (checkoutBtnCoords.found) {
             console.log(`[DoorDash] Clicking checkout button: ${checkoutBtnCoords.text}`);
             await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
             await delay(3000);
         } else {
-            // Fallback: try DoorDash cart URL (more reliable than /checkout/)
-            console.log('[DoorDash] No checkout button found, trying direct navigation...');
-            const storeUrl = page.url();
-            const storeIdMatch = storeUrl.match(/\/store\/[^/]+-(\d+)\//);
-            const cartUrl = storeIdMatch
-                ? `https://www.doordash.com/store/${storeIdMatch[0].split('/').filter(Boolean)[1]}/`
-                : 'https://www.doordash.com/cart/';
-            await page.goto(cartUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            // Fallback 1: navigate to /cart/ (more reliable on DoorDash than /checkout/)
+            console.log('[DoorDash] No checkout button found, navigating to /cart/...');
+            await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 30000 });
             await delay(2000);
+            console.log('[DoorDash] /cart/ URL after nav:', page.url());
             checkoutBtnCoords = await findCheckoutBtn();
             if (checkoutBtnCoords.found) {
+                console.log(`[DoorDash] Found checkout button on /cart/: ${checkoutBtnCoords.text}`);
                 await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
                 await delay(3000);
             }
         }
 
-        await takeScreenshot('checkout-page');
-
         // Check if we're on checkout page
-        const pageUrl = page.url();
-        console.log(`[DoorDash] Current URL: ${pageUrl}`);
+        let pageUrl = page.url();
+        console.log(`[DoorDash] Current URL after checkout attempt: ${pageUrl}`);
 
         if (!pageUrl.includes('checkout')) {
-            // One more try - direct navigation
-            console.log('[DoorDash] Still not on checkout, trying direct nav...');
-            await page.goto('https://www.doordash.com/checkout/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await delay(3000);
-            await takeScreenshot('checkout-direct-nav');
-
-            const newUrl = page.url();
-            if (!newUrl.includes('checkout')) {
-                return { success: false, error: 'Could not open checkout page' };
+            // Fallback 2: navigate back to main store page and try again
+            console.log('[DoorDash] Not on checkout yet, trying main store page...');
+            const storeUrl = sessionState.currentRestaurantUrl || sessionState.currentRestaurantPage;
+            if (storeUrl && storeUrl.includes('doordash.com')) {
+                await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            } else {
+                // Extract store path from current URL (strip trailing item ID)
+                const cleanUrl = page.url().replace(/\/(\d{6,})\/.*$/, '/');
+                await page.goto(cleanUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
             }
+            await delay(2000);
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await delay(500);
+            checkoutBtnCoords = await findCheckoutBtn();
+            if (checkoutBtnCoords.found) {
+                console.log(`[DoorDash] Found checkout button on store page: ${checkoutBtnCoords.text}`);
+                await page.mouse.click(checkoutBtnCoords.x, checkoutBtnCoords.y);
+                await delay(3000);
+            }
+            pageUrl = page.url();
+            console.log(`[DoorDash] URL after store page retry: ${pageUrl}`);
+        }
+
+        if (!pageUrl.includes('checkout')) {
+            return { success: false, error: 'Could not reach checkout page' };
         }
 
         // Look for Place Order button
@@ -3496,6 +3513,11 @@ async function selectRestaurantFromSearch(indexOrUrl) {
         } catch (e) {}
 
         console.log(`[DoorDash] Restaurant name: ${restaurantName}`);
+
+        // Save the clean store URL (strip trailing item/section IDs like /39035756/)
+        // so checkoutCurrentCart can navigate back to the main restaurant page if needed.
+        const cleanStoreUrl = page.url().replace(/\/(\d{6,})(\/.*)?$/, '/');
+        updateSessionState({ currentRestaurantUrl: cleanStoreUrl });
 
         // Extract menu categories
         const categories = await extractMenuCategories();
