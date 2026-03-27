@@ -626,6 +626,9 @@ async function waitForElement(selectors, options = {}) {
  * Take a debug screenshot
  */
 async function takeScreenshot(name) {
+    // Screenshots crash Chrome on Railway (Mesa/llvmpipe GL_CLOSE_PATH_NV SIGSEGV).
+    // They're debug-only — disable on Railway entirely.
+    if (process.env.RAILWAY_ENVIRONMENT) return null;
     if (!page) {
         console.log(`[DoorDash] Screenshot skipped (page not ready): ${name}`);
         return null;
