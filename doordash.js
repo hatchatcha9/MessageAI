@@ -3916,17 +3916,24 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
                     if (result.x && result.y) {
                         // Wait for CF Turnstile overlay to clear before clicking.
-                        // The overlay (data-testid="turnstile/overlay") intercepts all pointer events
-                        // and silently absorbs card clicks — the click fires but nothing happens.
+                        // The overlay intercepts all pointer events — clicking into it crashes Chrome.
                         const overlayGone = await page.waitForFunction(
                             () => !document.querySelector('[data-testid="turnstile/overlay"]'),
                             { timeout: 15000 }
                         ).then(() => true).catch(() => false);
                         if (!overlayGone) {
-                            console.log('[DoorDash] CF overlay still present after 15s — clicking anyway');
-                        } else {
-                            console.log('[DoorDash] CF overlay cleared, clicking card...');
+                            // CF is fully blocking this page — restart with fresh proxy IP
+                            console.log('[DoorDash] CF overlay stuck — restarting browser with fresh IP');
+                            const storeUrl = sessionState.currentRestaurantUrl;
+                            await closeBrowser();
+                            await launchBrowser(HEADLESS, true);
+                            if (storeUrl) {
+                                await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                                await waitForCFChallenge(25000);
+                            }
+                            return { success: false, error: 'CF blocked restaurant page — please try adding again' };
                         }
+                        console.log('[DoorDash] CF overlay cleared, clicking card...');
 
                         console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
                         try {
@@ -4226,7 +4233,13 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
     } catch (error) {
         console.error('[DoorDash] Add item error:', error.message);
         stopDebugScreenshots();
-        await takeScreenshot('add-item-error');
+        // Chrome crashed — reset browser state so next call gets a fresh session
+        if (error.message.includes('Target crashed') || error.message.includes('Session closed') || error.message.includes('Target page, context or browser has been closed')) {
+            console.log('[DoorDash] Browser crashed — resetting session');
+            try { await closeBrowser(); } catch (e) {}
+            context = null; page = null;
+            resetSessionState();
+        }
         return { success: false, error: error.message };
     }
 }
