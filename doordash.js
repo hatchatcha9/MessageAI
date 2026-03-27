@@ -307,7 +307,7 @@ async function validateSession() {
 /**
  * Initialize browser with persistent context
  */
-async function launchBrowser(headless = HEADLESS) {
+async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
     // Check if browser is already running and valid
     if (context && page) {
         try {
@@ -406,12 +406,15 @@ async function launchBrowser(headless = HEADLESS) {
             launchOptions.proxy = { server: `${pu.protocol}//${pu.host}` };
             if (pu.username) launchOptions.proxy.username = decodeURIComponent(pu.username);
             if (pu.password) {
-                // Append random session ID to force IP rotation on each browser launch.
-                // IPRoyal sticky sessions reuse the same IP by default; _session-RANDOM
-                // forces a fresh residential IP assignment on reconnect.
-                const sessionId = Math.random().toString(36).substring(2, 10);
-                launchOptions.proxy.password = `${decodeURIComponent(pu.password)}_session-${sessionId}`;
-                console.log(`[DoorDash] Proxy session ID: ${sessionId}`);
+                let pw = decodeURIComponent(pu.password);
+                // Only rotate IP when explicitly requested (CF retry). Normal launches
+                // use the sticky IP which already has search-page trust with DoorDash.
+                if (rotateProxy) {
+                    const sessionId = Math.random().toString(36).substring(2, 10);
+                    pw = `${pw}_session-${sessionId}`;
+                    console.log(`[DoorDash] Proxy session rotated: ${sessionId}`);
+                }
+                launchOptions.proxy.password = pw;
             }
         } catch (e) {
             launchOptions.proxy = { server: process.env.PROXY_URL };
@@ -3435,7 +3438,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             if (stillCFBlocked) {
                 console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
                 await closeBrowser();
-                await launchBrowser(); // random session ID forces new IP
+                await launchBrowser(HEADLESS, true); // rotateProxy=true forces new residential IP
                 // Re-navigate to search page first to warm up the CF session
                 const searchUrl = sessionState.lastSearchUrl || 'https://www.doordash.com/';
                 console.log('[DoorDash] Retry: loading search page:', searchUrl);
