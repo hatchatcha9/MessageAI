@@ -4897,8 +4897,10 @@ async function applyOptionSelections(selections) {
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}"`);
 
-            // Phase 1: find coordinates of the target label (don't click yet)
-            const coords = await page.evaluate(({ groupIdx, optIdx, optText }) => {
+            // Atomic find+click inside a single evaluate — eliminates the async gap where
+            // the modal can shift between getting coordinates and calling page.mouse.click().
+            // Uses label.click() + input.click() + dispatchEvent for full React compatibility.
+            const result = await page.evaluate(({ groupIdx, optIdx, optText }) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return { found: false, reason: 'no modal' };
 
@@ -4913,10 +4915,7 @@ async function applyOptionSelections(selections) {
                 if (labels.length === 0) return { found: false, reason: 'no labels in group' };
 
                 // Find best matching label by text score
-                let bestLabel = null;
-                let bestScore = -1;
-                let bestLabelText = '';
-
+                let bestLabel = null, bestScore = -1, bestLabelText = '';
                 if (optText) {
                     const lower = optText.toLowerCase();
                     for (const label of labels) {
@@ -4929,45 +4928,36 @@ async function applyOptionSelections(selections) {
                         if (bestScore === 3) break;
                     }
                 }
-                // Fall back to index if no text match
                 if (!bestLabel || bestScore < 0) {
                     const idx = Math.min(optIdx, labels.length - 1);
                     bestLabel = labels[idx];
                     bestLabelText = (bestLabel.textContent || '').trim().substring(0, 40);
-                    bestScore = -99;
                 }
 
                 bestLabel.scrollIntoView({ block: 'nearest' });
-                const rect = bestLabel.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) return { found: false, reason: 'label not visible' };
 
-                // If label wraps an input, use input coords for more reliable click target
+                // Click the label directly — this is what a real user does.
+                // Also click the underlying input for React synthetic event compatibility.
                 const inputEl = bestLabel.htmlFor ? document.getElementById(bestLabel.htmlFor)
                               : bestLabel.querySelector('input');
-                let x, y;
-                if (inputEl) {
-                    const ir = inputEl.getBoundingClientRect();
-                    x = ir.left + ir.width / 2;
-                    y = ir.top + ir.height / 2;
-                } else {
-                    x = rect.left + rect.width / 2;
-                    y = rect.top + rect.height / 2;
-                }
 
-                return { found: true, x, y, score: bestScore, text: bestLabelText.substring(0, 40) };
+                const fireClick = (el) => {
+                    if (!el) return;
+                    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    el.click();
+                };
+
+                fireClick(bestLabel);
+                if (inputEl) fireClick(inputEl);
+
+                return { found: true, text: bestLabelText.substring(0, 40), score: bestScore };
             }, { groupIdx: sel.groupIndex, optIdx: sel.optionIndex, optText: sel.optionText || '' });
 
-            console.log(`[DoorDash] Group ${sel.groupIndex} coords:`, JSON.stringify(coords));
+            console.log(`[DoorDash] Option click result:`, JSON.stringify(result));
 
-            if (coords.found) {
-                // Phase 2: use real Playwright mouse click (triggers all pointer/focus events React needs)
-                await page.mouse.click(coords.x, coords.y);
-                console.log(`[DoorDash] Mouse-clicked "${coords.text}" at (${coords.x.toFixed(0)}, ${coords.y.toFixed(0)})`);
-            } else {
-                console.log(`[DoorDash] Could not find option: ${coords.reason}`);
-            }
-
-            await delay(500);
+            await delay(600);
             await takeScreenshot('after-option-click');
         }
 
