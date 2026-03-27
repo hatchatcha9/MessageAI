@@ -3882,10 +3882,23 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     await takeScreenshot(`found-item-scroll-${scrollAttempt}`);
 
                     // Click directly at the card's center coordinates from scrollIntoView
-                    // (avoids re-searching with locator which lands on text span instead of card)
+                    // Use Promise.race with timeout — page.mouse.click() has no built-in timeout
+                    // and can hang indefinitely if Chrome becomes unresponsive.
                     if (result.x && result.y) {
                         console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
-                        await page.mouse.click(result.x, result.y);
+                        try {
+                            await Promise.race([
+                                page.mouse.click(result.x, result.y),
+                                new Promise((_, reject) => setTimeout(() => reject(new Error('mouse.click timeout')), 8000))
+                            ]);
+                        } catch (clickErr) {
+                            console.log(`[DoorDash] mouse.click failed/timed out: ${clickErr.message} — trying JS click fallback`);
+                            // JS click fallback: find element at coordinates and call .click()
+                            await page.evaluate(({x, y}) => {
+                                const el = document.elementFromPoint(x, y);
+                                if (el) el.click();
+                            }, { x: result.x, y: result.y });
+                        }
                         clicked = true;
                         break;
                     }
@@ -3979,8 +3992,16 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 await page.evaluate((scrollY) => window.scrollTo(0, scrollY), target.scrollY);
                 await delay(300);
 
-                // Now click at the position
-                await page.mouse.click(target.x, target.y);
+                // Now click at the position (with timeout guard)
+                try {
+                    await Promise.race([
+                        page.mouse.click(target.x, target.y),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('mouse.click timeout')), 8000))
+                    ]);
+                } catch (clickErr) {
+                    console.log(`[DoorDash] mouse.click timeout — JS click fallback`);
+                    await page.evaluate(({x, y}) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, { x: target.x, y: target.y });
+                }
                 clicked = true;
             } else {
                 return { success: false, error: `Item ${index + 1} not found on page. Only found ${allItems.length} items.` };
