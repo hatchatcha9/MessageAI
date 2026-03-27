@@ -405,7 +405,14 @@ async function launchBrowser(headless = HEADLESS) {
             const pu = new URL(process.env.PROXY_URL);
             launchOptions.proxy = { server: `${pu.protocol}//${pu.host}` };
             if (pu.username) launchOptions.proxy.username = decodeURIComponent(pu.username);
-            if (pu.password) launchOptions.proxy.password = decodeURIComponent(pu.password);
+            if (pu.password) {
+                // Append random session ID to force IP rotation on each browser launch.
+                // IPRoyal sticky sessions reuse the same IP by default; _session-RANDOM
+                // forces a fresh residential IP assignment on reconnect.
+                const sessionId = Math.random().toString(36).substring(2, 10);
+                launchOptions.proxy.password = `${decodeURIComponent(pu.password)}_session-${sessionId}`;
+                console.log(`[DoorDash] Proxy session ID: ${sessionId}`);
+            }
         } catch (e) {
             launchOptions.proxy = { server: process.env.PROXY_URL };
         }
@@ -3428,14 +3435,33 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             if (stillCFBlocked) {
                 console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
                 await closeBrowser();
-                await launchBrowser();
-                // Re-navigate to search page first to establish a valid search session
+                await launchBrowser(); // random session ID forces new IP
+                // Re-navigate to search page first to warm up the CF session
                 const searchUrl = sessionState.lastSearchUrl || 'https://www.doordash.com/';
+                console.log('[DoorDash] Retry: loading search page:', searchUrl);
                 await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                await delay(3000);
-                // Then navigate to store page via JS (same-origin navigation from search page)
-                await page.evaluate((url) => { window.location.href = url; }, targetUrl);
-                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await delay(6000); // longer warm-up: let CF see us on search page first
+                // Try clicking the restaurant link directly (more organic than JS navigate)
+                const storeId = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
+                let retryNavOk = false;
+                if (storeId) {
+                    const linkHref = await page.evaluate((id) => {
+                        const a = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
+                        return a ? a.href : null;
+                    }, storeId);
+                    if (linkHref) {
+                        console.log('[DoorDash] Retry: clicking restaurant link:', linkHref);
+                        const link = page.locator(`a[href*="/store/"][href*="${storeId}"]`).first();
+                        await link.click().catch(() => {});
+                        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                        retryNavOk = true;
+                    }
+                }
+                if (!retryNavOk) {
+                    // Fallback to JS navigate
+                    await page.evaluate((url) => { window.location.href = url; }, targetUrl);
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                }
                 await delay(2000);
                 await waitForCFChallenge(30000);
                 finalUrl = page.url();
