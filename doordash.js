@@ -431,18 +431,6 @@ async function launchBrowser(headless = HEADLESS) {
     // Block images, fonts, and media to reduce proxy bandwidth.
     // These are never needed for scraping — DoorDash content is text-based.
     // Doing this at context level so it applies to all pages (including popups).
-    // Block images, fonts, and media to reduce proxy bandwidth.
-    // IMPORTANT: route.abort()/continue() must be awaited — un-awaited calls cause
-    // Playwright to hang when evaluating JS on pages with pending route handling.
-    await context.route('**/*', async (route) => {
-        const rt = route.request().resourceType();
-        if (rt === 'image' || rt === 'font' || rt === 'media') {
-            await route.abort();
-        } else {
-            await route.continue();
-        }
-    });
-
     page = context.pages()[0] || await context.newPage();
 
     // Set default timeout
