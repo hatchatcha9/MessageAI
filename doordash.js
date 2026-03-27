@@ -2082,6 +2082,20 @@ async function checkoutCurrentCart() {
             await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 30000 });
             await delay(2000);
             console.log('[DoorDash] URL after /cart/ nav:', page.url());
+
+            // Detect empty cart state: DoorDash shows "Go home" when cart is empty
+            const cartPageBtns = await page.evaluate(() =>
+                Array.from(document.querySelectorAll('button, a'))
+                    .filter(b => { const r = b.getBoundingClientRect(); return r.width > 40 && r.height > 20; })
+                    .map(b => (b.textContent || '').trim().toLowerCase())
+                    .filter(t => t)
+            );
+            const isEmptyCart = cartPageBtns.every(t => t.includes('go home') || t.includes('home'));
+            if (isEmptyCart && cartPageBtns.length > 0) {
+                console.log('[DoorDash] DoorDash cart is empty (browser session reset). User must re-add items.');
+                return { success: false, error: 'EMPTY_CART' };
+            }
+
             clicked = await tryClickCheckout('/cart/ page');
             if (clicked) await delay(3000);
         }

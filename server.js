@@ -323,6 +323,7 @@ function formatCheckoutError(error) {
     if (error.includes('Place Order button')) return "Couldn't reach the checkout button. Your cart is saved — try saying 'checkout' again.";
     if (error.includes('disabled'))           return "The checkout button was disabled. This usually means a payment or address issue — try again in a few minutes or reply 'help'.";
     if (error.includes('Browser not open'))   return "The browser session timed out. Search for a restaurant again to start fresh.";
+    if (error.includes('EMPTY_CART'))          return "The DoorDash cart was reset (server restarted). Please search for the restaurant again and re-add your items.";
     if (error.includes('checkout page'))      return "Couldn't load the checkout page. Your cart is saved — try saying 'checkout' again.";
     return "Checkout ran into an issue. Your cart is saved — try saying 'checkout' again or reply 'help'.";
 }
