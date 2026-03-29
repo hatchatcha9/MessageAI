@@ -3766,6 +3766,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         }
 
         let clicked = false;
+        let cfRestartedForItem = false; // only restart once per item add
         const searchName = cachedItem?.name?.split('•')[0]?.trim() || '';
 
         if (searchName) {
@@ -3841,30 +3842,38 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 const result = await page.evaluate((name) => {
                     const lowerName = name.toLowerCase().trim();
 
-                    // STRATEGY 1: Find headings/titles that exactly match our item name
-                    // Menu item names are usually in h1-h4, span, or div elements
+                    // STRATEGY 1: Find headings/titles that exactly match our item name.
+                    // Collect all candidates; prefer exact match over startsWith to avoid
+                    // "Pepsi® Zero Sugar" being returned when looking for "Pepsi®".
                     const titleElements = document.querySelectorAll('h1, h2, h3, h4, h5, span, div');
+                    const candidates1 = []; // { el, score, directText, fullText }
 
                     for (const titleEl of titleElements) {
-                        // Get DIRECT text content only (not nested elements)
                         let directText = '';
                         for (const node of titleEl.childNodes) {
-                            if (node.nodeType === Node.TEXT_NODE) {
-                                directText += node.textContent;
-                            }
+                            if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
                         }
                         directText = directText.trim().toLowerCase();
-
-                        // Also try the full text if direct text is empty
                         const fullText = titleEl.textContent?.trim()?.toLowerCase() || '';
 
-                        // Check if this element's text IS the item name (not just contains it)
-                        const isExactMatch = directText === lowerName ||
-                                            directText.startsWith(lowerName) ||
-                                            fullText === lowerName ||
-                                            (fullText.startsWith(lowerName) && fullText.length < lowerName.length + 30);
+                        let score = 0;
+                        if (directText === lowerName || fullText === lowerName) score = 3; // exact
+                        else if (directText.startsWith(lowerName) || (fullText.startsWith(lowerName) && fullText.length < lowerName.length + 30)) score = 1; // prefix
 
-                        if (!isExactMatch) continue;
+                        if (score === 0) continue;
+
+                        const rect = titleEl.getBoundingClientRect();
+                        if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
+                        if (rect.left < 150) continue;
+                        candidates1.push({ el: titleEl, score, directText, fullText });
+                    }
+                    // Sort by score descending so exact matches come first
+                    candidates1.sort((a, b) => b.score - a.score);
+
+                    for (const { el: titleEl, directText, fullText } of candidates1) {
+                        const rect = titleEl.getBoundingClientRect();
+                        if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
+                        if (rect.left < 150) continue;
 
                         const rect = titleEl.getBoundingClientRect();
                         if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
@@ -3954,7 +3963,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             { timeout: 15000 }
                         ).then(() => true).catch(() => false);
                         if (!overlayGone) {
-                            // CF is fully blocking this page — restart with fresh proxy IP
+                            if (cfRestartedForItem) {
+                                return { success: false, error: 'CF blocked restaurant page — please try adding again' };
+                            }
+                            // CF is fully blocking this page — restart with fresh proxy IP, then retry search
+                            cfRestartedForItem = true;
                             console.log('[DoorDash] CF overlay stuck — restarting browser with fresh IP');
                             const storeUrl = sessionState.currentRestaurantUrl;
                             await closeBrowser();
@@ -3963,7 +3976,16 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                                 await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                                 await waitForCFChallenge(25000);
                             }
-                            return { success: false, error: 'CF blocked restaurant page — please try adding again' };
+                            // Re-scroll full page to load items, then restart search loop from top
+                            const newHeight = await page.evaluate(() => document.body.scrollHeight).catch(() => 0);
+                            for (let p = 0; p < newHeight; p += 500) {
+                                await page.evaluate((y) => window.scrollTo(0, y), p).catch(() => {});
+                                await delay(150);
+                            }
+                            await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+                            await delay(500);
+                            scrollAttempt = -1; // reset to 0 on next increment
+                            continue;
                         }
                         console.log('[DoorDash] CF overlay cleared, clicking card...');
 
