@@ -2350,9 +2350,10 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             }
         }
 
-        // Step 5: Wait for results to load
+        // Step 5: Wait for results to load (and resolve any CF challenge)
         console.log('[DoorDash] Waiting for search results...');
         await delay(4000);
+        await waitForCFChallenge(30000);
         await handlePopups();
         await takeScreenshot('5-search-results');
         console.log('[DoorDash] Current URL:', page.url());
@@ -2427,11 +2428,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 try {
                     await closeBrowser();
                     await delay(3000);
-                    await launchBrowser();
+                    await launchBrowser(HEADLESS, true); // rotateProxy=true for fresh IP
                     await delay(2000);
                     // Retry the search by navigating again
                     await page.goto(`${DOORDASH_URL}/search/store/${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded' });
-                    await delay(3000);
+                    await delay(4000);
+                    await waitForCFChallenge(30000);
                     await handlePopups();
                     const retryRestaurants = await extractRestaurantList();
                     console.log(`[DoorDash] After restart: extracted ${retryRestaurants.length} restaurants`);
