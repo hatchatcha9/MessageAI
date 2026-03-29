@@ -2798,28 +2798,58 @@ async function extractMenuItems() {
 
         // Scroll through the full page, extracting at each stop
         const allItemsMap = new Map(); // name.toLowerCase() -> item
-        let pageHeight = await page.evaluate(() => document.body.scrollHeight);
+        // Wrap page.evaluate calls with a timeout to avoid hanging on frozen browser
+        const evaluateWithTimeout = (fn, arg, ms = 8000) => Promise.race([
+            arg !== undefined ? page.evaluate(fn, arg) : page.evaluate(fn),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('evaluate timeout')), ms))
+        ]);
+
+        let pageHeight = await evaluateWithTimeout(() => document.body.scrollHeight);
         console.log(`[DoorDash] Page height: ${pageHeight}px — scroll-extracting...`);
 
+        let emptyStreak = 0;
+        const prevSize = 0;
         for (let pos = 0; pos <= pageHeight; pos += 400) {
-            await page.evaluate((y) => window.scrollTo(0, y), pos);
+            try {
+                await evaluateWithTimeout((y) => window.scrollTo(0, y), pos);
+            } catch (e) {
+                console.log(`[DoorDash] Scroll evaluate timeout at pos ${pos} — stopping scroll`);
+                break;
+            }
             await delay(350);
-            const batch = await extractAtViewport();
+            let batch;
+            try {
+                batch = await extractAtViewport();
+            } catch (e) {
+                console.log(`[DoorDash] Extract evaluate timeout at pos ${pos} — stopping scroll`);
+                break;
+            }
+            const sizeBefore = allItemsMap.size;
             for (const item of batch) {
                 const key = item.name.toLowerCase();
                 if (!allItemsMap.has(key)) allItemsMap.set(key, item);
             }
-            if (batch.length > 0) console.log(`[DoorDash] scroll@${pos}: +${batch.length} items (total ${allItemsMap.size})`);
+            const newItems = allItemsMap.size - sizeBefore;
+            if (batch.length > 0) console.log(`[DoorDash] scroll@${pos}: +${batch.length} items (${newItems} new, total ${allItemsMap.size})`);
+            // Early exit: stop if no new unique items for 12 consecutive steps (~5000px)
+            if (newItems === 0) emptyStreak++;
+            else emptyStreak = 0;
+            if (emptyStreak >= 12 && allItemsMap.size > 0) {
+                console.log(`[DoorDash] No new items for ${emptyStreak} steps — stopping early at pos ${pos}`);
+                break;
+            }
             // Re-check height in case new content loaded while scrolling
             if (pos > 0 && pos % 2400 === 0) {
-                pageHeight = await page.evaluate(() => document.body.scrollHeight);
+                try {
+                    pageHeight = await evaluateWithTimeout(() => document.body.scrollHeight);
+                } catch (e) {}
             }
         }
 
         // Final pass at the top (items at top may have been unloaded while at bottom)
-        await page.evaluate(() => window.scrollTo(0, 0));
+        await evaluateWithTimeout(() => window.scrollTo(0, 0)).catch(() => {});
         await delay(800);
-        const topBatch = await extractAtViewport();
+        const topBatch = await extractAtViewport().catch(() => []);
         for (const item of topBatch) {
             const key = item.name.toLowerCase();
             if (!allItemsMap.has(key)) allItemsMap.set(key, item);
