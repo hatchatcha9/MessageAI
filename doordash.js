@@ -3871,13 +3871,6 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     candidates1.sort((a, b) => b.score - a.score);
 
                     for (const { el: titleEl, directText, fullText } of candidates1) {
-                        const rect = titleEl.getBoundingClientRect();
-                        if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
-                        if (rect.left < 150) continue;
-
-                        const rect = titleEl.getBoundingClientRect();
-                        if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
-                        if (rect.left < 150) continue;
 
                         // Found the title! Now find the parent card to click
                         let cardEl = titleEl;
