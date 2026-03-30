@@ -269,6 +269,7 @@ CRITICAL RULES:
 - When user says a NUMBER after seeing restaurants, use [SELECT: number]
 - When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number]
 - When user says an item NAME, use [ADD_ITEM_NUM: number] with the matching number
+- The full menu is in your system prompt above — scan ALL items to find what the user wants, even if their SMS only showed 15 items. NEVER tell the user an item isn't available without checking the full menu above.
 - NEVER use [SHOW_MENU] - the system shows it automatically after selecting
 - ALWAYS use [SAVE_BUDGET: X] when user mentions a price limit, budget, or "cheap/affordable". NEVER just talk about it in text without the command.
 - After [CLEAR_CART], if the user's next request involves food/ordering, ALWAYS follow up with [SEARCH: food_type] in the same response.
@@ -1345,6 +1346,33 @@ async function handleMessage(phoneNumber, message) {
             currentRestaurant = { name: cachedRestaurant.name, source: 'doordash' };
             doordashMenu = cachedRestaurant.menu || [];
         }
+    }
+
+    // Intercept "more menu" directly — show next page of cached menu without going to Claude
+    if (/^more menu$/i.test(message.trim()) && doordashMenu && doordashMenu.length > 0) {
+        const PAGE_SIZE = 15;
+        preferences.menuPage = (preferences.menuPage || 0) + 1;
+        db.setUserPreferences(user.id, preferences);
+        const displayItems = preferences.budget
+            ? doordashMenu.filter(item => (parseFloat(item.price) || 0) <= preferences.budget)
+            : doordashMenu;
+        const pageStart = preferences.menuPage * PAGE_SIZE;
+        const pageItems = displayItems.slice(pageStart, pageStart + PAGE_SIZE);
+        db.saveMessage(user.id, 'user', message);
+        if (pageItems.length === 0) {
+            preferences.menuPage = 0;
+            db.setUserPreferences(user.id, preferences);
+            return { response: "That's the whole menu!", actions: [] };
+        }
+        let menuText = pageItems.map(item => {
+            const originalIndex = doordashMenu.indexOf(item) + 1;
+            return `${originalIndex}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`;
+        }).join('\n\n');
+        if (displayItems.length > pageStart + PAGE_SIZE) {
+            menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more — say "more menu")`;
+        }
+        db.saveMessage(user.id, 'assistant', menuText);
+        return { response: menuText, actions: [] };
     }
 
     const history = db.getConversationHistory(user.id, 20);
