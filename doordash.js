@@ -442,7 +442,15 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
 
     // Block images, fonts, and media to reduce proxy bandwidth.
     // These are never needed for scraping — DoorDash content is text-based.
-    // Doing this at context level so it applies to all pages (including popups).
+    await context.route('**/*', (route) => {
+        const type = route.request().resourceType();
+        if (type === 'image' || type === 'font' || type === 'media') {
+            route.abort();
+        } else {
+            route.continue();
+        }
+    });
+
     page = context.pages()[0] || await context.newPage();
 
     // Set default timeout
@@ -3957,7 +3965,22 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         ).then(() => true).catch(() => false);
                         if (!overlayGone) {
                             if (cfRestartedForItem) {
-                                return { success: false, error: 'CF blocked restaurant page — please try adding again' };
+                                // Overlay still present after restart — use JS click to bypass overlay
+                                // (only mouse.click crashes Chrome; JS-dispatched events skip pointer capture)
+                                console.log('[DoorDash] Overlay still present after restart, using JS click bypass...');
+                                await takeScreenshot('overlay-bypass-js-click');
+                                await page.evaluate(({x, y}) => {
+                                    // Use elementsFromPoint to find item UNDER the overlay
+                                    const elements = document.elementsFromPoint(x, y);
+                                    const target = elements.find(el => !el.dataset?.testid?.includes('turnstile') && el.tagName !== 'IFRAME');
+                                    if (target) {
+                                        target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: x, clientY: y}));
+                                        target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, clientX: x, clientY: y}));
+                                        target.click();
+                                    }
+                                }, { x: result.x, y: result.y });
+                                clicked = true;
+                                break;
                             }
                             // CF is fully blocking this page — restart with fresh proxy IP, then retry search
                             cfRestartedForItem = true;
@@ -3969,6 +3992,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                                 await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                                 await waitForCFChallenge(25000);
                             }
+                            // Wait for Turnstile overlay to self-resolve with fresh IP + headed Chrome
+                            console.log('[DoorDash] Waiting for Turnstile overlay to clear after restart (up to 60s)...');
+                            await page.waitForFunction(
+                                () => !document.querySelector('[data-testid="turnstile/overlay"]'),
+                                { timeout: 60000 }
+                            ).then(() => console.log('[DoorDash] Turnstile overlay cleared after restart'))
+                             .catch(() => console.log('[DoorDash] Turnstile overlay still present after 60s — will try JS click bypass'));
+                            await delay(1000);
                             // Re-scroll full page to load items, then restart search loop from top
                             const newHeight = await page.evaluate(() => document.body.scrollHeight).catch(() => 0);
                             for (let p = 0; p < newHeight; p += 500) {
