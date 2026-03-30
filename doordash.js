@@ -3774,7 +3774,6 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         }
 
         let clicked = false;
-        let cfRestartedForItem = false; // only restart once per item add
         const searchName = cachedItem?.name?.split('•')[0]?.trim() || '';
 
         if (searchName) {
@@ -3957,61 +3956,17 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     await takeScreenshot(`found-item-scroll-${scrollAttempt}`);
 
                     if (result.x && result.y) {
-                        // Wait for CF Turnstile overlay to clear before clicking.
-                        // The overlay intercepts all pointer events — clicking into it crashes Chrome.
-                        const overlayGone = await page.waitForFunction(
-                            () => !document.querySelector('[data-testid="turnstile/overlay"]'),
-                            { timeout: 15000 }
-                        ).then(() => true).catch(() => false);
-                        if (!overlayGone) {
-                            if (cfRestartedForItem) {
-                                // Overlay still present after restart — use JS click to bypass overlay
-                                // (only mouse.click crashes Chrome; JS-dispatched events skip pointer capture)
-                                console.log('[DoorDash] Overlay still present after restart, using JS click bypass...');
-                                await takeScreenshot('overlay-bypass-js-click');
-                                await page.evaluate(({x, y}) => {
-                                    // Use elementsFromPoint to find item UNDER the overlay
-                                    const elements = document.elementsFromPoint(x, y);
-                                    const target = elements.find(el => !el.dataset?.testid?.includes('turnstile') && el.tagName !== 'IFRAME');
-                                    if (target) {
-                                        target.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: x, clientY: y}));
-                                        target.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, clientX: x, clientY: y}));
-                                        target.click();
-                                    }
-                                }, { x: result.x, y: result.y });
-                                clicked = true;
-                                break;
-                            }
-                            // CF is fully blocking this page — restart with fresh proxy IP, then retry search
-                            cfRestartedForItem = true;
-                            console.log('[DoorDash] CF overlay stuck — restarting browser with fresh IP');
-                            const storeUrl = sessionState.currentRestaurantUrl;
-                            await closeBrowser();
-                            await launchBrowser(HEADLESS, true);
-                            if (storeUrl) {
-                                await page.goto(storeUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                                await waitForCFChallenge(25000);
-                            }
-                            // Wait for Turnstile overlay to self-resolve with fresh IP + headed Chrome
-                            console.log('[DoorDash] Waiting for Turnstile overlay to clear after restart (up to 60s)...');
-                            await page.waitForFunction(
-                                () => !document.querySelector('[data-testid="turnstile/overlay"]'),
-                                { timeout: 60000 }
-                            ).then(() => console.log('[DoorDash] Turnstile overlay cleared after restart'))
-                             .catch(() => console.log('[DoorDash] Turnstile overlay still present after 60s — will try JS click bypass'));
-                            await delay(1000);
-                            // Re-scroll full page to load items, then restart search loop from top
-                            const newHeight = await page.evaluate(() => document.body.scrollHeight).catch(() => 0);
-                            for (let p = 0; p < newHeight; p += 500) {
-                                await page.evaluate((y) => window.scrollTo(0, y), p).catch(() => {});
-                                await delay(150);
-                            }
-                            await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-                            await delay(500);
-                            scrollAttempt = -1; // reset to 0 on next increment
-                            continue;
+                        // Disable pointer-events on any Turnstile overlay so mouse.click passes through.
+                        // The overlay is a permanent DOM element that intercepts pointer events when active.
+                        const hadOverlay = await page.evaluate(() => {
+                            const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"]');
+                            overlays.forEach(el => { el.style.pointerEvents = 'none'; });
+                            return overlays.length > 0;
+                        });
+                        if (hadOverlay) {
+                            console.log('[DoorDash] Disabled pointer-events on Turnstile overlay, proceeding with click');
                         }
-                        console.log('[DoorDash] CF overlay cleared, clicking card...');
+                        console.log('[DoorDash] Clicking card...');
 
                         console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
                         try {
@@ -4274,14 +4229,12 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 // Check if CF overlay was blocking
                 const cfOverlay = await page.$('[data-testid="turnstile/overlay"]');
                 if (cfOverlay) {
-                    console.log('[DoorDash] CF overlay detected — click was blocked. Waiting for overlay to clear...');
-                    await page.waitForFunction(
-                        () => !document.querySelector('[data-testid="turnstile/overlay"]'),
-                        { timeout: 20000 }
-                    ).catch(() => {});
-                    console.log('[DoorDash] CF overlay gone, retrying card click...');
-                    await delay(500);
-                    // Re-click via the item locator
+                    console.log('[DoorDash] CF overlay detected — disabling pointer-events and retrying click...');
+                    await page.evaluate(() => {
+                        document.querySelectorAll('[data-testid="turnstile/overlay"]').forEach(el => { el.style.pointerEvents = 'none'; });
+                    });
+                    await delay(300);
+                    // Re-click via the item locator (overlay no longer intercepts)
                     await page.locator(`text="${searchName}"`).first().click({ timeout: 5000 }).catch(() => {});
                     await delay(1500);
                     const modalAfterRetry = await page.$('[role="dialog"], [aria-modal="true"]');
