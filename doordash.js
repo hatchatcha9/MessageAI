@@ -440,17 +440,6 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
         });
     }
 
-    // Block images, fonts, and media to reduce proxy bandwidth.
-    // These are never needed for scraping — DoorDash content is text-based.
-    await context.route('**/*', (route) => {
-        const type = route.request().resourceType();
-        if (type === 'image' || type === 'font' || type === 'media') {
-            route.abort();
-        } else {
-            route.continue();
-        }
-    });
-
     page = context.pages()[0] || await context.newPage();
 
     // Set default timeout
