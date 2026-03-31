@@ -404,17 +404,20 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
         try {
             const pu = new URL(process.env.PROXY_URL);
             launchOptions.proxy = { server: `${pu.protocol}//${pu.host}` };
-            if (pu.username) launchOptions.proxy.username = decodeURIComponent(pu.username);
-            if (pu.password) {
-                let pw = decodeURIComponent(pu.password);
+            if (pu.username) {
+                let user = decodeURIComponent(pu.username);
+                // IPRoyal sticky session: append _session-ID to USERNAME (not password)
                 // Only rotate IP when explicitly requested (CF retry). Normal launches
                 // use the sticky IP which already has search-page trust with DoorDash.
                 if (rotateProxy) {
                     const sessionId = Math.random().toString(36).substring(2, 10);
-                    pw = `${pw}_session-${sessionId}`;
+                    user = `${user}_session-${sessionId}`;
                     console.log(`[DoorDash] Proxy session rotated: ${sessionId}`);
                 }
-                launchOptions.proxy.password = pw;
+                launchOptions.proxy.username = user;
+            }
+            if (pu.password) {
+                launchOptions.proxy.password = decodeURIComponent(pu.password);
             }
         } catch (e) {
             launchOptions.proxy = { server: process.env.PROXY_URL };
@@ -2332,19 +2335,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         }
 
         if (!searchFound) {
-            console.log('[DoorDash] Using direct search URL...');
+            console.log('[DoorDash] Using JS navigation to search URL (avoids CF re-challenge)...');
             const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-            try {
-                await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            } catch (navErr) {
-                if (navErr.message.includes('ERR_ABORTED') || navErr.message.includes('ERR_FAILED')) {
-                    // DoorDash SPA redirects mid-navigation — page is still loading, just wait
-                    console.log('[DoorDash] Navigation aborted (SPA redirect), waiting for page to settle...');
-                    await delay(4000);
-                } else {
-                    throw navErr;
-                }
-            }
+            // Use window.location.href from within the already-loaded page — this is treated as an
+            // in-session navigation and carries the CF clearance, unlike page.goto() which triggers
+            // a cold browser hit that CF Turnstile challenges.
+            await page.evaluate((url) => { window.location.href = url; }, searchUrl);
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {
+                console.log('[DoorDash] waitForNavigation timed out/aborted (SPA redirect OK)');
+            });
         }
 
         // Step 5: Wait for results to load (and resolve any CF challenge)
