@@ -404,21 +404,10 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
         try {
             const pu = new URL(process.env.PROXY_URL);
             launchOptions.proxy = { server: `${pu.protocol}//${pu.host}` };
-            if (pu.username) {
-                let user = decodeURIComponent(pu.username);
-                // IPRoyal sticky session: append _session-ID to USERNAME (not password)
-                // Only rotate IP when explicitly requested (CF retry). Normal launches
-                // use the sticky IP which already has search-page trust with DoorDash.
-                if (rotateProxy) {
-                    const sessionId = Math.random().toString(36).substring(2, 10);
-                    user = `${user}_session-${sessionId}`;
-                    console.log(`[DoorDash] Proxy session rotated: ${sessionId}`);
-                }
-                launchOptions.proxy.username = user;
-            }
-            if (pu.password) {
-                launchOptions.proxy.password = decodeURIComponent(pu.password);
-            }
+            if (pu.username) launchOptions.proxy.username = decodeURIComponent(pu.username);
+            if (pu.password) launchOptions.proxy.password = decodeURIComponent(pu.password);
+            // IPRoyal residential proxies auto-rotate IP on each new browser connection —
+            // no session suffix needed; rotateProxy flag is now a no-op but kept for compat.
         } catch (e) {
             launchOptions.proxy = { server: process.env.PROXY_URL };
         }
