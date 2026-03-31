@@ -5132,15 +5132,70 @@ async function clickAddToOrderButton() {
     console.log('[DoorDash] Add button result:', JSON.stringify(buttonCoords));
 
     if (buttonCoords.found) {
+        // If button is stuck in loading state ($0.00), wait up to 6s for price to populate.
+        // DoorDash fetches item details via GraphQL; if CF blocks it the button stays at $0.00.
+        if (buttonCoords.text.includes('$0.00') || buttonCoords.text.toLowerCase().startsWith('loading')) {
+            console.log('[DoorDash] Button still loading ($0.00) — waiting up to 6s...');
+            for (let w = 0; w < 6; w++) {
+                await delay(1000);
+                const refreshed = await page.evaluate(() => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return null;
+                    for (const btn of modal.querySelectorAll('button')) {
+                        const t = btn.textContent?.trim() || '';
+                        if (t.toLowerCase().includes('add to') || t.toLowerCase().includes('add for')) return t;
+                    }
+                    return null;
+                }).catch(() => null);
+                if (refreshed && !refreshed.includes('$0.00') && !refreshed.toLowerCase().startsWith('loading')) {
+                    console.log('[DoorDash] Button loaded:', refreshed.substring(0, 50));
+                    break;
+                }
+                console.log(`[DoorDash] Still loading after ${w + 1}s...`);
+            }
+        }
+
         console.log(`[DoorDash] Clicking Add button at (${buttonCoords.x}, ${buttonCoords.y}): ${buttonCoords.text}`);
-        await page.mouse.click(buttonCoords.x, buttonCoords.y);
-        await delay(2000);
-        await takeScreenshot('after-add-button-click');
+        // Disable any Turnstile overlay that may have appeared on the modal
+        await page.evaluate(() => {
+            const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"], [class*="Overlay"], [class*="overlay"]');
+            overlays.forEach(el => { el.style.pointerEvents = 'none'; });
+        }).catch(() => {});
+
+        // Try mouse click first; fall back to JS dispatch (bypasses visual overlays)
+        await page.mouse.click(buttonCoords.x, buttonCoords.y).catch(() => {});
+        await delay(1500);
 
         // Check if modal closed
-        const modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
+        let modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
         if (!modalStillOpen) {
             console.log('[DoorDash] Modal closed - item added successfully!');
+            return true;
+        }
+
+        // Fallback: JS click directly on the button element (bypasses pointer-event overlays)
+        console.log('[DoorDash] Mouse click did not close modal — trying JS dispatch...');
+        const jsClicked = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return false;
+            for (const btn of modal.querySelectorAll('button')) {
+                const t = btn.textContent?.trim() || '';
+                if (t.toLowerCase().includes('add to') || t.toLowerCase().includes('add for') || t.toLowerCase().includes('add -')) {
+                    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }).catch(() => false);
+
+        await delay(2000);
+        await takeScreenshot('after-add-button-click');
+        modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
+        if (!modalStillOpen) {
+            console.log('[DoorDash] Modal closed after JS dispatch - item added successfully!');
             return true;
         } else {
             console.log('[DoorDash] Modal still open after click');
