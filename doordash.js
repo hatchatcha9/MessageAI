@@ -2738,13 +2738,18 @@ async function extractMenuItems() {
             const results = [];
             const seen = new Set();
 
-            // Always query both DoorDash-specific and generic elements.
-            // Some restaurants (or menu sections like Salads) may not use data-anchor-id.
-            const candidates = document.querySelectorAll(
-                '[data-anchor-id="MenuItem"], [data-testid="menu-item"], li, article'
+            // Query DoorDash-specific selectors first; fall back to generic li/article
+            // only if nothing specific found (avoids iterating thousands of DOM nodes).
+            let candidates = document.querySelectorAll(
+                '[data-anchor-id="MenuItem"], [data-testid="menu-item"]'
             );
+            if (candidates.length === 0) {
+                candidates = document.querySelectorAll('li, article');
+            }
+            // Hard cap to 300 elements — prevents layout-thrash on large pages
+            const els = Array.from(candidates).slice(0, 300);
 
-            for (const el of candidates) {
+            for (const el of els) {
                 // Viewport filter first (cheap) before layout-triggering calls
                 const rect = el.getBoundingClientRect();
                 if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
@@ -2804,10 +2809,14 @@ async function extractMenuItems() {
             await delay(350);
             let batch;
             try {
-                batch = await extractAtViewport();
+                // Timeout the extract to avoid hanging on large DOM pages
+                batch = await Promise.race([
+                    extractAtViewport(),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('extract timeout')), 8000))
+                ]);
             } catch (e) {
-                console.log(`[DoorDash] Extract evaluate timeout at pos ${pos} — stopping scroll`);
-                break;
+                console.log(`[DoorDash] Extract evaluate timeout at pos ${pos} — skipping`);
+                batch = [];
             }
             const sizeBefore = allItemsMap.size;
             for (const item of batch) {
@@ -2816,10 +2825,10 @@ async function extractMenuItems() {
             }
             const newItems = allItemsMap.size - sizeBefore;
             if (batch.length > 0) console.log(`[DoorDash] scroll@${pos}: +${batch.length} items (${newItems} new, total ${allItemsMap.size})`);
-            // Early exit: stop if no new unique items for 12 consecutive steps (~5000px)
+            // Early exit: stop if no new unique items for 5 consecutive steps (~2000px)
             if (newItems === 0) emptyStreak++;
             else emptyStreak = 0;
-            if (emptyStreak >= 12 && allItemsMap.size > 0) {
+            if (emptyStreak >= 5 && allItemsMap.size > 0) {
                 console.log(`[DoorDash] No new items for ${emptyStreak} steps — stopping early at pos ${pos}`);
                 break;
             }
