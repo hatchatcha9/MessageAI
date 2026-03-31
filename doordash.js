@@ -3461,6 +3461,27 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             let bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
             console.log('[DoorDash] After CF check — URL:', finalUrl, '| Body:', bodySnippet);
 
+            // Wait for DoorDash's invisible Turnstile overlay to clear.
+            // The overlay is present while CF fingerprints the session; once it passes,
+            // the overlay is removed and in-page API calls (item pricing etc.) start working.
+            const turnstileStart = Date.now();
+            for (let t = 0; t < 30; t++) {
+                const overlayPresent = await page.evaluate(() => {
+                    const el = document.querySelector('[data-testid="turnstile/overlay"]');
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                }).catch(() => false);
+                if (!overlayPresent) {
+                    if (t > 0) console.log(`[DoorDash] Turnstile overlay cleared after ${t}s`);
+                    else console.log('[DoorDash] No Turnstile overlay detected');
+                    break;
+                }
+                if (t === 0) console.log('[DoorDash] Waiting for Turnstile overlay to clear...');
+                await delay(1000);
+                if (t === 29) console.log('[DoorDash] Turnstile overlay still present after 30s — proceeding anyway');
+            }
+
             // If CF challenge did NOT resolve, restart the browser (fresh proxy IP) and retry once.
             // IPRoyal rotates residential IPs on reconnect — a new IP is more likely to pass CF.
             const stillCFBlocked = !cfResolved || bodySnippet.includes('security verification') ||
@@ -5132,11 +5153,12 @@ async function clickAddToOrderButton() {
     console.log('[DoorDash] Add button result:', JSON.stringify(buttonCoords));
 
     if (buttonCoords.found) {
-        // If button is stuck in loading state ($0.00), wait up to 6s for price to populate.
-        // DoorDash fetches item details via GraphQL; if CF blocks it the button stays at $0.00.
+        // If button is stuck in loading state ($0.00), wait up to 20s for price to populate.
+        // DoorDash fetches item details via GraphQL; if CF Turnstile hasn't cleared yet the
+        // call gets 403'd and the button stays at $0.00 until CF passes the session.
         if (buttonCoords.text.includes('$0.00') || buttonCoords.text.toLowerCase().startsWith('loading')) {
-            console.log('[DoorDash] Button still loading ($0.00) — waiting up to 6s...');
-            for (let w = 0; w < 6; w++) {
+            console.log('[DoorDash] Button still loading ($0.00) — waiting up to 20s for CF Turnstile to clear...');
+            for (let w = 0; w < 20; w++) {
                 await delay(1000);
                 const refreshed = await page.evaluate(() => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
