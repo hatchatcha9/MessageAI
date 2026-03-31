@@ -3469,12 +3469,22 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
                 await closeBrowser();
                 await launchBrowser(HEADLESS, true); // rotateProxy=true forces new residential IP
-                // Re-navigate to search page first to warm up the CF session
-                const searchUrl = sessionState.lastSearchUrl || 'https://www.doordash.com/';
-                console.log('[DoorDash] Retry: loading search page:', searchUrl);
-                await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                await delay(6000); // longer warm-up: let CF see us on search page first
-                // Try clicking the restaurant link directly (more organic than JS navigate)
+                // Warm up CF session the same way as the search flow:
+                // 1. Navigate to homepage first (homepage is trusted, low risk of CF)
+                // 2. Then JS navigate to search page (in-session, carries CF clearance)
+                // 3. Then click restaurant link from search page
+                console.log('[DoorDash] Retry: loading homepage to warm up CF...');
+                await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await waitForCFChallenge(30000); // wait for homepage CF to clear
+                await delay(2000);
+                // JS navigate to search page from homepage context
+                const retrySearchUrl = sessionState.lastSearchUrl || DOORDASH_URL;
+                console.log('[DoorDash] Retry: JS navigate to search page:', retrySearchUrl);
+                await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
+                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await waitForCFChallenge(20000);
+                await delay(2000);
+                // Try clicking the restaurant link (organic click from search results)
                 const storeId = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
                 let retryNavOk = false;
                 if (storeId) {
@@ -3491,7 +3501,8 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     }
                 }
                 if (!retryNavOk) {
-                    // Fallback to JS navigate
+                    // Fallback to JS navigate from search context
+                    console.log('[DoorDash] Retry: link not found — JS navigate to store');
                     await page.evaluate((url) => { window.location.href = url; }, targetUrl);
                     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                 }
