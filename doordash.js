@@ -2415,10 +2415,16 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     await delay(3000);
                     await launchBrowser(HEADLESS, true); // rotateProxy=true for fresh IP
                     await delay(2000);
-                    // Retry the search by navigating again
-                    await page.goto(`${DOORDASH_URL}/search/store/${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded' });
-                    await delay(4000);
-                    await waitForCFChallenge(30000);
+                    // Warm up via homepage first (same as initial search flow),
+                    // then JS navigate to search URL to carry CF clearance.
+                    await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await waitForCFChallenge(20000);
+                    await delay(2000);
+                    const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
+                    await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await delay(3000);
+                    await waitForCFChallenge(15000);
                     await handlePopups();
                     const retryRestaurants = await extractRestaurantList();
                     console.log(`[DoorDash] After restart: extracted ${retryRestaurants.length} restaurants`);
