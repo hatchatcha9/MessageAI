@@ -461,6 +461,45 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
 }
 
 /**
+ * Probe DoorDash homepage and retry with new proxy IPs until CF doesn't challenge.
+ * IPRoyal rotates residential IPs on each browser reconnect.
+ * "Please confirm your reservation" = interactive Turnstile (won't auto-solve, need new IP).
+ * "Performing security verification" = invisible JS-only check (may auto-solve with more time).
+ */
+async function ensureCleanProxyIP(maxRetries = 4) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (!context || !page) await launchBrowser();
+
+        try {
+            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch (e) {
+            console.log(`[DoorDash] IP probe nav error (attempt ${attempt + 1}): ${e.message}`);
+        }
+
+        const resolved = await waitForCFChallenge(25000);
+        const body = await page.evaluate(() => document.body?.innerText.substring(0, 150) || '').catch(() => '');
+        const cfBlocked = !resolved
+            || body.includes('security verification')
+            || body.includes('Verifying you are human')
+            || body.includes('confirm your reservation')
+            || body.includes('Just a moment');
+
+        if (!cfBlocked) {
+            console.log(`[DoorDash] Clean proxy IP confirmed on attempt ${attempt + 1}`);
+            return true;
+        }
+
+        console.log(`[DoorDash] IP attempt ${attempt + 1}/${maxRetries + 1} blocked by CF ("${body.substring(0, 60).trim()}") — getting new IP...`);
+        if (attempt < maxRetries) {
+            await closeBrowser();
+            await delay(1500);
+        }
+    }
+    console.log('[DoorDash] Could not get clean proxy IP after all retries — proceeding anyway');
+    return false;
+}
+
+/**
  * Close browser and clean up
  */
 async function closeBrowser() {
@@ -2264,10 +2303,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
         page.on('response', _apiInterceptor);
 
-        // Step 2: Go to DoorDash
-        console.log('[DoorDash] Navigating to DoorDash...');
-        await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await delay(3000);
+        // Step 2: Navigate to DoorDash, retrying with new proxy IPs until CF doesn't block.
+        // Some residential IPs show interactive Turnstile (requires human click, never auto-solves).
+        // ensureCleanProxyIP() retries up to 4 times to find an IP with only invisible challenge.
+        console.log('[DoorDash] Navigating to DoorDash (finding clean proxy IP)...');
+        await ensureCleanProxyIP(4);
+        await delay(2000);
         await takeScreenshot('1-loaded-homepage');
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
