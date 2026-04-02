@@ -2466,18 +2466,41 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             }
             console.log(`[DoorDash] 0 restaurants — body: "${bodyText}" | URL: ${currentUrl} | links: ${storeLinks.length}`);
 
-            // If the body looks like a CF challenge, restart the browser and retry once
-            const isCFPage = bodyText.includes('Just a moment') || bodyText.includes('security') || bodyText.includes('challenge') || storeLinks.length === 0;
+            // If the body looks like a CF challenge, retry WITHOUT restarting the browser.
+            // Key insight: restarting gives a new proxy IP which may be even more flagged.
+            // The IP we got on initial browser launch is the cleanest — preserve it.
+            const isCFPage = bodyText.includes('Just a moment') || bodyText.includes('security') || bodyText.includes('challenge') || bodyText.includes('Verifying') || storeLinks.length === 0;
             if (isCFPage && !_browserRestartedThisSearch) {
-                console.log('[DoorDash] CF/stale page detected — restarting browser and retrying search...');
+                console.log('[DoorDash] CF on search — soft retrying (keeping same proxy IP, no browser restart)...');
                 _browserRestartedThisSearch = true;
+                try {
+                    // Navigate back to homepage, give CF extra time to auto-clear, then retry
+                    await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await delay(5000);
+                    await waitForCFChallenge(30000);
+                    await delay(2000);
+                    const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
+                    await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await delay(4000);
+                    await waitForCFChallenge(20000);
+                    await handlePopups();
+                    const retryRestaurants = await extractRestaurantList();
+                    console.log(`[DoorDash] After soft retry: extracted ${retryRestaurants.length} restaurants`);
+                    if (retryRestaurants.length > 0) {
+                        const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
+                        return { success: true, restaurants: sorted };
+                    }
+                } catch (retryErr) {
+                    console.log('[DoorDash] Soft retry error:', retryErr.message);
+                }
+                // Still blocked — hard restart as last resort
+                console.log('[DoorDash] Soft retry failed — hard restarting browser as last resort...');
                 try {
                     await closeBrowser();
                     await delay(3000);
-                    await launchBrowser(HEADLESS, true); // rotateProxy=true for fresh IP
+                    await launchBrowser(HEADLESS, true);
                     await delay(2000);
-                    // Warm up via homepage first (same as initial search flow),
-                    // then JS navigate to search URL to carry CF clearance.
                     await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
                     await waitForCFChallenge(20000);
                     await delay(2000);
@@ -2488,13 +2511,13 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     await waitForCFChallenge(15000);
                     await handlePopups();
                     const retryRestaurants = await extractRestaurantList();
-                    console.log(`[DoorDash] After restart: extracted ${retryRestaurants.length} restaurants`);
+                    console.log(`[DoorDash] After hard restart: extracted ${retryRestaurants.length} restaurants`);
                     if (retryRestaurants.length > 0) {
                         const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
                         return { success: true, restaurants: sorted };
                     }
                 } catch (restartErr) {
-                    console.log('[DoorDash] Restart error:', restartErr.message);
+                    console.log('[DoorDash] Hard restart error:', restartErr.message);
                 }
             }
 
@@ -3561,20 +3584,15 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 if (t === 29) console.log('[DoorDash] Turnstile overlay still present after 30s — proceeding anyway');
             }
 
-            // If CF challenge did NOT resolve, restart the browser (fresh proxy IP) and retry once.
-            // IPRoyal rotates residential IPs on reconnect — a new IP is more likely to pass CF.
+            // If CF challenge did NOT resolve, soft retry keeping the same proxy IP.
+            // Restarting the browser rotates to a new IP which may be worse — avoid it.
             const stillCFBlocked = !cfResolved || bodySnippet.includes('security verification') ||
                 bodySnippet.includes('Just a moment') || bodySnippet.toLowerCase().startsWith('www.doordash.com\n');
             if (stillCFBlocked) {
-                console.log('[DoorDash] CF timed out — restarting browser for fresh proxy IP and retrying...');
-                await closeBrowser();
-                await launchBrowser(HEADLESS, true); // rotateProxy=true forces new residential IP
-                // Warm up CF session the same way as the search flow:
-                // 1. Navigate to homepage first (homepage is trusted, low risk of CF)
-                // 2. Then JS navigate to search page (in-session, carries CF clearance)
-                // 3. Then click restaurant link from search page
-                console.log('[DoorDash] Retry: loading homepage to warm up CF...');
+                console.log('[DoorDash] CF timed out — soft retrying from search page (keeping same proxy IP)...');
+                // Navigate back to search page from homepage context (no browser restart)
                 await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await delay(5000);
                 await waitForCFChallenge(30000); // wait for homepage CF to clear
                 await delay(2000);
                 // JS navigate to search page from homepage context
