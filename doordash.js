@@ -112,6 +112,10 @@ let _preloadedMenuItems = null;
 // keyed by store ID (string) → array of {name, price} items from featured_items / popular items
 let _capturedStoreMenus = {};
 
+// Auth headers captured from DoorDash's own successful GraphQL requests.
+// Reused for our own in-browser menu fetch (same headers = passes CF).
+let _capturedDoorDashHeaders = null;
+
 /**
  * Parse a DoorDash API response and cache any menu items found for each store ID.
  * Handles search response shapes, store detail shapes, and GraphQL wrappers.
@@ -2225,6 +2229,23 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // Set up network response interceptor to capture DoorDash's own API responses.
         // DoorDash's JavaScript makes authenticated API calls that pass CF — we intercept those.
         _capturedStoreMenus = {}; // clear old data for this search
+        _capturedDoorDashHeaders = null; // reset headers cache
+
+        // Capture DoorDash's own GraphQL request headers so we can reuse them.
+        // Their requests pass CF because they include auth tokens (x-chk-token etc.).
+        const _reqInterceptor = (request) => {
+            try {
+                const url = request.url();
+                if (!url.includes('doordash.com/graphql') || request.method() !== 'POST') return;
+                const headers = request.headers();
+                // Only capture if it has DoorDash-specific auth headers
+                if (headers['x-chk-token'] || headers['apollographql-client-name'] || headers['x-experience-id']) {
+                    _capturedDoorDashHeaders = headers;
+                }
+            } catch (e) {}
+        };
+        page.on('request', _reqInterceptor);
+
         const _apiInterceptor = async (response) => {
             const url = response.url();
             if (!url.includes('doordash.com') || response.status() !== 200) return;
@@ -2371,11 +2392,51 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 // Parse the Apollo cache and extract store/menu data
                 try {
                     const apolloCache = JSON.parse(apolloResult.cacheJson);
+
+                    // Resolve Apollo's __ref pointers (normalized cache uses refs for related objects)
+                    function resolveRef(obj, cache, depth = 0) {
+                        if (depth > 5 || !obj || typeof obj !== 'object') return obj;
+                        if (obj.__ref) return resolveRef(cache[obj.__ref], cache, depth + 1);
+                        if (Array.isArray(obj)) return obj.map(el => resolveRef(el, cache, depth + 1));
+                        const out = {};
+                        for (const [k, v] of Object.entries(obj)) out[k] = resolveRef(v, cache, depth + 1);
+                        return out;
+                    }
+
+                    // Targeted extraction: find ExternalStore / Store objects and their featured items
+                    for (const [cacheKey, rawVal] of Object.entries(apolloCache)) {
+                        const typeName = cacheKey.split(':')[0];
+                        if (!['ExternalStore', 'Store', 'Business', 'Restaurant'].includes(typeName)) continue;
+                        const val = resolveRef(rawVal, apolloCache);
+                        const storeId = String(val.storeId || val.store_id || val.id || '');
+                        if (!storeId || storeId.length < 4) continue;
+
+                        // Log first ExternalStore to understand structure
+                        if (typeName === 'ExternalStore' && Object.keys(_capturedStoreMenus).length === 0) {
+                            console.log(`[DoorDash] Sample ${cacheKey} keys:`, Object.keys(val).join(', '));
+                        }
+
+                        const featured = val.featuredItems || val.featured_items || val.popularItems || val.popular_items || val.items || [];
+                        if (!Array.isArray(featured) || featured.length === 0) continue;
+                        const items = featured.map(item => ({
+                            name: item.name || item.title || '',
+                            price: typeof item.price === 'number'
+                                ? (item.price > 200 ? item.price / 100 : item.price)
+                                : parseFloat(String(item.price || item.displayPrice || 0).replace(/[^0-9.]/g, '')),
+                            description: item.description || ''
+                        })).filter(i => i.name && i.price > 0);
+                        if (items.length > 0) {
+                            _capturedStoreMenus[storeId] = (_capturedStoreMenus[storeId] || []).concat(items);
+                            console.log(`[DoorDash] Apollo ${typeName} ${storeId}: ${items.length} featured items`);
+                        }
+                    }
+
+                    // Fallback: generic deep walk for other response shapes
                     _extractAndCacheMenuData(apolloCache);
+
                     const capturedIds = Object.keys(_capturedStoreMenus);
                     console.log(`[DoorDash] Apollo cache yielded menus for stores: ${capturedIds.join(', ') || 'none'}`);
                     if (capturedIds.length === 0) {
-                        // Apollo cache has no menu data (search page is SSR, cache is user/cart data only)
                         console.log('[DoorDash] Apollo cache has no menu data (expected for search page)');
                     }
                 } catch (e) {
@@ -3241,14 +3302,19 @@ async function fetchMenuFromInContextAPI(storeId) {
         return _capturedStoreMenus[storeId];
     }
 
-    const result = await page.evaluate(async (storeId) => {
+    if (_capturedDoorDashHeaders) {
+        const authKeys = Object.keys(_capturedDoorDashHeaders).filter(k => k.startsWith('x-') || k.includes('apollo') || k.includes('csrf'));
+        console.log(`[DoorDash API] Using ${authKeys.length} captured auth headers: ${authKeys.join(', ')}`);
+    } else {
+        console.log('[DoorDash API] No captured DoorDash headers yet — will use minimal headers');
+    }
+
+    const result = await page.evaluate(async (storeId, ddHeaders) => {
         const logs = [];
-        const items = [];
 
         // Helper: try to extract menu items from various known DoorDash response shapes
         function parseItems(data) {
             const found = [];
-            // Shape 1: { store: { menus: [{ menu_categories: [{ items: [...] }] }] } }
             const menus = data?.store?.menus || data?.menus || [];
             for (const menu of menus) {
                 const cats = menu.menu_categories || menu.categories || [];
@@ -3256,72 +3322,60 @@ async function fetchMenuFromInContextAPI(storeId) {
                     const catItems = cat.items || cat.menu_items || [];
                     for (const item of catItems) {
                         const name = item.name || item.title || '';
-                        // price may be in cents (int) or dollars (float string)
                         const rawPrice = item.price || item.display_price || item.displayPrice || 0;
                         const price = typeof rawPrice === 'number'
-                            ? (rawPrice > 200 ? rawPrice / 100 : rawPrice) // cents vs dollars heuristic
+                            ? (rawPrice > 200 ? rawPrice / 100 : rawPrice)
                             : parseFloat(String(rawPrice).replace(/[^0-9.]/g, ''));
                         if (name && price > 0) found.push({ name, price });
                     }
                 }
             }
-            // Shape 2: { data: { store: { menus: [...] } } } (GraphQL wrapper)
             if (found.length === 0 && data?.data) return parseItems(data.data);
             return found;
         }
 
-        // Endpoint 1: REST v2 store details (includes menus)
-        const restEndpoints = [
-            `/api/v2/store/${storeId}/`,
-            `/api/v2/store/${storeId}`,
-        ];
-
-        for (const url of restEndpoints) {
-            try {
-                const resp = await fetch(url, {
-                    credentials: 'include',
-                    headers: { 'Accept': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
-                });
-                const text = await resp.text();
-                logs.push(`REST ${url}: ${resp.status} | ${text.substring(0, 200)}`);
-                if (resp.status === 200) {
-                    const data = JSON.parse(text);
-                    const parsed = parseItems(data);
-                    if (parsed.length > 0) return { ok: true, items: parsed, logs };
-                    // Even if no items parsed, log structure for debugging
-                    logs.push(`REST parsed 0 items. Top-level keys: ${Object.keys(data).join(', ')}`);
-                    // Try to return raw data for further analysis
-                    return { ok: false, items: [], rawData: JSON.stringify(data).substring(0, 500), logs };
-                }
-            } catch (e) {
-                logs.push(`REST ${url}: error - ${e.message}`);
+        // Build headers for GraphQL: use DoorDash's own captured headers if available.
+        // Their headers include auth tokens (x-chk-token, apollographql-client-name, etc.)
+        // that make the request look like it came from DoorDash's own React app.
+        const gqlHeaders = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        };
+        if (ddHeaders) {
+            // Copy over DoorDash's auth/session headers (skip hop-by-hop headers)
+            const skip = new Set(['host', 'content-length', 'connection', 'accept-encoding']);
+            for (const [k, v] of Object.entries(ddHeaders)) {
+                if (!skip.has(k.toLowerCase())) gqlHeaders[k] = v;
             }
+            logs.push(`Using ${Object.keys(ddHeaders).length} captured DoorDash headers`);
+        } else {
+            logs.push('No captured DoorDash headers — using minimal headers');
         }
 
-        // Endpoint 2: GraphQL — getStore query (common DoorDash operation)
-        const gqlQueries = [
+        // Attempt 1: GraphQL with DoorDash's captured headers
+        const gqlPayloads = [
+            {
+                operationName: 'getStore',
+                variables: { storeId: String(storeId) },
+                query: `query getStore($storeId: ID!) { store(id: $storeId) { name menus { menu_categories { name items { name price description } } } } }`,
+            },
             {
                 operationName: 'getStore',
                 variables: { id: String(storeId) },
-                query: `query getStore($id: ID!) {
-                    store(id: $id) {
-                        name
-                        menus { menu_categories { name items { name price description } } }
-                    }
-                }`,
+                query: `query getStore($id: ID!) { store(id: $id) { name menus { menu_categories { name items { name price description } } } } }`,
             },
         ];
 
-        for (const payload of gqlQueries) {
+        for (const payload of gqlPayloads) {
             try {
-                const resp = await fetch('/graphql', {
+                const resp = await fetch(`/graphql/${payload.operationName}?operation=${payload.operationName}`, {
                     method: 'POST',
                     credentials: 'include',
-                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    headers: gqlHeaders,
                     body: JSON.stringify(payload),
                 });
                 const text = await resp.text();
-                logs.push(`GQL ${payload.operationName}: ${resp.status} | ${text.substring(0, 300)}`);
+                logs.push(`GQL ${payload.operationName} (vars: ${JSON.stringify(payload.variables)}): ${resp.status} | ${text.substring(0, 300)}`);
                 if (resp.status === 200) {
                     const data = JSON.parse(text);
                     const parsed = parseItems(data);
@@ -3334,8 +3388,27 @@ async function fetchMenuFromInContextAPI(storeId) {
             }
         }
 
+        // Attempt 2: REST endpoint with DoorDash headers
+        try {
+            const resp = await fetch(`/api/v2/store/${storeId}/`, {
+                credentials: 'include',
+                headers: { ...gqlHeaders, 'Accept': 'application/json' },
+            });
+            const text = await resp.text();
+            logs.push(`REST /api/v2/store/${storeId}/: ${resp.status} | ${text.substring(0, 200)}`);
+            if (resp.status === 200) {
+                const data = JSON.parse(text);
+                const parsed = parseItems(data);
+                if (parsed.length > 0) return { ok: true, items: parsed, logs };
+                logs.push(`REST parsed 0 items. Top-level keys: ${Object.keys(data).join(', ')}`);
+                return { ok: false, items: [], rawData: JSON.stringify(data).substring(0, 500), logs };
+            }
+        } catch (e) {
+            logs.push(`REST error: ${e.message}`);
+        }
+
         return { ok: false, items: [], logs };
-    }, storeId);
+    }, storeId, _capturedDoorDashHeaders);
 
     for (const line of result.logs) {
         console.log('[DoorDash API]', line);
