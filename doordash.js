@@ -2303,12 +2303,10 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
         page.on('response', _apiInterceptor);
 
-        // Step 2: Navigate to DoorDash, retrying with new proxy IPs until CF doesn't block.
-        // Some residential IPs show interactive Turnstile (requires human click, never auto-solves).
-        // ensureCleanProxyIP() retries up to 4 times to find an IP with only invisible challenge.
-        console.log('[DoorDash] Navigating to DoorDash (finding clean proxy IP)...');
-        await ensureCleanProxyIP(4);
-        await delay(2000);
+        // Step 2: Navigate to DoorDash — captcha solver handles any CF challenge
+        console.log('[DoorDash] Navigating to DoorDash...');
+        await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await delay(3000);
         await takeScreenshot('1-loaded-homepage');
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
@@ -3514,6 +3512,13 @@ async function waitForCFChallenge(timeoutMs = 60000) {
     console.log('[DoorDash] CF challenge detected! URL:', page.url(), '| Content snippet:', snippet);
     await takeScreenshot('cf-challenge-detected');
 
+    // Try captcha solver first (2captcha/CapSolver) — much faster than waiting for auto-resolve
+    const solverKey = process.env.TWOCAPTCHA_API_KEY || process.env.CAPSOLVER_API_KEY;
+    if (solverKey) {
+        const solved = await solveCFWithCaptchaService(solverKey);
+        if (solved) return true;
+    }
+
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
         await delay(3000);
@@ -3528,6 +3533,128 @@ async function waitForCFChallenge(timeoutMs = 60000) {
     console.log('[DoorDash] CF challenge timed out');
     await takeScreenshot('cf-challenge-timeout');
     return false;
+}
+
+/**
+ * Solve a Cloudflare Turnstile challenge using 2captcha or CapSolver.
+ * Extracts the sitekey from the current page, submits to the solver API,
+ * injects the returned token, and waits for CF to clear.
+ * Returns true if solved successfully.
+ */
+async function solveCFWithCaptchaService(apiKey) {
+    try {
+        const pageUrl = page.url();
+        console.log('[CF Solver] Attempting to solve CF challenge...');
+
+        // Extract Turnstile sitekey from the page (CF embeds it in _cf_chl_opt or data-sitekey)
+        const sitekey = await page.evaluate(() => {
+            // Method 1: window._cf_chl_opt (managed challenge)
+            if (window._cf_chl_opt?.cSitekey) return window._cf_chl_opt.cSitekey;
+            // Method 2: data-sitekey attribute on Turnstile div
+            const el = document.querySelector('[data-sitekey]');
+            if (el) return el.getAttribute('data-sitekey');
+            // Method 3: Turnstile iframe src param
+            for (const iframe of document.querySelectorAll('iframe')) {
+                try {
+                    const u = new URL(iframe.src);
+                    const sk = u.searchParams.get('sitekey');
+                    if (sk) return sk;
+                } catch {}
+            }
+            // Method 4: scan inline scripts for sitekey pattern
+            for (const s of document.querySelectorAll('script:not([src])')) {
+                const m = s.textContent.match(/['"](0x4[A-Za-z0-9_-]{20,})['"]/);
+                if (m) return m[1];
+            }
+            return null;
+        }).catch(() => null);
+
+        if (!sitekey) {
+            console.log('[CF Solver] No sitekey found — cannot solve');
+            return false;
+        }
+        console.log(`[CF Solver] Sitekey: ${sitekey}`);
+
+        // Determine API endpoint — CapSolver uses capsolver.com, 2captcha uses 2captcha.com
+        const isCapSolver = !!process.env.CAPSOLVER_API_KEY;
+        const apiBase = isCapSolver ? 'https://api.capsolver.com' : 'https://api.2captcha.com';
+        const taskType = isCapSolver ? 'AntiTurnstileTaskProxyLess' : 'TurnstileTaskProxyless';
+
+        // Submit task
+        const submitResp = await fetch(`${apiBase}/createTask`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                clientKey: apiKey,
+                task: { type: taskType, websiteURL: pageUrl, websiteKey: sitekey },
+            }),
+        });
+        const submitData = await submitResp.json();
+        if (submitData.errorId || submitData.errorCode) {
+            console.log('[CF Solver] Submit error:', submitData.errorCode || submitData.errorDescription);
+            return false;
+        }
+        const taskId = submitData.taskId;
+        console.log(`[CF Solver] Task ${taskId} submitted — polling for result...`);
+
+        // Poll for result (up to 120s)
+        for (let i = 0; i < 24; i++) {
+            await delay(5000);
+            const resultResp = await fetch(`${apiBase}/getTaskResult`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ clientKey: apiKey, taskId }),
+            });
+            const resultData = await resultResp.json();
+            if (resultData.errorId || resultData.errorCode) {
+                console.log('[CF Solver] Poll error:', resultData.errorCode);
+                return false;
+            }
+            if (resultData.status === 'ready') {
+                const token = resultData.solution?.token || resultData.solution?.cfClearance;
+                if (!token) {
+                    console.log('[CF Solver] No token in solution:', JSON.stringify(resultData.solution));
+                    return false;
+                }
+                console.log(`[CF Solver] Got token (${token.length} chars) — injecting...`);
+
+                // Inject the Turnstile token into the page and submit
+                await page.evaluate((t) => {
+                    // Set all cf-turnstile-response inputs
+                    document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => el.value = t);
+                    // Trigger Turnstile callback if available
+                    if (window.turnstile?.execute) window.turnstile.execute();
+                    // Submit any CF challenge forms
+                    document.querySelectorAll('form').forEach(f => {
+                        try { f.submit(); } catch {}
+                    });
+                }, token);
+
+                // Wait for page to navigate away from CF challenge
+                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+                await delay(2000);
+
+                // Verify CF is gone
+                try {
+                    const content = await page.content();
+                    const stillCF = content.includes('Just a moment') || content.includes('_cf_chl_opt') ||
+                                    content.includes('Performing security verification');
+                    if (!stillCF) {
+                        console.log('[CF Solver] CF challenge cleared!');
+                        return true;
+                    }
+                } catch {}
+
+                console.log('[CF Solver] Token injected but CF still present');
+                return false;
+            }
+        }
+        console.log('[CF Solver] Timed out waiting for solution');
+        return false;
+    } catch (e) {
+        console.log('[CF Solver] Error:', e.message);
+        return false;
+    }
 }
 
 /**
