@@ -3371,7 +3371,7 @@ async function fetchMenuFromInContextAPI(storeId) {
         console.log('[DoorDash API] No captured DoorDash headers yet — will use minimal headers');
     }
 
-    const result = await page.evaluate(async (storeId, ddHeaders) => {
+    const result = await page.evaluate(async ({ storeId, ddHeaders }) => {
         const logs = [];
 
         // Helper: try to extract menu items from various known DoorDash response shapes
@@ -3470,7 +3470,7 @@ async function fetchMenuFromInContextAPI(storeId) {
         }
 
         return { ok: false, items: [], logs };
-    }, storeId, _capturedDoorDashHeaders);
+    }, { storeId, ddHeaders: _capturedDoorDashHeaders });
 
     for (const line of result.logs) {
         console.log('[DoorDash API]', line);
