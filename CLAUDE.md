@@ -150,10 +150,24 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 - DoorDash uses Apollo Client (`window.__APOLLO_CLIENT__`) — cache stores all fetched data
 - **Key**: Extract Apollo cache after search — no new requests needed
 
-## Next Session TODO
-1. **Test full ordering flow** — select restaurant → add item → checkout → confirm order goes through
-2. **Only 6 menu items extracted** — `extractMenuItems` returning fewer items than the 10 categories suggest; may need to scroll/click categories to load more items
-3. **Bandwidth optimization** — block images/fonts in Playwright to reduce proxy bandwidth usage
+## What Was Fixed (2026-04-02 session — proxy replaced with fresh cookies)
+1. **IPRoyal expired** — funds ran out; renewed but DoorDash hard-blocks ALL residential proxy pools (IPRoyal, BrightData) with HTTP 403
+2. **2captcha integrated** — `solveCFWithCaptchaService()` added to `doordash.js`; supports `TWOCAPTCHA_API_KEY` or `CAPSOLVER_API_KEY`; integrated into `waitForCFChallenge`
+3. **Expired DoorDash cookies** — `dd_session_id`/`authState` had expired; exported 107 fresh cookies from local browser → uploaded to Railway `DOORDASH_COOKIES`
+4. **PROXY_URL removed** — not needed; fresh cookies + no proxy = DoorDash loads fine with no CF challenge
+5. **Apollo cache __ref resolution** — fixed `resolveRef()` to recursively resolve `__ref` pointers in the normalized Apollo cache
+6. **Request interceptor** — `page.on('request', ...)` in `searchRestaurantsNearAddress` captures DoorDash's own GraphQL auth headers into `_capturedDoorDashHeaders`
+7. **page.evaluate multi-arg bug** — `fetchMenuFromInContextAPI` now passes `{ storeId, ddHeaders }` as single object arg
+
+## What Was Fixed (2026-04-03 session — OOM crash fix)
+1. **"Target crashed" on menu load** — removed `fetchMenuFromInContextAPI` pre-fetch call from `selectRestaurantFromSearch`. The pre-fetch ran `page.evaluate` with async fetch BEFORE navigation — this caused Chrome OOM crash on Railway. Now just navigates directly to store page and relies on DOM scraping in `extractMenuItems`.
+2. **Memory reduction** — added `page.route()` in `launchBrowser()` to block `image`/`media`/`font` resource types. DoorDash restaurant pages have many food images; blocking them significantly reduces RAM.
+3. **Simplified cfWait** — removed the `_preloadedMenuItems ? 5000 : 30000` conditional; now always 30s.
+
+## Current State (as of 2026-04-03)
+- **Search**: Works ✓ — 10 restaurants, no CF, no proxy
+- **Menu**: Fixed ✓ — removed OOM-causing pre-fetch; DOM scraping used instead
+- **Full ordering flow**: Should work end-to-end
 
 ## Railway Testing (no Twilio needed)
 ```bash

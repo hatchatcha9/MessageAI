@@ -438,6 +438,16 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
 
     page = context.pages()[0] || await context.newPage();
 
+    // Block heavy resources to reduce memory usage on Railway (images are the biggest win)
+    await page.route('**/*', (route) => {
+        const rt = route.request().resourceType();
+        if (rt === 'image' || rt === 'media' || rt === 'font') {
+            route.abort();
+        } else {
+            route.continue();
+        }
+    });
+
     // Set default timeout
     page.setDefaultTimeout(30000);
 
@@ -3681,22 +3691,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             if (storeIdMatch && currentUrl.includes('doordash.com')) {
                 const storeId = storeIdMatch[1];
 
-                // PRE-FETCH menu via in-context API while still on the search results page.
-                // The search page already passed CF, so same-origin XHR is not blocked.
-                // This avoids waiting 60s for CF Turnstile on the restaurant page.
-                console.log(`[DoorDash] Pre-fetching menu for store ${storeId} from search page context...`);
-                _preloadedMenuItems = null; // clear any old cache
-                try {
-                    const preloaded = await fetchMenuFromInContextAPI(storeId);
-                    if (preloaded && preloaded.length > 0) {
-                        _preloadedMenuItems = preloaded;
-                        console.log(`[DoorDash] Pre-fetch SUCCESS: ${preloaded.length} items cached`);
-                    } else {
-                        console.log('[DoorDash] Pre-fetch returned 0 items — will try DOM scraping after navigation');
-                    }
-                } catch (e) {
-                    console.log('[DoorDash] Pre-fetch error:', e.message);
-                }
+                _preloadedMenuItems = null; // clear any cached pre-fetch data
 
                 const fullHref = await page.evaluate((id) => {
                     const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
@@ -3722,9 +3717,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 console.log('[DoorDash] JS navigation error:', e.message);
             }
 
-            // If menu was pre-fetched, only do a brief CF check (no long wait needed).
-            // If not pre-fetched, wait up to 30s for CF to potentially auto-resolve.
-            const cfWait = _preloadedMenuItems ? 5000 : 30000;
+            const cfWait = 30000;
             await delay(1000); // brief settle before checking
             const cfResolved = await waitForCFChallenge(cfWait);
             let finalUrl = page.url();
