@@ -382,6 +382,13 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             '--window-size=1280,720',
             '--lang=en-US',
             '--disable-setuid-sandbox',
+            // Memory-saving flags for Railway's 512 MB RAM limit
+            '--disable-background-networking',     // no background data sync
+            '--disable-background-timer-throttling',
+            '--disable-features=IsolateOrigins,site-per-process', // share renderer process = less RAM
+            '--disable-extensions',
+            '--disable-sync',
+            '--disable-translate',
             // --no-zygote is headless-only (causes issues in headed+Xvfb).
             // --use-gl=swiftshader is needed in BOTH modes:
             //   headless: no display, must use software GL
@@ -2588,6 +2595,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // Save search URL so restaurant selection can navigate back here on CF retry
         updateSessionState({ lastSearchUrl: page.url() });
         console.log('[DoorDash] === SEARCH COMPLETE ===');
+
+        // Navigate away from the heavy search page to free V8 heap memory before the
+        // next navigation (store page). DoorDash's React SPA uses 100-200 MB; releasing
+        // it before loading the store page keeps total usage within Railway's 512 MB limit.
+        page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+
         return {
             success: true,
             restaurants: sortedRestaurants,
@@ -3710,11 +3723,18 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             }
 
             try {
-                await page.evaluate((url) => { window.location.href = url; }, targetUrl);
-                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                console.log('[DoorDash] JS navigation landed at:', page.url());
+                if (currentUrl.includes('doordash.com')) {
+                    // JS navigation from within DoorDash preserves the CF session context
+                    await page.evaluate((url) => { window.location.href = url; }, targetUrl);
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                } else {
+                    // Starting from about:blank (search page was unloaded to free memory).
+                    // Fresh cookies bypass CF on Railway so page.goto() works fine.
+                    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                }
+                console.log('[DoorDash] Navigation landed at:', page.url());
             } catch (e) {
-                console.log('[DoorDash] JS navigation error:', e.message);
+                console.log('[DoorDash] Navigation error:', e.message);
             }
 
             const cfWait = 30000;
