@@ -4011,6 +4011,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         const itemName = cachedItem?.name || `item ${index + 1}`;
         console.log(`[DoorDash] Adding item: ${itemName} (index ${index})...`);
         console.log(`[DoorDash] Options:`, JSON.stringify(options));
+        console.log(`[DoorDash] Current URL for item add: ${page.url()}`);
         await takeScreenshot(`add-item-start-${index}`);
 
         // Check if modal is already open (from previous interaction)
@@ -4124,7 +4125,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             for (let scrollAttempt = 0; scrollAttempt < searchYPositions.length && !clicked; scrollAttempt++) {
                 const scrollY = Math.max(0, searchYPositions[scrollAttempt]);
                 await page.evaluate((y) => window.scrollTo(0, y), scrollY);
-                await delay(400);
+                await delay(800); // give React virtual scroll time to render items
 
                 // Try to find and click the item at current scroll position
                 const result = await page.evaluate((name) => {
@@ -4227,8 +4228,18 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         };
                     }
 
-                    return { found: false };
+                    // Debug: report what's on screen to diagnose search failures
+                    const scrollTop = window.scrollY;
+                    const items = Array.from(document.querySelectorAll('span, div')).filter(el => {
+                        const r = el.getBoundingClientRect();
+                        return r.top >= 0 && r.top < window.innerHeight && r.width > 80 && r.height > 15 && r.height < 80;
+                    }).map(el => el.textContent?.trim()?.substring(0, 30)).filter(t => t && t.length > 3 && t.includes('$')).slice(0, 5);
+                    return { found: false, scrollTop, visiblePriceItems: items };
                 }, searchName);
+
+                if (!result.found) {
+                    console.log(`[DoorDash] y=${scrollY}: not found, scrollTop=${result.scrollTop}, visible: ${JSON.stringify(result.visiblePriceItems)}`);
+                }
 
                 if (result.found) {
                     console.log(`[DoorDash] Found "${searchName}" via ${result.strategy}: ${result.text}`);
