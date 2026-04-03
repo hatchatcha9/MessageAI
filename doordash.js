@@ -4015,9 +4015,17 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
         // If not on a DoorDash store page (e.g. browser is on about:blank after search),
         // navigate there before attempting to find/click the item.
+        // Navigate via the DoorDash homepage first to warm up the CF session context —
+        // cold-navigating directly from about:blank to a store page triggers CF challenges.
         const storeNavUrl = options.restaurantUrl || sessionState.currentRestaurantUrl;
         if (!page.url().includes('doordash.com/store/') && storeNavUrl) {
-            console.log(`[DoorDash] Not on store page — navigating to ${storeNavUrl}`);
+            const isOnDoorDash = page.url().includes('doordash.com');
+            if (!isOnDoorDash) {
+                console.log('[DoorDash] Warming CF session via DoorDash homepage...');
+                await page.goto('https://www.doordash.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+                await delay(1500);
+            }
+            console.log(`[DoorDash] Navigating to store page: ${storeNavUrl}`);
             await page.goto(storeNavUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => {
                 console.log('[DoorDash] Navigation to store page error:', e.message);
             });
