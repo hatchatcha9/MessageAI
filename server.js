@@ -698,12 +698,12 @@ async function processCommands(response, user, phoneNumber) {
                 const itemText = prefsText.pendingDoordashItem;
                 const numText = itemText.menuIndex;
                 try {
-                    let addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true }, itemText);
+                    let addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
                     // If browser was closed (server restart), re-navigate and retry
                     if (!addResultText.success && addResultText.browserNotOpen && prefsText.currentRestaurantUrl) {
                         console.log('[Recovery] Browser not open - navigating back to restaurant page...');
                         await doordash.navigateToRestaurantPage(prefsText.currentRestaurantUrl);
-                        addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true }, itemText);
+                        addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
                     }
                     if (addResultText.success) {
                         prefsText.pendingDoordashItem = null;
@@ -763,12 +763,12 @@ async function processCommands(response, user, phoneNumber) {
             const itemOpt = prefsOpt.pendingDoordashItem;
             const numOpt = itemOpt.menuIndex;
             try {
-                let addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true }, itemOpt);
+                let addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
                 // If browser was closed (server restart), re-navigate and retry
                 if (!addResultOpt.success && addResultOpt.browserNotOpen && prefsOpt.currentRestaurantUrl) {
                     console.log('[Recovery] Browser not open - navigating back to restaurant page...');
                     await doordash.navigateToRestaurantPage(prefsOpt.currentRestaurantUrl);
-                    addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true }, itemOpt);
+                    addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
                 }
                 if (addResultOpt.success) {
                     prefsOpt.pendingDoordashItem = null;
@@ -862,8 +862,8 @@ async function processCommands(response, user, phoneNumber) {
                         }
 
                         const addOptions = pendingSelections ?
-                            { selectFirst: false, selections: pendingSelections, skipOptionsCheck: true } :
-                            { selectFirst: false }; // Don't auto-select, let user choose
+                            { selectFirst: false, selections: pendingSelections, skipOptionsCheck: true, restaurantUrl: prefs.currentRestaurantUrl } :
+                            { selectFirst: false, restaurantUrl: prefs.currentRestaurantUrl }; // Don't auto-select, let user choose
 
                         // Add item via browser automation
                         let addResult = await doordash.addItemByIndex(num, addOptions, item);
@@ -1182,7 +1182,7 @@ async function processCommands(response, user, phoneNumber) {
                                 item.name.toLowerCase().includes(m.name.toLowerCase())
                             );
                             if (menuIdx >= 0) {
-                                const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true }, menuItems[menuIdx]);
+                                const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
                                 if (addResult.success) {
                                     db.addToCart(user.id, lastOrder.restaurant_id, {
                                         id: `doordash-${menuIdx}`, name: item.name,

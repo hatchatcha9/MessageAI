@@ -4012,6 +4012,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         console.log(`[DoorDash] Adding item: ${itemName} (index ${index})...`);
         console.log(`[DoorDash] Options:`, JSON.stringify(options));
         console.log(`[DoorDash] Current URL for item add: ${page.url()}`);
+
+        // If not on a DoorDash store page (e.g. browser is on about:blank after search),
+        // navigate there before attempting to find/click the item.
+        const storeNavUrl = options.restaurantUrl || sessionState.currentRestaurantUrl;
+        if (!page.url().includes('doordash.com/store/') && storeNavUrl) {
+            console.log(`[DoorDash] Not on store page — navigating to ${storeNavUrl}`);
+            await page.goto(storeNavUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(e => {
+                console.log('[DoorDash] Navigation to store page error:', e.message);
+            });
+            await waitForCFChallenge(15000);
+            await delay(2000);
+            console.log(`[DoorDash] Now at: ${page.url()}`);
+        }
+
         await takeScreenshot(`add-item-start-${index}`);
 
         // Check if modal is already open (from previous interaction)
