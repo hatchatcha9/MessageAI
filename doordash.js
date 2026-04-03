@@ -4111,35 +4111,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log(`[DoorDash] Clicked sidebar categories: ${JSON.stringify(clickedCategories)}`);
             await delay(1000);
 
-            // Scroll through the ENTIRE page to trigger lazy loading of all sections
-            console.log('[DoorDash] Scrolling through page to load all items...');
-            const totalHeight = await page.evaluate(() => document.body.scrollHeight);
-            for (let scrollPos = 0; scrollPos < totalHeight; scrollPos += 500) {
-                await page.evaluate((pos) => window.scrollTo(0, pos), scrollPos);
-                await delay(200);
-            }
+            // Scroll directly to the item's cached position — avoids full-page scroll
+            // (full-page scan here + extractMenuItems already doing it = Chrome OOM on Railway).
+            // cachedItem.y is the absolute document y from extraction; scroll there ± a few
+            // steps as fallback in case the DOM shifted slightly since extraction.
+            const cachedY = (cachedItem?.y > 0) ? cachedItem.y : 0;
+            const searchYPositions = cachedY > 0
+                ? [cachedY - 300, cachedY, cachedY + 300, cachedY - 700, cachedY + 700, 0]
+                : [0, 400, 800, 1200, 1600, 2000, 2400];
+            console.log(`[DoorDash] Targeted scroll to item (cached y=${cachedY}) — ${searchYPositions.length} positions`);
 
-            // Take a screenshot after loading
-            await takeScreenshot('after-scroll-load');
-
-            // Now scroll back to top to start searching
-            await page.evaluate(() => window.scrollTo(0, 0));
-            await delay(500);
-            console.log('[DoorDash] All items loaded, starting search...');
-
-            // Scroll through the ENTIRE page looking for the item
-            // Get page height first
-            const pageHeight = await page.evaluate(() => document.body.scrollHeight);
-            const viewportHeight = await page.evaluate(() => window.innerHeight);
-            const scrollSteps = Math.ceil(pageHeight / 300) + 5; // More scroll steps
-
-            console.log(`[DoorDash] Page height: ${pageHeight}, will scroll ${scrollSteps} times`);
-
-            for (let scrollAttempt = 0; scrollAttempt < scrollSteps && !clicked; scrollAttempt++) {
-                // Periodically screenshot during scroll to show search progress
-                if (scrollAttempt % 4 === 0) {
-                    await takeScreenshot(`searching-scroll-${scrollAttempt}`);
-                }
+            for (let scrollAttempt = 0; scrollAttempt < searchYPositions.length && !clicked; scrollAttempt++) {
+                const scrollY = Math.max(0, searchYPositions[scrollAttempt]);
+                await page.evaluate((y) => window.scrollTo(0, y), scrollY);
+                await delay(400);
 
                 // Try to find and click the item at current scroll position
                 const result = await page.evaluate((name) => {
@@ -4282,13 +4267,10 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     }
                 }
 
-                // Scroll down to continue searching
-                await page.evaluate(() => window.scrollBy(0, 300));
-                await delay(350);
             }
 
             if (!clicked) {
-                console.log(`[DoorDash] Could not find "${searchName}" after full page scroll`);
+                console.log(`[DoorDash] Could not find "${searchName}" at targeted positions`);
                 await takeScreenshot('item-not-found');
             }
         }
