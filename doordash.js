@@ -4141,114 +4141,99 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 await page.evaluate((y) => window.scrollTo(0, y), scrollY);
                 await delay(800); // give React virtual scroll time to render items
 
-                // Try to find and click the item at current scroll position
+                // Try to find and click the item at current scroll position.
+                // Uses TreeWalker (text-node scan) instead of querySelectorAll('span,div')
+                // to avoid iterating thousands of elements — critical on Railway's limited RAM.
                 const result = await page.evaluate((name) => {
                     const lowerName = name.toLowerCase().trim();
 
-                    // STRATEGY 1: Find headings/titles that exactly match our item name.
-                    // Collect all candidates; prefer exact match over startsWith to avoid
-                    // "Pepsi® Zero Sugar" being returned when looking for "Pepsi®".
-                    const titleElements = document.querySelectorAll('h1, h2, h3, h4, h5, span, div');
-                    const candidates1 = []; // { el, score, directText, fullText }
-
-                    for (const titleEl of titleElements) {
-                        let directText = '';
-                        for (const node of titleEl.childNodes) {
-                            if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
-                        }
-                        directText = directText.trim().toLowerCase();
-                        const fullText = titleEl.textContent?.trim()?.toLowerCase() || '';
-
-                        let score = 0;
-                        if (directText === lowerName || fullText === lowerName) score = 3; // exact
-                        else if (directText.startsWith(lowerName) || (fullText.startsWith(lowerName) && fullText.length < lowerName.length + 30)) score = 1; // prefix
-
-                        if (score === 0) continue;
-
-                        const rect = titleEl.getBoundingClientRect();
-                        if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
-                        if (rect.left < 150) continue;
-                        candidates1.push({ el: titleEl, score, directText, fullText });
-                    }
-                    // Sort by score descending so exact matches come first
-                    candidates1.sort((a, b) => b.score - a.score);
-
-                    for (const { el: titleEl, directText, fullText } of candidates1) {
-
-                        // Found the title! Now find the parent card to click
-                        let cardEl = titleEl;
-                        for (let i = 0; i < 5; i++) {
-                            const parent = cardEl.parentElement;
-                            if (!parent) break;
-                            const parentRect = parent.getBoundingClientRect();
-                            // Parent should be a reasonable card size
-                            if (parentRect.width > 100 && parentRect.width < 500 &&
-                                parentRect.height > 60 && parentRect.height < 400) {
-                                cardEl = parent;
+                    // Helper: walk up from a text node to find a clickable card element
+                    function findCard(startEl) {
+                        let el = startEl;
+                        let bestCard = null;
+                        for (let i = 0; i < 8 && el; i++) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 100 && r.width < 520 && r.height > 50 && r.height < 400 && r.left > 50) {
+                                bestCard = el;
                             }
-                            // Stop if parent is too big
-                            if (parentRect.width > 600 || parentRect.height > 500) break;
+                            if (r.width > 600 || r.height > 500) break;
+                            el = el.parentElement;
                         }
-
-                        console.log('[FindItem] Found title match:', directText || fullText.substring(0, 40));
-                        cardEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-
-                        // Get coordinates AFTER scroll so they're accurate
-                        const cardRect = cardEl.getBoundingClientRect();
-                        return {
-                            found: true,
-                            strategy: 'title-match',
-                            text: directText || fullText.substring(0, 40),
-                            x: cardRect.left + cardRect.width / 2,
-                            y: cardRect.top + cardRect.height / 2
-                        };
+                        return bestCard;
                     }
 
-                    // STRATEGY 2: Look for menu item cards where first line matches
-                    const cards = document.querySelectorAll(`
-                        article, [role="button"],
-                        [class*="MenuItem"], [class*="ItemCard"], [class*="StoreItem"],
-                        button, a
-                    `.replace(/\s+/g, ' '));
+                    // STRATEGY 1 (fast): TreeWalker over text nodes — O(n text nodes), early exit
+                    // Finds first visible text node whose content matches the item name exactly.
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    let bestExact = null, bestPrefix = null;
+                    while ((node = walker.nextNode())) {
+                        const t = node.textContent.trim().toLowerCase();
+                        if (!t) continue;
+                        const isExact = (t === lowerName);
+                        const isPrefix = !isExact && t.startsWith(lowerName) && t.length < lowerName.length + 30;
+                        if (!isExact && !isPrefix) continue;
+                        // Check visibility: parent must be in or near viewport
+                        const parentEl = node.parentElement;
+                        if (!parentEl) continue;
+                        const pr = parentEl.getBoundingClientRect();
+                        if (pr.top < -100 || pr.top > window.innerHeight + 100) continue;
+                        if (pr.left < 50) continue;
+                        if (isExact && !bestExact) bestExact = parentEl;
+                        if (isPrefix && !bestPrefix) bestPrefix = parentEl;
+                        if (bestExact) break; // exact match found, stop
+                    }
 
+                    const matchEl = bestExact || bestPrefix;
+                    if (matchEl) {
+                        const card = findCard(matchEl);
+                        if (card) {
+                            card.scrollIntoView({ behavior: 'instant', block: 'center' });
+                            const r = card.getBoundingClientRect();
+                            return {
+                                found: true, strategy: 'treewalker',
+                                text: matchEl.textContent.trim().substring(0, 40),
+                                x: r.left + r.width / 2, y: r.top + r.height / 2
+                            };
+                        }
+                    }
+
+                    // STRATEGY 2: Specific card selectors (article, role=button, etc.)
+                    const cards = document.querySelectorAll(
+                        'article, [role="button"], [class*="MenuItem"], [class*="ItemCard"], button, a'
+                    );
                     for (const card of cards) {
                         const text = card.textContent || '';
                         const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                         const firstLine = lines[0]?.toLowerCase() || '';
-
-                        // First line should BE the item name or start with it
                         if (firstLine !== lowerName && !firstLine.startsWith(lowerName)) continue;
-
-                        // Must have a price somewhere
                         if (!text.match(/\$\d+/)) continue;
-
                         const rect = card.getBoundingClientRect();
-                        if (rect.width < 100 || rect.width > 450) continue;
+                        if (rect.width < 100 || rect.width > 480) continue;
                         if (rect.height < 50 || rect.height > 350) continue;
-                        if (rect.left < 150) continue;
+                        if (rect.left < 50) continue;
                         if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
-
-                        console.log('[FindItem] Found card match:', firstLine.substring(0, 40));
                         card.scrollIntoView({ behavior: 'instant', block: 'center' });
-
-                        // Get coordinates AFTER scroll so they're accurate
-                        const cardRect = card.getBoundingClientRect();
+                        const cr = card.getBoundingClientRect();
                         return {
-                            found: true,
-                            strategy: 'card-match',
+                            found: true, strategy: 'card-match',
                             text: firstLine.substring(0, 40),
-                            x: cardRect.left + cardRect.width / 2,
-                            y: cardRect.top + cardRect.height / 2
+                            x: cr.left + cr.width / 2, y: cr.top + cr.height / 2
                         };
                     }
 
-                    // Debug: report what's on screen to diagnose search failures
-                    const scrollTop = window.scrollY;
-                    const items = Array.from(document.querySelectorAll('span, div')).filter(el => {
-                        const r = el.getBoundingClientRect();
-                        return r.top >= 0 && r.top < window.innerHeight && r.width > 80 && r.height > 15 && r.height < 80;
-                    }).map(el => el.textContent?.trim()?.substring(0, 30)).filter(t => t && t.length > 3 && t.includes('$')).slice(0, 5);
-                    return { found: false, scrollTop, visiblePriceItems: items };
+                    // Debug: sample a few visible text nodes for logging
+                    const walker2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    const visibleSamples = [];
+                    let n2;
+                    while ((n2 = walker2.nextNode()) && visibleSamples.length < 8) {
+                        const t = n2.textContent.trim();
+                        if (!t || t.length < 3) continue;
+                        const pr = n2.parentElement?.getBoundingClientRect();
+                        if (!pr || pr.top < 0 || pr.top > window.innerHeight) continue;
+                        if (t.includes('$')) visibleSamples.push(t.substring(0, 30));
+                    }
+                    return { found: false, scrollTop: window.scrollY, visiblePriceItems: visibleSamples };
                 }, searchName);
 
                 if (!result.found) {
