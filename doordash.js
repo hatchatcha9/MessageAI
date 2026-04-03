@@ -4022,7 +4022,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 console.log('[DoorDash] Navigation to store page error:', e.message);
             });
             await waitForCFChallenge(15000);
-            await delay(2000);
+            await delay(1000);
             console.log(`[DoorDash] Now at: ${page.url()}`);
         }
 
@@ -4093,38 +4093,6 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // First scroll to top
             await page.evaluate(() => window.scrollTo(0, 0));
             await delay(300);
-
-            // Click on sidebar menu categories to load items (DoorDash lazy-loads sections)
-            console.log('[DoorDash] Clicking sidebar categories to load menu items...');
-
-            // Use page.evaluate to find and click sidebar links - more reliable
-            const clickedCategories = await page.evaluate(() => {
-                const clicked = [];
-                const categoriesToFind = ['light entrees', 'most ordered', 'entrees', 'salads'];
-
-                // Find all links/buttons in the page
-                const allLinks = document.querySelectorAll('a, button, [role="button"], [role="tab"]');
-
-                for (const link of allLinks) {
-                    const text = link.textContent?.toLowerCase()?.trim() || '';
-                    const rect = link.getBoundingClientRect();
-
-                    // Check if this is a sidebar link (left side of page, reasonable size)
-                    if (rect.left < 200 && rect.width > 30 && rect.width < 250 && rect.height > 15 && rect.height < 60) {
-                        for (const cat of categoriesToFind) {
-                            if (text === cat || text.includes(cat)) {
-                                link.click();
-                                clicked.push(text);
-                                break;
-                            }
-                        }
-                    }
-                }
-                return clicked;
-            });
-
-            console.log(`[DoorDash] Clicked sidebar categories: ${JSON.stringify(clickedCategories)}`);
-            await delay(1000);
 
             // Scroll directly to the item's cached position — avoids full-page scroll
             // (full-page scan here + extractMenuItems already doing it = Chrome OOM on Railway).
