@@ -4184,14 +4184,29 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         if (bestExact) break; // exact match found, stop
                     }
 
+                    // Helper: disable Turnstile overlay + JS-click the card in one shot.
+                    // Avoids a second page.evaluate round-trip which can fail if Chrome
+                    // is under memory pressure after the DOM traversal.
+                    function clickCard(card) {
+                        const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"]');
+                        overlays.forEach(el => { el.style.pointerEvents = 'none'; });
+                        // Dispatch React-compatible synthetic events
+                        ['mousedown', 'mouseup', 'click'].forEach(type => {
+                            card.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+                        });
+                        card.click();
+                        return true;
+                    }
+
                     const matchEl = bestExact || bestPrefix;
                     if (matchEl) {
                         const card = findCard(matchEl);
                         if (card) {
                             card.scrollIntoView({ behavior: 'instant', block: 'center' });
                             const r = card.getBoundingClientRect();
+                            clickCard(card);
                             return {
-                                found: true, strategy: 'treewalker',
+                                found: true, clicked: true, strategy: 'treewalker',
                                 text: matchEl.textContent.trim().substring(0, 40),
                                 x: r.left + r.width / 2, y: r.top + r.height / 2
                             };
@@ -4215,8 +4230,9 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
                         card.scrollIntoView({ behavior: 'instant', block: 'center' });
                         const cr = card.getBoundingClientRect();
+                        clickCard(card);
                         return {
-                            found: true, strategy: 'card-match',
+                            found: true, clicked: true, strategy: 'card-match',
                             text: firstLine.substring(0, 40),
                             x: cr.left + cr.width / 2, y: cr.top + cr.height / 2
                         };
@@ -4243,38 +4259,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 if (result.found) {
                     console.log(`[DoorDash] Found "${searchName}" via ${result.strategy}: ${result.text}`);
                     console.log(`[DoorDash] Card center: (${result.x?.toFixed(0)}, ${result.y?.toFixed(0)})`);
-                    await delay(400);
-                    await takeScreenshot(`found-item-scroll-${scrollAttempt}`);
-
-                    if (result.x && result.y) {
-                        // Disable pointer-events on any Turnstile overlay so mouse.click passes through.
-                        // The overlay is a permanent DOM element that intercepts pointer events when active.
-                        const hadOverlay = await page.evaluate(() => {
-                            const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"]');
-                            overlays.forEach(el => { el.style.pointerEvents = 'none'; });
-                            return overlays.length > 0;
-                        });
-                        if (hadOverlay) {
-                            console.log('[DoorDash] Disabled pointer-events on Turnstile overlay, proceeding with click');
-                        }
-                        console.log('[DoorDash] Clicking card...');
-
-                        console.log(`[DoorDash] Clicking card at (${result.x.toFixed(0)}, ${result.y.toFixed(0)})...`);
-                        try {
-                            await Promise.race([
-                                page.mouse.click(result.x, result.y),
-                                new Promise((_, reject) => setTimeout(() => reject(new Error('mouse.click timeout')), 8000))
-                            ]);
-                        } catch (clickErr) {
-                            console.log(`[DoorDash] mouse.click failed/timed out: ${clickErr.message} — JS fallback`);
-                            await page.evaluate(({x, y}) => {
-                                const el = document.elementFromPoint(x, y);
-                                if (el) el.click();
-                            }, { x: result.x, y: result.y });
-                        }
-                        clicked = true;
-                        break;
-                    }
+                    // Click was already dispatched inside the evaluate (clickCard()) to avoid
+                    // a second page.evaluate round-trip under memory pressure.
+                    console.log('[DoorDash] JS click dispatched inside evaluate');
+                    clicked = true;
+                    break;
                 }
 
             }
