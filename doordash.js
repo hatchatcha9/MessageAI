@@ -2695,26 +2695,78 @@ async function extractRestaurantList(searchPageHtml = '') {
             return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
         }
 
-        // Priority 2: parse store URLs from the raw HTML response (captured before JS runs).
-        // This requires zero DOM interaction and zero page.evaluate() — avoids OOM crash.
+        // Priority 2: parse restaurant data from the raw HTML response (captured before JS runs).
+        // DoorDash is fully SSR — React hydrates existing HTML without making XHR calls.
+        // All store data is embedded as JSON in <script> tags. This runs in Node.js (not Chrome)
+        // so it's safe from OOM. Zero page.evaluate() calls.
         if (searchPageHtml && searchPageHtml.length > 1000) {
             const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
-            const seenIds = new Set();
-            // Match href="/store/slug/12345" or href="/store/12345"
+
+            // Diagnostic: confirm what's in the HTML
+            const hasStoreId = searchPageHtml.includes('"storeId"');
+            const hasPizza = searchPageHtml.toLowerCase().includes('pizza');
+            const scriptCount = (searchPageHtml.match(/<script/gi) || []).length;
+            console.log(`[DoorDash] HTML diag: storeId=${hasStoreId}, pizza=${hasPizza}, scripts=${scriptCount}, bytes=${searchPageHtml.length}`);
+
+            // Priority 2a: Extract from embedded JSON — "storeId":"12345678" patterns.
+            // DoorDash uses SPA navigation so <a href="/store/..."> hrefs may not exist,
+            // but the SSR JSON always contains storeId fields.
+            if (hasStoreId) {
+                const seenIds = new Set();
+                const seenNames = new Set();
+                const storeIdRe = /"storeId"\s*:\s*"?(\d{5,})"?/g;
+                let m;
+                while ((m = storeIdRe.exec(searchPageHtml)) !== null && restaurants.length < 10) {
+                    const storeId = m[1];
+                    if (seenIds.has(storeId)) continue;
+                    // Look for name in a window around this storeId occurrence
+                    const winStart = Math.max(0, m.index - 600);
+                    const winEnd = Math.min(searchPageHtml.length, m.index + 800);
+                    const win = searchPageHtml.substring(winStart, winEnd);
+                    // Try businessName first (most specific), then name
+                    let name = '';
+                    const busNameM = win.match(/"businessName"\s*:\s*"([^"]{3,80})"/);
+                    if (busNameM) name = busNameM[1].trim();
+                    if (!name) {
+                        const nameM = win.match(/"name"\s*:\s*"([^"]{3,80})"/);
+                        if (nameM) name = nameM[1].trim();
+                    }
+                    if (!name || name.length < 3) continue;
+                    if (seenNames.has(name.toLowerCase())) continue;
+                    if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                    seenIds.add(storeId);
+                    seenNames.add(name.toLowerCase());
+                    const rating = (win.match(/"averageRating"\s*:\s*([\d.]+)/) || [])[1] || '';
+                    const dt = (win.match(/"(?:estimatedDeliveryTime|deliveryTime)"\s*:\s*(\d+)/) || [])[1] || '';
+                    restaurants.push({
+                        id: storeId, name, rating,
+                        deliveryTime: dt ? `${dt} min` : '',
+                        url: `${DOORDASH_URL}/store/${storeId}/`,
+                        index: restaurants.length,
+                    });
+                    console.log(`[DoorDash] HTML JSON: ${name} (${storeId})`);
+                }
+                if (restaurants.length > 0) {
+                    console.log(`[DoorDash] HTML JSON extraction yielded ${restaurants.length} restaurants`);
+                    return restaurants;
+                }
+                console.log('[DoorDash] HTML JSON: storeId found but no name matches');
+            }
+
+            // Priority 2b: href-based extraction (fallback for non-SPA pages)
+            const seenIds2 = new Set();
             const hrefMatches = [...searchPageHtml.matchAll(/href="(\/store\/[^"?#]+)"/g)];
             console.log(`[DoorDash] HTML href matches: ${hrefMatches.length}`);
-            for (const m of hrefMatches) {
+            for (const hm of hrefMatches) {
                 if (restaurants.length >= 10) break;
-                const href = m[1];
+                const href = hm[1];
                 const idMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
                 if (!idMatch) continue;
                 const storeId = idMatch[1];
-                if (seenIds.has(storeId)) continue;
-                seenIds.add(storeId);
-                // Try to find the name from nearby HTML context (up to 500 chars after the href)
-                const pos = searchPageHtml.indexOf(m[0]);
+                if (seenIds2.has(storeId)) continue;
+                seenIds2.add(storeId);
+                const pos = searchPageHtml.indexOf(hm[0]);
                 const ctx = searchPageHtml.substring(pos, pos + 600);
-                // Look for data-telemetry-id="store.name">NAME< or aria-label="NAME"
                 let name = '';
                 const telMatch = ctx.match(/data-telemetry-id="store\.name"[^>]*>([^<]+)</);
                 if (telMatch) name = telMatch[1].trim();
@@ -2731,10 +2783,10 @@ async function extractRestaurantList(searchPageHtml = '') {
                     url: `${DOORDASH_URL}/store/${storeId}/`,
                     index: restaurants.length,
                 });
-                console.log(`[DoorDash] HTML: found restaurant: ${name} (${storeId})`);
+                console.log(`[DoorDash] HTML href: found restaurant: ${name} (${storeId})`);
             }
             if (restaurants.length > 0) {
-                console.log(`[DoorDash] HTML extraction yielded ${restaurants.length} restaurants`);
+                console.log(`[DoorDash] HTML href extraction yielded ${restaurants.length} restaurants`);
                 return restaurants;
             }
             console.log('[DoorDash] HTML extraction found 0 — falling back to DOM');
