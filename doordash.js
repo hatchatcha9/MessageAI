@@ -2327,13 +2327,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         const _apiInterceptor = async (response) => {
             const url = response.url();
-            if (!url.includes('doordash.com') || response.status() !== 200) return;
+            if (!url.includes('doordash.com')) return;
+            const status = response.status();
             const ct = response.headers()['content-type'] || '';
             if (!ct.includes('json')) return;
-            // Log what DoorDash API calls are being made
+            // Log ALL DoorDash API responses (any status) to diagnose what's happening
             if (url.includes('/api/') || url.includes('/graphql') || url.includes('/v2/') || url.includes('consumer-')) {
-                console.log(`[DoorDash Intercept] ${url.replace('https://www.doordash.com', '')} (${response.status()})`);
+                console.log(`[DoorDash Intercept] ${status} ${url.replace('https://www.doordash.com', '').substring(0, 100)}`);
             }
+            if (status !== 200) return;
             try {
                 const data = await response.json().catch(() => null);
                 if (!data) return;
@@ -2364,16 +2366,19 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         await waitForCFChallenge(20000);
         console.log('[DoorDash] Homepage loaded, URL:', page.url());
 
-        if (!hasCookieEnv) {
-            const loggedIn = await isLoggedIn();
-            console.log('[DoorDash] Logged in:', loggedIn);
-            if (!loggedIn) {
-                const loginResult = await login(email, password);
-                if (!loginResult.success) {
-                    const recheckOk = await isLoggedIn();
-                    if (!recheckOk) {
-                        return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
-                    }
+        // Always check login state — even with DOORDASH_COOKIES set, they can expire.
+        // Expired cookies allow page loads but DoorDash API calls return 4xx (no results).
+        const loggedIn = await isLoggedIn();
+        console.log('[DoorDash] Logged in:', loggedIn);
+        if (!loggedIn) {
+            if (hasCookieEnv) {
+                console.log('[DoorDash] Cookie env present but session expired — attempting email/password login...');
+            }
+            const loginResult = await login(email, password);
+            if (!loginResult.success) {
+                const recheckOk = await isLoggedIn();
+                if (!recheckOk) {
+                    return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
                 }
             }
         }
