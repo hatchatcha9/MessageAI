@@ -2344,7 +2344,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 const opName = new URL(url).searchParams.get('operation') || '';
                 const SKIP_OPS = ['getConsumerOrdersWithDetails', 'getHasNewNotifications',
                     'getAvailableAddresses', 'campaignDetails', 'getConsumerSubscription',
-                    'getConsumerProfile', 'getConsumerAddresses', 'getPlacements'];
+                    'getConsumerProfile', 'getConsumerAddresses'];
                 if (!SKIP_OPS.some(op => opName.includes(op))) {
                     _extractAndCacheRestaurantList(data, opName);
                 }
@@ -2352,19 +2352,19 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
         page.on('response', _apiInterceptor);
 
-        // Step 2: Navigate directly to the search URL.
-        // When DOORDASH_COOKIES is set, we skip the homepage — loading it just wastes ~150 MB RAM
-        // that Chrome can't recover before loading the search page (Railway has 512 MB total).
-        // Fresh cookies handle auth; CF is not triggered.
+        // Step 2: Load homepage to warm up the CF session, then navigate to search.
+        // Going cold to the search URL triggers CF Turnstile (even with fresh cookies).
+        // Homepage load is lightweight (images/css blocked) and establishes a legit session.
         const hasCookieEnv = !!process.env.DOORDASH_COOKIES;
         const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
 
+        console.log('[DoorDash] Navigating to DoorDash homepage (CF warmup)...');
+        await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await delay(2000);
+        await waitForCFChallenge(20000);
+        console.log('[DoorDash] Homepage loaded, URL:', page.url());
+
         if (!hasCookieEnv) {
-            // No cookies: load homepage to handle login
-            console.log('[DoorDash] Navigating to DoorDash...');
-            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await delay(3000);
-            console.log('[DoorDash] Homepage loaded, URL:', page.url());
             const loggedIn = await isLoggedIn();
             console.log('[DoorDash] Logged in:', loggedIn);
             if (!loggedIn) {
@@ -2376,8 +2376,6 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     }
                 }
             }
-        } else {
-            console.log('[DoorDash] Cookies available — skipping homepage, going directly to search');
         }
 
         // Step 3: Set up raw HTML capture BEFORE navigating, so we get the server's initial
@@ -2443,6 +2441,11 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 // Parse the Apollo cache and extract store/menu data
                 try {
                     const apolloCache = JSON.parse(apolloResult.cacheJson);
+
+                    // Log ROOT_QUERY keys to find where search results live
+                    const rootQuery = apolloCache['ROOT_QUERY'] || {};
+                    const rootKeys = Object.keys(rootQuery).filter(k => k !== '__typename');
+                    console.log(`[DoorDash] Apollo ROOT_QUERY keys: ${rootKeys.slice(0, 10).join(', ')}`);
 
                     // Resolve Apollo's __ref pointers (normalized cache uses refs for related objects)
                     function resolveRef(obj, cache, depth = 0) {
