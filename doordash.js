@@ -187,7 +187,7 @@ function _extractAndCacheMenuData(data) {
  * Looks for objects with a numeric store ID and a name but no price (to avoid menu items).
  * Results are stored in _capturedRestaurants for use by extractRestaurantList().
  */
-function _extractAndCacheRestaurantList(data) {
+function _extractAndCacheRestaurantList(data, opName = '') {
     if (!data || typeof data !== 'object') return;
     const DOORDASH_BASE = 'https://www.doordash.com';
     function walk(obj, depth) {
@@ -200,7 +200,7 @@ function _extractAndCacheRestaurantList(data) {
                 const rating = String(obj.rating || obj.averageRating || obj.average_rating || '');
                 const dt = obj.deliveryTime || obj.delivery_time || obj.estimatedDeliveryTime || '';
                 _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: `${DOORDASH_BASE}/store/${id}/` });
-                console.log(`[DoorDash] Network store: ${name} (${id})`);
+                console.log(`[DoorDash] Network store [${opName || 'unknown'}]: ${name} (${id})`);
             }
         }
         for (const v of Object.values(obj)) walk(v, depth + 1);
@@ -2339,8 +2339,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 if (!data) return;
                 // Extract menu items for store pages
                 _extractAndCacheMenuData(data);
-                // Also extract restaurant listings from search result responses
-                _extractAndCacheRestaurantList(data);
+                // Extract restaurant listings — but skip operations that return order history or
+                // unrelated data (they contain past store names that pollute the search results).
+                const opName = new URL(url).searchParams.get('operation') || '';
+                const SKIP_OPS = ['getConsumerOrdersWithDetails', 'getHasNewNotifications',
+                    'getAvailableAddresses', 'campaignDetails', 'getConsumerSubscription',
+                    'getConsumerProfile', 'getConsumerAddresses', 'getPlacements'];
+                if (!SKIP_OPS.some(op => opName.includes(op))) {
+                    _extractAndCacheRestaurantList(data, opName);
+                }
             } catch (e) {}
         };
         page.on('response', _apiInterceptor);
