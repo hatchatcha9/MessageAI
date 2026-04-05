@@ -2312,104 +2312,59 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
         page.on('response', _apiInterceptor);
 
-        // Step 2: Navigate to DoorDash — captcha solver handles any CF challenge
-        console.log('[DoorDash] Navigating to DoorDash...');
-        await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await delay(3000);
-        await takeScreenshot('1-loaded-homepage');
-        console.log('[DoorDash] Homepage loaded, URL:', page.url());
-
-        // Step 3: Check if logged in — skip if cookies were pre-loaded via env var
+        // Step 2: Navigate directly to the search URL.
+        // When DOORDASH_COOKIES is set, we skip the homepage — loading it just wastes ~150 MB RAM
+        // that Chrome can't recover before loading the search page (Railway has 512 MB total).
+        // Fresh cookies handle auth; CF is not triggered.
         const hasCookieEnv = !!process.env.DOORDASH_COOKIES;
-        const loggedIn = hasCookieEnv ? true : await isLoggedIn();
-        console.log('[DoorDash] Logged in:', loggedIn, '(cookie env:', hasCookieEnv, ')');
+        const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
 
-        if (!loggedIn) {
-            console.log('[DoorDash] Not logged in, attempting login...');
-            const loginResult = await login(email, password);
-            if (!loginResult.success) {
-                const recheckOk = await isLoggedIn();
-                if (!recheckOk) {
-                    return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
+        if (!hasCookieEnv) {
+            // No cookies: load homepage to handle login
+            console.log('[DoorDash] Navigating to DoorDash...');
+            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await delay(3000);
+            console.log('[DoorDash] Homepage loaded, URL:', page.url());
+            const loggedIn = await isLoggedIn();
+            console.log('[DoorDash] Logged in:', loggedIn);
+            if (!loggedIn) {
+                const loginResult = await login(email, password);
+                if (!loginResult.success) {
+                    const recheckOk = await isLoggedIn();
+                    if (!recheckOk) {
+                        return { success: false, error: `Login failed: ${loginResult.error || 'unknown'}`, restaurants: [] };
+                    }
                 }
             }
-            await takeScreenshot('2-after-login');
+        } else {
+            console.log('[DoorDash] Cookies available — skipping homepage, going directly to search');
         }
 
-        // Step 4: Enter delivery address if the address input is showing instead of search
-        const allInputs = await page.$$('input');
-        let addressInputFound = false;
-        for (const input of allInputs) {
+        // Step 3: Set up raw HTML capture BEFORE navigating, so we get the server's initial
+        // HTML response. DoorDash SSR-embeds store links in the initial HTML — we extract them
+        // with regex, avoiding any page.evaluate() DOM interaction that can OOM Chrome.
+        let _searchPageHtml = '';
+        const _htmlCapture = async (resp) => {
             try {
-                const placeholder = await input.getAttribute('placeholder');
-                const isVisible = await input.isVisible();
-                if (isVisible && placeholder && placeholder.toLowerCase().includes('address')) {
-                    console.log('[DoorDash] Address input found - entering delivery address...');
-                    await input.click();
-                    await delay(500);
-                    await input.fill(address);
-                    await delay(2000);
-                    // Pick first autocomplete suggestion
-                    const suggestion = await page.$('[role="option"], [data-anchor-id="AddressSuggestion"]');
-                    if (suggestion) {
-                        await suggestion.click();
-                        console.log('[DoorDash] Selected address suggestion');
-                    } else {
-                        await page.keyboard.press('Enter');
-                    }
-                    await delay(3000);
-                    await takeScreenshot('3b-address-set');
-                    addressInputFound = true;
-                    break;
+                if (resp.url().includes('/search/store/') && resp.status() === 200 &&
+                    (resp.headers()['content-type'] || '').includes('text/html')) {
+                    _searchPageHtml = await resp.text().catch(() => '');
+                    console.log(`[DoorDash] Captured search page HTML (${_searchPageHtml.length} bytes)`);
                 }
-            } catch (e) { continue; }
-        }
+            } catch (e) {}
+        };
+        page.on('response', _htmlCapture);
 
-        // Step 5: Find and click the search bar
-        console.log('[DoorDash] Looking for search bar...');
-        await takeScreenshot('3-before-search');
+        console.log('[DoorDash] Navigating to search URL...');
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
+            console.log('[DoorDash] Search page goto error (continuing):', e.message);
+        });
+        page.off('response', _htmlCapture);
 
-        let searchFound = false;
-        const freshInputs = await page.$$('input');
-        console.log(`[DoorDash] Found ${freshInputs.length} input elements`);
-
-        for (const input of freshInputs) {
-            try {
-                const placeholder = await input.getAttribute('placeholder');
-                const isVisible = await input.isVisible();
-                console.log(`[DoorDash] Input placeholder: "${placeholder}", visible: ${isVisible}`);
-                if (isVisible && placeholder && placeholder.toLowerCase().includes('search')) {
-                    console.log('[DoorDash] Found search input!');
-                    await input.click();
-                    await delay(500);
-                    await input.fill(query);
-                    await takeScreenshot('4-typed-query');
-                    await delay(500);
-                    await page.keyboard.press('Enter');
-                    searchFound = true;
-                    break;
-                }
-            } catch (e) { continue; }
-        }
-
-        if (!searchFound) {
-            const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-            // Use page.goto() — previously we used window.location.href to avoid CF re-challenges,
-            // but that JS navigation leaves Playwright with a "pending navigation" that causes ALL
-            // subsequent page.evaluate() calls to hang indefinitely. With fresh cookies (no CF),
-            // page.goto() works fine and Playwright properly resolves the navigation.
-            console.log('[DoorDash] Navigating to search URL...');
-            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
-                console.log('[DoorDash] Search page goto error (continuing):', e.message);
-            });
-        }
-
-        // Step 5: Wait for results to load (and resolve any CF challenge)
-        console.log('[DoorDash] Waiting for search results...');
-        await delay(4000);
+        // Brief wait then CF check
+        await delay(1000);
         await waitForCFChallenge(30000);
         await handlePopups();
-        await takeScreenshot('5-search-results');
         console.log('[DoorDash] Current URL:', page.url());
 
         // Step 5b: Extract DoorDash's Apollo Client cache — it stores all fetched data
@@ -2507,20 +2462,14 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         // Step 6: Extract restaurants
         console.log('[DoorDash] Extracting restaurants...');
-        const restaurants = await extractRestaurantList();
+        const restaurants = await extractRestaurantList(_searchPageHtml);
         console.log(`[DoorDash] Extracted ${restaurants.length} restaurants`);
-        await takeScreenshot('6-extraction-done');
 
         // If nothing found, try a browser restart (likely CF challenge/session stale)
         if (restaurants.length === 0) {
             const currentUrl = page.url();
-            const bodyText = await page.evaluate(() => document.body ? document.body.innerText.substring(0, 200) : '').catch(() => '');
-            const storeLinks = await page.$$('a[href*="/store/"]');
-            const sampleHrefs = [];
-            for (let i = 0; i < Math.min(3, storeLinks.length); i++) {
-                sampleHrefs.push(await storeLinks[i].getAttribute('href'));
-            }
-            console.log(`[DoorDash] 0 restaurants — body: "${bodyText}" | URL: ${currentUrl} | links: ${storeLinks.length}`);
+            // Avoid page.evaluate/page.$$ which can OOM crash Chrome — just log URL
+            console.log(`[DoorDash] 0 restaurants — URL: ${currentUrl} | HTML bytes: ${_searchPageHtml.length}`);
 
             // If the body looks like a CF challenge, retry WITHOUT restarting the browser.
             // Key insight: restarting gives a new proxy IP which may be even more flagged.
@@ -2679,14 +2628,58 @@ function sortRestaurantsByRating(restaurants) {
 /**
  * Extract restaurant list from current page
  */
-async function extractRestaurantList() {
+async function extractRestaurantList(searchPageHtml = '') {
     const restaurants = [];
 
     try {
         console.log('[DoorDash] Extracting restaurant list...');
 
-        // Do all DOM work in a single page.evaluate to avoid creating many element handles
-        // (each handle is an IPC round-trip and holds memory in both Node and Chrome processes).
+        // Primary: parse store URLs from the raw HTML response (captured before JS runs).
+        // This requires zero DOM interaction and zero page.evaluate() — avoids OOM crash.
+        if (searchPageHtml && searchPageHtml.length > 1000) {
+            const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
+            const seenIds = new Set();
+            // Match href="/store/slug/12345" or href="/store/12345"
+            const hrefMatches = [...searchPageHtml.matchAll(/href="(\/store\/[^"?#]+)"/g)];
+            console.log(`[DoorDash] HTML href matches: ${hrefMatches.length}`);
+            for (const m of hrefMatches) {
+                if (restaurants.length >= 10) break;
+                const href = m[1];
+                const idMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
+                if (!idMatch) continue;
+                const storeId = idMatch[1];
+                if (seenIds.has(storeId)) continue;
+                seenIds.add(storeId);
+                // Try to find the name from nearby HTML context (up to 500 chars after the href)
+                const pos = searchPageHtml.indexOf(m[0]);
+                const ctx = searchPageHtml.substring(pos, pos + 600);
+                // Look for data-telemetry-id="store.name">NAME< or aria-label="NAME"
+                let name = '';
+                const telMatch = ctx.match(/data-telemetry-id="store\.name"[^>]*>([^<]+)</);
+                if (telMatch) name = telMatch[1].trim();
+                if (!name) {
+                    const ariaMatch = ctx.match(/aria-label="([^"]{3,60})"/);
+                    if (ariaMatch) name = ariaMatch[1].trim();
+                }
+                if (!name || name.length < 3) continue;
+                if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                restaurants.push({
+                    id: storeId, name,
+                    rating: (ctx.match(/(\d\.\d)/) || [])[1] || '',
+                    deliveryTime: (ctx.match(/(\d+[-–]\d+)\s*min/i) || [])[0] || '',
+                    url: `${DOORDASH_URL}/store/${storeId}/`,
+                    index: restaurants.length,
+                });
+                console.log(`[DoorDash] HTML: found restaurant: ${name} (${storeId})`);
+            }
+            if (restaurants.length > 0) {
+                console.log(`[DoorDash] HTML extraction yielded ${restaurants.length} restaurants`);
+                return restaurants;
+            }
+            console.log('[DoorDash] HTML extraction found 0 — falling back to DOM');
+        }
+
+        // Fallback: single page.evaluate() that does all DOM work inside Chrome
         const DOORDASH_BASE = DOORDASH_URL;
         const extracted = await Promise.race([
             page.evaluate((baseUrl) => {
