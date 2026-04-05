@@ -2422,26 +2422,34 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         // Step 5b: Extract DoorDash's Apollo Client cache — it stores all fetched data
         // including restaurant search results and featured menu items.
+        // Wrapped in Promise.race: page.evaluate can hang if Playwright has a pending navigation
+        // (e.g. DoorDash SPA does pushState after domcontentloaded). Skip gracefully on timeout.
         try {
-            const apolloResult = await page.evaluate(() => {
-                const client = window.__APOLLO_CLIENT__;
-                if (!client) return { found: false };
-                const cache = client.cache.extract();
-                const keys = Object.keys(cache);
-                // Sample the key types to understand structure
-                const keyTypes = {};
-                for (const k of keys) {
-                    const type = k.split(':')[0];
-                    keyTypes[type] = (keyTypes[type] || 0) + 1;
-                }
-                return {
-                    found: true,
-                    totalKeys: keys.length,
-                    keyTypes,
-                    // Return full cache as string (might be large, but we need it)
-                    cacheJson: JSON.stringify(cache)
-                };
-            });
+            const apolloResult = await Promise.race([
+                page.evaluate(() => {
+                    const client = window.__APOLLO_CLIENT__;
+                    if (!client) return { found: false };
+                    const cache = client.cache.extract();
+                    const keys = Object.keys(cache);
+                    // Sample the key types to understand structure
+                    const keyTypes = {};
+                    for (const k of keys) {
+                        const type = k.split(':')[0];
+                        keyTypes[type] = (keyTypes[type] || 0) + 1;
+                    }
+                    return {
+                        found: true,
+                        totalKeys: keys.length,
+                        keyTypes,
+                        // Return full cache as string (might be large, but we need it)
+                        cacheJson: JSON.stringify(cache)
+                    };
+                }),
+                new Promise((resolve) => setTimeout(() => {
+                    console.log('[DoorDash] Apollo cache evaluate timed out (10s) — skipping');
+                    resolve({ found: false });
+                }, 10000))
+            ]);
 
             if (apolloResult.found) {
                 console.log(`[DoorDash] Apollo cache: ${apolloResult.totalKeys} keys, types: ${JSON.stringify(apolloResult.keyTypes)}`);
