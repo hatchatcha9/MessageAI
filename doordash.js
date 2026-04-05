@@ -2442,11 +2442,6 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 try {
                     const apolloCache = JSON.parse(apolloResult.cacheJson);
 
-                    // Log ROOT_QUERY keys to find where search results live
-                    const rootQuery = apolloCache['ROOT_QUERY'] || {};
-                    const rootKeys = Object.keys(rootQuery).filter(k => k !== '__typename');
-                    console.log(`[DoorDash] Apollo ROOT_QUERY keys: ${rootKeys.slice(0, 10).join(', ')}`);
-
                     // Resolve Apollo's __ref pointers (normalized cache uses refs for related objects)
                     function resolveRef(obj, cache, depth = 0) {
                         if (depth > 5 || !obj || typeof obj !== 'object') return obj;
