@@ -3513,16 +3513,20 @@ async function fetchMenuFromInContextAPI(storeId) {
 async function waitForCFChallenge(timeoutMs = 60000) {
     const isCFChallenge = async () => {
         try {
-            const content = await page.content();
-            if (
-                content.includes('Just a moment') ||
-                content.includes('Performing security verification') ||
-                content.includes('cf-browser-verification') ||
-                content.includes('Enable JavaScript and cookies to continue') ||
-                content.includes('jschl_vc') ||
-                content.includes('_cf_chl_opt')
-            ) return true;
-            return !!(await page.$('iframe[src*="challenges.cloudflare.com"]'));
+            // page.content() can hang if there's a pending navigation; use a 5s race to avoid blocking forever
+            return await Promise.race([
+                page.evaluate(() => {
+                    const text = document.body?.innerText || '';
+                    return text.includes('Just a moment') ||
+                           text.includes('Performing security verification') ||
+                           text.includes('cf-browser-verification') ||
+                           text.includes('Enable JavaScript and cookies to continue') ||
+                           text.includes('jschl_vc') ||
+                           !!(window._cf_chl_opt) ||
+                           !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                }),
+                new Promise((resolve) => setTimeout(() => resolve(false), 5000))
+            ]);
         } catch (e) { return false; }
     };
 
@@ -3659,9 +3663,13 @@ async function solveCFWithCaptchaService(apiKey) {
 
                 // Verify CF is gone
                 try {
-                    const content = await page.content();
-                    const stillCF = content.includes('Just a moment') || content.includes('_cf_chl_opt') ||
-                                    content.includes('Performing security verification');
+                    const stillCF = await Promise.race([
+                        page.evaluate(() => {
+                            const text = document.body?.innerText || '';
+                            return text.includes('Just a moment') || text.includes('Performing security verification') || !!(window._cf_chl_opt);
+                        }),
+                        new Promise((resolve) => setTimeout(() => resolve(false), 5000))
+                    ]).catch(() => false);
                     if (!stillCF) {
                         console.log('[CF Solver] CF challenge cleared!');
                         return true;
