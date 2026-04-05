@@ -2457,19 +2457,36 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                         return out;
                     }
 
-                    // Targeted extraction: find ExternalStore / Store objects and their featured items
+                    // Extract search results from ROOT_QUERY.searchWithFilterFacetFeed
+                    // This is the accurate source — DoorDash's own search result data, no DOM needed.
+                    const rootQuery = apolloCache['ROOT_QUERY'] || {};
+                    const searchKey = Object.keys(rootQuery).find(k => k.startsWith('searchWithFilterFacetFeed'));
+                    if (searchKey) {
+                        const searchVal = resolveRef(rootQuery[searchKey], apolloCache);
+                        const storeList = searchVal?.storeSearchResults || searchVal?.results || searchVal?.stores || [];
+                        const seenNames = new Set();
+                        for (const entry of storeList) {
+                            const store = entry?.store || entry;
+                            const id = String(store?.id || store?.storeId || store?.store_id || '');
+                            const name = (store?.name || store?.business?.name || '').trim();
+                            if (!id || !name || seenNames.has(name.toLowerCase())) continue;
+                            seenNames.add(name.toLowerCase());
+                            const rating = String(store?.averageRating || store?.rating || '');
+                            const dt = store?.deliveryTime || store?.estimatedDeliveryTime || '';
+                            _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: `${DOORDASH_URL}/store/${id}/` });
+                            console.log(`[DoorDash] Apollo search result: ${name} (${id})`);
+                            if (_capturedRestaurants.length >= 10) break;
+                        }
+                        console.log(`[DoorDash] Apollo searchWithFilterFacetFeed: ${_capturedRestaurants.length} restaurants`);
+                    }
+
+                    // Extract featured menu items from ExternalStore / Store objects
                     for (const [cacheKey, rawVal] of Object.entries(apolloCache)) {
                         const typeName = cacheKey.split(':')[0];
                         if (!['ExternalStore', 'Store', 'Business', 'Restaurant'].includes(typeName)) continue;
                         const val = resolveRef(rawVal, apolloCache);
                         const storeId = String(val.storeId || val.store_id || val.id || '');
                         if (!storeId || storeId.length < 4) continue;
-
-                        // Log first ExternalStore to understand structure
-                        if (typeName === 'ExternalStore' && Object.keys(_capturedStoreMenus).length === 0) {
-                            console.log(`[DoorDash] Sample ${cacheKey} keys:`, Object.keys(val).join(', '));
-                        }
-
                         const featured = val.featuredItems || val.featured_items || val.popularItems || val.popular_items || val.items || [];
                         if (!Array.isArray(featured) || featured.length === 0) continue;
                         const items = featured.map(item => ({
@@ -2481,7 +2498,6 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                         })).filter(i => i.name && i.price > 0);
                         if (items.length > 0) {
                             _capturedStoreMenus[storeId] = (_capturedStoreMenus[storeId] || []).concat(items);
-                            console.log(`[DoorDash] Apollo ${typeName} ${storeId}: ${items.length} featured items`);
                         }
                     }
 
@@ -2489,10 +2505,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     _extractAndCacheMenuData(apolloCache);
 
                     const capturedIds = Object.keys(_capturedStoreMenus);
-                    console.log(`[DoorDash] Apollo cache yielded menus for stores: ${capturedIds.join(', ') || 'none'}`);
-                    if (capturedIds.length === 0) {
-                        console.log('[DoorDash] Apollo cache has no menu data (expected for search page)');
-                    }
+                    if (capturedIds.length > 0) console.log(`[DoorDash] Apollo cache menu stores: ${capturedIds.join(', ')}`);
                 } catch (e) {
                     console.log('[DoorDash] Apollo cache parse error:', e.message);
                 }
@@ -2645,8 +2658,16 @@ async function extractRestaurantList(searchPageHtml = '') {
 
         // Priority 1: network-intercepted restaurants from GraphQL responses (zero DOM needed)
         if (_capturedRestaurants.length > 0) {
-            console.log(`[DoorDash] Using ${_capturedRestaurants.length} network-captured restaurants`);
-            return _capturedRestaurants.slice(0, 10).map((r, i) => ({ ...r, index: i }));
+            // Deduplicate by name (different locations of same chain share a name)
+            const seenNames = new Set();
+            const deduped = _capturedRestaurants.filter(r => {
+                const key = r.name.toLowerCase();
+                if (seenNames.has(key)) return false;
+                seenNames.add(key);
+                return true;
+            });
+            console.log(`[DoorDash] Using ${deduped.length} network-captured restaurants (deduped from ${_capturedRestaurants.length})`);
+            return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
         }
 
         // Priority 2: parse store URLs from the raw HTML response (captured before JS runs).
