@@ -445,10 +445,11 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
 
     page = context.pages()[0] || await context.newPage();
 
-    // Block heavy resources to reduce memory usage on Railway (images are the biggest win)
+    // Block heavy resources to reduce memory usage on Railway.
+    // Stylesheets are safe to block — DOM scraping doesn't need CSS rendering.
     await page.route('**/*', (route) => {
         const rt = route.request().resourceType();
-        if (rt === 'image' || rt === 'media' || rt === 'font') {
+        if (rt === 'image' || rt === 'media' || rt === 'font' || rt === 'stylesheet') {
             route.abort();
         } else {
             route.continue();
@@ -603,52 +604,43 @@ async function ensureLoggedIn(email, password) {
  */
 async function handlePopups() {
     try {
-        // Extended list of popup/overlay dismiss buttons
-        const dismissButtons = [
-            // Cookie consent
-            'button:has-text("Accept")',
-            'button:has-text("Accept All")',
-            'button:has-text("Accept Cookies")',
-            'button:has-text("Got it")',
-            'button:has-text("I Accept")',
-            'button#onetrust-accept-btn-handler',
-            '[data-testid="accept-cookies"]',
-            // Promotional popups
-            'button:has-text("Not now")',
-            'button:has-text("No thanks")',
-            'button:has-text("Skip")',
-            'button:has-text("Maybe later")',
-            'button:has-text("Close")',
-            'button:has-text("Dismiss")',
-            // Close buttons
-            '[aria-label="Close"]',
-            '[aria-label="close"]',
-            '[data-anchor-id="CloseButton"]',
-            'button[class*="close"]',
-            'button[class*="Close"]',
-            // Modal overlays - click outside or X
-            '[data-testid="modal-close"]',
-            '[data-testid="close-button"]',
-            'div[role="dialog"] button[aria-label="Close"]'
-        ];
+        // Click any visible dismiss/close buttons in a single evaluate (avoids page.$$() element handles)
+        await Promise.race([
+            page.evaluate(() => {
+                const DISMISS_TEXTS = ['accept', 'accept all', 'accept cookies', 'got it', 'i accept',
+                    'not now', 'no thanks', 'skip', 'maybe later', 'close', 'dismiss'];
+                const DISMISS_SELECTORS = [
+                    'button#onetrust-accept-btn-handler',
+                    '[data-testid="accept-cookies"]',
+                    '[data-anchor-id="CloseButton"]',
+                    '[data-testid="modal-close"]',
+                    '[data-testid="close-button"]',
+                    '[aria-label="Close"]',
+                    '[aria-label="close"]',
+                    'div[role="dialog"] button',
+                ];
+                const rect = (el) => el.getBoundingClientRect();
+                const visible = (el) => { const r = rect(el); return r.width > 0 && r.height > 0; };
 
-        for (const selector of dismissButtons) {
-            try {
-                const buttons = await page.$$(selector);
-                for (const button of buttons) {
-                    if (await button.isVisible()) {
-                        await button.click({ force: true });
-                        await delay(300);
-                    }
+                for (const sel of DISMISS_SELECTORS) {
+                    try {
+                        const el = document.querySelector(sel);
+                        if (el && visible(el)) { el.click(); return; }
+                    } catch (_) {}
                 }
-            } catch (e) {
-                // Continue trying other selectors
-            }
-        }
+                // Fallback: any button whose text matches dismiss keywords
+                for (const btn of document.querySelectorAll('button')) {
+                    if (!visible(btn)) continue;
+                    const t = (btn.textContent || '').trim().toLowerCase();
+                    if (DISMISS_TEXTS.some(d => t === d || t.startsWith(d))) { btn.click(); return; }
+                }
+            }),
+            new Promise((resolve) => setTimeout(resolve, 3000))
+        ]).catch(() => {});
 
-        // Also try pressing Escape to close any modals
-        await page.keyboard.press('Escape');
-        await delay(300);
+        // Also try Escape
+        await page.keyboard.press('Escape').catch(() => {});
+        await delay(200);
 
     } catch (error) {
         // Ignore popup handling errors
