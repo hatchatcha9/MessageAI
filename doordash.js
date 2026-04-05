@@ -2414,33 +2414,32 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     return null;
                 };
 
-                // Try GraphQL with multiple operation names
-                // DoorDash's Apollo client uses /graphql POST with operation in body
-                for (const [opName, variables, gqlQuery] of [
-                    ['searchWithFilterFacetFeed',
-                        { query, lat: parseFloat(lat), lng: parseFloat(lng) },
-                        `query searchWithFilterFacetFeed($query:String!,$lat:Float,$lng:Float){
-                            searchWithFilterFacetFeed(query:$query,lat:$lat,lng:$lng){
-                                storeSearchResults{ store{id name averageRating deliveryTime} }
-                                stores{id name averageRating}
-                            }
-                        }`
-                    ],
-                    ['getStoreListPage',
-                        { lat: parseFloat(lat), lng: parseFloat(lng), query, offset: 0, limit: 10 },
-                        `query getStoreListPage($lat:Float,$lng:Float,$query:String,$offset:Int,$limit:Int){
-                            searchStores(lat:$lat,lng:$lng,query:$query,offset:$offset,limit:$limit){
-                                stores{id name averageRating deliveryMinutes}
-                            }
-                        }`
-                    ],
+                // Try searchWithFilterFacetFeed with different coordinate argument shapes.
+                // Error confirmed field exists — "lat" is not a direct argument, likely nested.
+                // Also try with no coordinates (uses DoorDash account's saved address).
+                const gqlBase = (args, fields) =>
+                    `query searchWithFilterFacetFeed(${args.decl}){searchWithFilterFacetFeed(query:$query${args.call}){${fields}}}`;
+                const fields = 'storeSearchResults{store{id name averageRating deliveryTime}} stores{id name averageRating}';
+                for (const [variables, gqlQuery] of [
+                    // No coords — use account's saved address
+                    [{ query },
+                        gqlBase({ decl: '$query:String!', call: '' }, fields)],
+                    // consumerAddress object
+                    [{ query, consumerAddress: { lat: parseFloat(lat), lng: parseFloat(lng) } },
+                        gqlBase({ decl: '$query:String!,$consumerAddress:ConsumerAddressInput', call: ',consumerAddress:$consumerAddress' }, fields)],
+                    // coordinates object
+                    [{ query, coordinates: { lat: parseFloat(lat), lng: parseFloat(lng) } },
+                        gqlBase({ decl: '$query:String!,$coordinates:CoordinatesInput', call: ',coordinates:$coordinates' }, fields)],
+                    // lat/lng as separate top-level args (different names)
+                    [{ query, latitude: parseFloat(lat), longitude: parseFloat(lng) },
+                        gqlBase({ decl: '$query:String!,$latitude:Float,$longitude:Float', call: ',latitude:$latitude,longitude:$longitude' }, fields)],
                 ]) {
                     const data = await tryFetch('/graphql', {
                         method: 'POST',
                         headers: { 'content-type': 'application/json', accept: 'application/json' },
-                        body: JSON.stringify({ operationName: opName, variables, query: gqlQuery })
+                        body: JSON.stringify({ operationName: 'searchWithFilterFacetFeed', variables, query: gqlQuery })
                     });
-                    if (data) return { source: 'graphql', op: opName, data, logs };
+                    if (data && !data.errors) return { source: 'graphql', op: 'searchWithFilterFacetFeed', data, logs };
                 }
 
                 // Try REST endpoints (same origin relative URLs)
