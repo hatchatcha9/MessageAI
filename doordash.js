@@ -2402,41 +2402,56 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         const apiSearchResult = await Promise.race([
             page.evaluate(async ({ query, lat, lng }) => {
                 const logs = [];
-                // Try DoorDash REST search API
-                try {
-                    const params = new URLSearchParams({ lat, lng, query, limit: '10' });
-                    const resp = await fetch(`https://api.doordash.com/v1/consumer/consumer_store_search/?${params}`, {
-                        credentials: 'include',
-                        headers: { accept: 'application/json' }
-                    });
-                    logs.push(`REST: ${resp.status}`);
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        return { source: 'rest', data, logs };
-                    }
-                } catch (e) { logs.push(`REST error: ${e.message}`); }
-                // Try GraphQL
-                try {
-                    const body = JSON.stringify({
-                        operationName: 'getStoreListPage',
-                        variables: { lat: parseFloat(lat), lng: parseFloat(lng), query, offset: 0, limit: 10 },
-                        query: `query getStoreListPage($lat: Float, $lng: Float, $query: String, $offset: Int, $limit: Int) {
-                            searchStores(lat: $lat, lng: $lng, query: $query, offset: $offset, limit: $limit) {
-                                stores { id name averageRating deliveryMinutes }
+
+                // Helper: try a relative-URL fetch (same origin = no CORS)
+                const tryFetch = async (url, opts) => {
+                    try {
+                        const resp = await fetch(url, { credentials: 'include', ...opts });
+                        const text = await resp.text();
+                        logs.push(`${opts.method || 'GET'} ${url.split('?')[0]}: ${resp.status} — ${text.substring(0, 120)}`);
+                        if (resp.ok) return JSON.parse(text);
+                    } catch (e) { logs.push(`${url.split('?')[0]} err: ${e.message}`); }
+                    return null;
+                };
+
+                // Try GraphQL with multiple operation names
+                // DoorDash's Apollo client uses /graphql POST with operation in body
+                for (const [opName, variables, gqlQuery] of [
+                    ['searchWithFilterFacetFeed',
+                        { query, lat: parseFloat(lat), lng: parseFloat(lng) },
+                        `query searchWithFilterFacetFeed($query:String!,$lat:Float,$lng:Float){
+                            searchWithFilterFacetFeed(query:$query,lat:$lat,lng:$lng){
+                                storeSearchResults{ store{id name averageRating deliveryTime} }
+                                stores{id name averageRating}
                             }
-                        }`,
-                    });
-                    const resp = await fetch('https://www.doordash.com/graphql/getStoreListPage', {
-                        method: 'POST', credentials: 'include',
+                        }`
+                    ],
+                    ['getStoreListPage',
+                        { lat: parseFloat(lat), lng: parseFloat(lng), query, offset: 0, limit: 10 },
+                        `query getStoreListPage($lat:Float,$lng:Float,$query:String,$offset:Int,$limit:Int){
+                            searchStores(lat:$lat,lng:$lng,query:$query,offset:$offset,limit:$limit){
+                                stores{id name averageRating deliveryMinutes}
+                            }
+                        }`
+                    ],
+                ]) {
+                    const data = await tryFetch('/graphql', {
+                        method: 'POST',
                         headers: { 'content-type': 'application/json', accept: 'application/json' },
-                        body
+                        body: JSON.stringify({ operationName: opName, variables, query: gqlQuery })
                     });
-                    logs.push(`GQL: ${resp.status}`);
-                    if (resp.ok) {
-                        const data = await resp.json();
-                        return { source: 'graphql', data, logs };
-                    }
-                } catch (e) { logs.push(`GQL error: ${e.message}`); }
+                    if (data) return { source: 'graphql', op: opName, data, logs };
+                }
+
+                // Try REST endpoints (same origin relative URLs)
+                for (const restPath of [
+                    `/v2/store/search/?query=${encodeURIComponent(query)}&lat=${lat}&lng=${lng}&limit=10`,
+                    `/api/v1/consumer/consumer_store_search/?query=${encodeURIComponent(query)}&lat=${lat}&lng=${lng}&limit=10`,
+                ]) {
+                    const data = await tryFetch(restPath, { headers: { accept: 'application/json' } });
+                    if (data) return { source: 'rest', data, logs };
+                }
+
                 return { source: null, logs };
             }, { query, lat: _lat, lng: _lng }),
             new Promise(r => setTimeout(() => r({ source: 'timeout', logs: [] }), 20000))
