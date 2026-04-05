@@ -2695,89 +2695,72 @@ async function extractRestaurantList() {
     try {
         console.log('[DoorDash] Extracting restaurant list...');
 
-        // Get all links that go to /store/ pages
-        const storeLinks = await page.$$('a[href*="/store/"]');
-        console.log(`[DoorDash] Found ${storeLinks.length} store links`);
-
-        const seenNames = new Set();
-
-        for (let i = 0; i < storeLinks.length && restaurants.length < 10; i++) {
-            try {
-                const link = storeLinks[i];
-
-                // Get the href and extract store ID
-                const href = await link.getAttribute('href');
-                if (!href || !href.includes('/store/')) continue;
-                if (i < 5) console.log(`[DoorDash] Sample href[${i}]: ${href}`);
-
-                // Support both old format /store/12345/ and new format /store/slug/12345/
-                const storeIdMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
-                if (!storeIdMatch) {
-                    console.log(`[DoorDash] No store ID in href: ${href}`);
-                    continue;
-                }
-
-                // Prefer DoorDash's telemetry attribute for the restaurant name —
-                // this avoids picking up promo banners like "Enjoy 50% off" that also link to stores.
-                let name = await link.evaluate(el => {
-                    const span = el.querySelector('[data-telemetry-id="store.name"]');
-                    return span ? span.textContent.trim() : null;
-                });
-
-                if (!name) {
-                    // Fallback: use first line of text content and clean it up
-                    const textContent = await link.textContent();
-                    if (!textContent || textContent.trim().length < 3) continue;
-                    const lines = textContent.split('\n').map(l => l.trim()).filter(l => l.length > 2);
-                    name = lines[0] || '';
-                    name = name.replace(/^\d+\.\d+\s*/, '');
-                    name = name.replace(/\d+\.\d+\(.*$/, '');
-                    name = name.replace(/\s*[•(].*$/, '');
-                    name = name.replace(/\$+.*$/, '');
-                    name = name.replace(/\d+[-–]\d+\s*min.*$/i, '');
-                    name = name.replace(/\d+\s*min.*$/i, '');
-                    name = name.trim();
-                }
-
-                // Skip promo links (no real restaurant name found)
+        // Do all DOM work in a single page.evaluate to avoid creating many element handles
+        // (each handle is an IPC round-trip and holds memory in both Node and Chrome processes).
+        const DOORDASH_BASE = DOORDASH_URL;
+        const extracted = await Promise.race([
+            page.evaluate((baseUrl) => {
                 const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
-                if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                const links = document.querySelectorAll('a[href*="/store/"]');
+                const results = [];
+                const seenIds = new Set();
+                const seenNames = new Set();
 
-                const textContent = await link.textContent();
+                for (const link of links) {
+                    if (results.length >= 10) break;
+                    const href = link.getAttribute('href');
+                    if (!href) continue;
+                    const storeIdMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
+                    if (!storeIdMatch) continue;
+                    const storeId = storeIdMatch[1];
+                    if (seenIds.has(storeId)) continue;
+                    seenIds.add(storeId);
 
-                if (!name || name.length < 3 || seenNames.has(name.toLowerCase())) continue;
-                seenNames.add(name.toLowerCase());
+                    // Prefer telemetry name span, then first non-empty text line
+                    const nameEl = link.querySelector('[data-telemetry-id="store.name"]');
+                    let name = nameEl ? nameEl.textContent.trim() : '';
+                    if (!name) {
+                        const text = (link.textContent || '').trim();
+                        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+                        name = lines[0] || '';
+                        name = name.replace(/^\d+\.\d+\s*/, '').replace(/\d+\.\d+\(.*$/, '')
+                                   .replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '')
+                                   .replace(/\d+[-–]\d+\s*min.*$/i, '').replace(/\d+\s*min.*$/i, '').trim();
+                    }
+                    if (!name || name.length < 3) continue;
+                    if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                    if (seenNames.has(name.toLowerCase())) continue;
+                    seenNames.add(name.toLowerCase());
 
-                // Extract rating if present
-                const ratingMatch = textContent.match(/(\d\.\d)/);
-                const rating = ratingMatch ? ratingMatch[1] : '';
+                    const text = link.textContent || '';
+                    const ratingMatch = text.match(/(\d\.\d)/);
+                    const timeMatch = text.match(/(\d+[-–]\d+)\s*min/i);
+                    results.push({
+                        id: storeId,
+                        name,
+                        rating: ratingMatch ? ratingMatch[1] : '',
+                        deliveryTime: timeMatch ? timeMatch[0] : '',
+                        url: `${baseUrl}/store/${storeId}/`,
+                    });
+                }
+                return results;
+            }, DOORDASH_BASE),
+            new Promise((resolve) => setTimeout(() => {
+                console.log('[DoorDash] extractRestaurantList evaluate timed out (15s)');
+                resolve([]);
+            }, 15000))
+        ]);
 
-                // Extract delivery time
-                const timeMatch = textContent.match(/(\d+-\d+)\s*min/i);
-                const deliveryTime = timeMatch ? timeMatch[0] : '';
-
-                // Strip query params — cursor is session-specific and breaks direct navigation
-                const cleanUrl = `${DOORDASH_URL}/store/${storeIdMatch[1]}/`;
-                restaurants.push({
-                    id: storeIdMatch[1],
-                    name: name,
-                    rating: rating,
-                    deliveryTime: deliveryTime,
-                    url: cleanUrl,
-                    index: i
-                });
-
-                console.log(`[DoorDash] Found restaurant: ${name} (ID: ${storeIdMatch[1]}, rating: ${rating || 'N/A'})`);
-
-            } catch (e) {
-                continue;
-            }
+        for (let i = 0; i < extracted.length; i++) {
+            const r = extracted[i];
+            restaurants.push({ ...r, index: i });
+            console.log(`[DoorDash] Found restaurant: ${r.name} (ID: ${r.id}, rating: ${r.rating || 'N/A'})`);
         }
 
         console.log(`[DoorDash] Total restaurants extracted: ${restaurants.length}`);
 
     } catch (error) {
-        console.error('[DoorDash] Extract restaurant list error:', error.message);
+        console.error('[ERR] [DoorDash] Extract restaurant list error:', error.message);
     }
 
     return restaurants;
