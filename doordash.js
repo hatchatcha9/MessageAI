@@ -2399,8 +2399,16 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         });
         page.off('response', _htmlCapture);
 
-        // Brief wait then CF check
-        await delay(1000);
+        // Wait for GraphQL responses to fire (externalStores fires after React hydration,
+        // which happens well after domcontentloaded). Poll every 500ms up to 8s but exit
+        // early once we have restaurants so we don't burn time unnecessarily.
+        {
+            const waitStart = Date.now();
+            while (_capturedRestaurants.length === 0 && Date.now() - waitStart < 8000) {
+                await delay(500);
+            }
+            console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} restaurants captured from network`);
+        }
         await waitForCFChallenge(30000);
         await handlePopups();
         console.log('[DoorDash] Current URL:', page.url());
@@ -2526,10 +2534,16 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 console.log('[DoorDash] 0 restaurants — retrying search...');
                 _browserRestartedThisSearch = true;
                 try {
-                    _capturedRestaurants = [];
+                    // Do NOT reset _capturedRestaurants — keep any restaurants from the first load.
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
                     await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                    await delay(4000);
+                    {
+                        const waitStart = Date.now();
+                        while (_capturedRestaurants.length === 0 && Date.now() - waitStart < 8000) {
+                            await delay(500);
+                        }
+                        console.log(`[DoorDash] Retry waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} captured`);
+                    }
                     await waitForCFChallenge(20000);
                     await handlePopups();
                     const retryRestaurants = await extractRestaurantList();
