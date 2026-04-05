@@ -867,29 +867,40 @@ async function isLoggedIn() {
         await delay(2000);
         await handlePopups();
 
-        // Check for account menu or user icon that indicates logged in state
-        const accountIndicators = [
-            '[data-anchor-id="AccountMenu"]',
-            '[data-testid="account-button"]',
-            'button[aria-label="Account"]',
-            '[data-anchor-id="UserAvatar"]',
-            // Additional indicators for logged-in state
-            '[data-testid="user-menu"]',
-            'button[aria-label="Open account menu"]',
-            '[aria-label="Account menu"]',
-            'img[alt*="avatar"]',
-            'img[alt*="profile"]'
-        ];
+        // Use evaluate to check multiple signals at once, with a timeout.
+        // Old selector-based approach missed the current DoorDash UI.
+        const result = await Promise.race([
+            page.evaluate(() => {
+                const body = document.body?.innerText || '';
+                const html = document.documentElement?.innerHTML || '';
+                // Logged-IN signals
+                const hasGreeting = /happy (sunday|monday|tuesday|wednesday|thursday|friday|saturday)|good (morning|afternoon|evening)|welcome back/i.test(body.substring(0, 2000));
+                const hasUserCookie = document.cookie.includes('dd_cx_logged_in=true') || document.cookie.includes('dd_session_id');
+                const hasAccountEl = !!(
+                    document.querySelector('[data-anchor-id="AccountMenu"]') ||
+                    document.querySelector('[data-anchor-id="UserAvatar"]') ||
+                    document.querySelector('[data-testid="account-button"]') ||
+                    document.querySelector('[aria-label*="account" i]') ||
+                    document.querySelector('[aria-label*="profile" i]')
+                );
+                // Logged-OUT signal
+                const hasSignInBtn = !!(
+                    document.querySelector('a[href*="/consumer/login"]') ||
+                    document.querySelector('button[data-anchor-id*="SignIn"]')
+                );
+                return { hasGreeting, hasUserCookie, hasAccountEl, hasSignInBtn };
+            }),
+            new Promise(r => setTimeout(() => r(null), 5000))
+        ]);
 
-        for (const selector of accountIndicators) {
-            const element = await page.$(selector);
-            if (element && await element.isVisible()) {
-                console.log('[DoorDash] Already logged in');
-                return true;
-            }
+        if (!result) {
+            console.log('[DoorDash] isLoggedIn timed out');
+            return false;
         }
 
-        return false;
+        console.log('[DoorDash] Login check:', JSON.stringify(result));
+        // Logged in if any positive signal, and no sign-in button
+        return (result.hasGreeting || result.hasUserCookie || result.hasAccountEl) && !result.hasSignInBtn;
     } catch (error) {
         return false;
     }
