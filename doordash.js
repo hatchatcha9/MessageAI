@@ -2393,14 +2393,14 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         }
 
         if (!searchFound) {
-            console.log('[DoorDash] Using JS navigation to search URL (avoids CF re-challenge)...');
             const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-            // Use window.location.href from within the already-loaded page — this is treated as an
-            // in-session navigation and carries the CF clearance, unlike page.goto() which triggers
-            // a cold browser hit that CF Turnstile challenges.
-            await page.evaluate((url) => { window.location.href = url; }, searchUrl);
-            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {
-                console.log('[DoorDash] waitForNavigation timed out/aborted (SPA redirect OK)');
+            // Use page.goto() — previously we used window.location.href to avoid CF re-challenges,
+            // but that JS navigation leaves Playwright with a "pending navigation" that causes ALL
+            // subsequent page.evaluate() calls to hang indefinitely. With fresh cookies (no CF),
+            // page.goto() works fine and Playwright properly resolves the navigation.
+            console.log('[DoorDash] Navigating to search URL...');
+            await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
+                console.log('[DoorDash] Search page goto error (continuing):', e.message);
             });
         }
 
@@ -2536,8 +2536,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     await waitForCFChallenge(30000);
                     await delay(2000);
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-                    await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                     await delay(4000);
                     await waitForCFChallenge(20000);
                     await handlePopups();
@@ -2561,8 +2560,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     await waitForCFChallenge(20000);
                     await delay(2000);
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-                    await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                     await delay(3000);
                     await waitForCFChallenge(15000);
                     await handlePopups();
