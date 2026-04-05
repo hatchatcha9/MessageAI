@@ -3909,15 +3909,14 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             }
 
             try {
-                if (currentUrl.includes('doordash.com')) {
-                    // JS navigation from within DoorDash preserves the CF session context
-                    await page.evaluate((url) => { window.location.href = url; }, targetUrl);
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                } else {
-                    // Starting from about:blank (search page was unloaded to free memory).
-                    // Fresh cookies bypass CF on Railway so page.goto() works fine.
-                    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                }
+                // Use page.goto() instead of window.location.href JS navigation.
+                // JS navigation via window.location.href leaves Playwright with a pending navigation
+                // (React SPA does pushState after domcontentloaded) which causes ALL subsequent
+                // page.evaluate() calls to hang forever. page.goto() properly waits for navigation
+                // to settle. Fresh cookies bypass CF so page.goto() works fine on Railway.
+                await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
+                    console.log('[DoorDash] Store page goto error (continuing):', e.message);
+                });
                 console.log('[DoorDash] Navigation landed at:', page.url());
             } catch (e) {
                 console.log('[DoorDash] Navigation error:', e.message);
@@ -3927,7 +3926,10 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             await delay(1000); // brief settle before checking
             const cfResolved = await waitForCFChallenge(cfWait);
             let finalUrl = page.url();
-            let bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
+            let bodySnippet = await Promise.race([
+                page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => ''),
+                new Promise(r => setTimeout(() => r(''), 5000))
+            ]);
             console.log('[DoorDash] After CF check — URL:', finalUrl, '| Body:', bodySnippet);
 
             // Wait for DoorDash's invisible Turnstile overlay to clear.
