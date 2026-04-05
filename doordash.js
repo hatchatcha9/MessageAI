@@ -2394,9 +2394,86 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             }
         }
 
-        // Step 3: Set up raw HTML capture BEFORE navigating, so we get the server's initial
-        // HTML response. DoorDash SSR-embeds store links in the initial HTML — we extract them
-        // with regex, avoiding any page.evaluate() DOM interaction that can OOM Chrome.
+        // Step 3: Try API search from inside Chrome's browser context (on the lightweight homepage).
+        // Chrome's TLS fingerprint + session cookies bypass CF without loading the heavy search page.
+        // DoorDash search page OOMs Chrome on Railway — this avoids that entirely.
+        console.log('[DoorDash] Trying in-browser API search (REST + GraphQL)...');
+        const _lat = 40.5247, _lng = -111.8638; // Draper UT hardcoded for now
+        const apiSearchResult = await Promise.race([
+            page.evaluate(async ({ query, lat, lng }) => {
+                const logs = [];
+                // Try DoorDash REST search API
+                try {
+                    const params = new URLSearchParams({ lat, lng, query, limit: '10' });
+                    const resp = await fetch(`https://api.doordash.com/v1/consumer/consumer_store_search/?${params}`, {
+                        credentials: 'include',
+                        headers: { accept: 'application/json' }
+                    });
+                    logs.push(`REST: ${resp.status}`);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        return { source: 'rest', data, logs };
+                    }
+                } catch (e) { logs.push(`REST error: ${e.message}`); }
+                // Try GraphQL
+                try {
+                    const body = JSON.stringify({
+                        operationName: 'getStoreListPage',
+                        variables: { lat: parseFloat(lat), lng: parseFloat(lng), query, offset: 0, limit: 10 },
+                        query: `query getStoreListPage($lat: Float, $lng: Float, $query: String, $offset: Int, $limit: Int) {
+                            searchStores(lat: $lat, lng: $lng, query: $query, offset: $offset, limit: $limit) {
+                                stores { id name averageRating deliveryMinutes }
+                            }
+                        }`,
+                    });
+                    const resp = await fetch('https://www.doordash.com/graphql/getStoreListPage', {
+                        method: 'POST', credentials: 'include',
+                        headers: { 'content-type': 'application/json', accept: 'application/json' },
+                        body
+                    });
+                    logs.push(`GQL: ${resp.status}`);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        return { source: 'graphql', data, logs };
+                    }
+                } catch (e) { logs.push(`GQL error: ${e.message}`); }
+                return { source: null, logs };
+            }, { query, lat: _lat, lng: _lng }),
+            new Promise(r => setTimeout(() => r({ source: 'timeout', logs: [] }), 20000))
+        ]).catch(e => ({ source: 'error', logs: [e.message] }));
+
+        console.log(`[DoorDash] In-browser API: source=${apiSearchResult.source}, logs=${JSON.stringify(apiSearchResult.logs)}`);
+
+        if (apiSearchResult.source === 'rest' || apiSearchResult.source === 'graphql') {
+            const stores = apiSearchResult.data?.stores ||
+                apiSearchResult.data?.data?.searchStores?.stores || [];
+            console.log(`[DoorDash] API returned ${stores.length} stores`);
+            const seenNames = new Set();
+            for (const store of stores.slice(0, 10)) {
+                const id = String(store.id || '');
+                const name = (store.name || '').trim();
+                if (!id || !name || seenNames.has(name.toLowerCase())) continue;
+                seenNames.add(name.toLowerCase());
+                _capturedRestaurants.push({
+                    id, name,
+                    rating: String(store.averageRating || ''),
+                    deliveryTime: store.deliveryMinutes ? `${store.deliveryMinutes} min` : '',
+                    url: `${DOORDASH_URL}/store/${id}/`
+                });
+            }
+            console.log(`[DoorDash] Populated ${_capturedRestaurants.length} restaurants from in-browser API`);
+        }
+
+        // If we got restaurants from the API, skip loading the heavy search page
+        if (_capturedRestaurants.length > 0) {
+            console.log('[DoorDash] Skipping search page navigation — using API results');
+            const restaurants = await extractRestaurantList();
+            const sorted = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
+            return { success: true, restaurants: sorted };
+        }
+
+        // Step 4: Set up raw HTML capture BEFORE navigating, so we get the server's initial
+        // HTML response. Regex-parsed in Node.js — avoids page.evaluate() OOM.
         let _searchPageHtml = '';
         const _htmlCapture = async (resp) => {
             try {
