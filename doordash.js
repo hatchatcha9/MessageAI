@@ -112,6 +112,10 @@ let _preloadedMenuItems = null;
 // keyed by store ID (string) → array of {name, price} items from featured_items / popular items
 let _capturedStoreMenus = {};
 
+// Restaurant listings captured from network responses during search page load.
+// Avoids needing DOM extraction (which OOMs Chrome on Railway).
+let _capturedRestaurants = [];
+
 // Auth headers captured from DoorDash's own successful GraphQL requests.
 // Reused for our own in-browser menu fetch (same headers = passes CF).
 let _capturedDoorDashHeaders = null;
@@ -175,6 +179,32 @@ function _extractAndCacheMenuData(data) {
         }
     }
 
+    walk(data, 0);
+}
+
+/**
+ * Walk a DoorDash API response and cache any restaurant/store listings found.
+ * Looks for objects with a numeric store ID and a name but no price (to avoid menu items).
+ * Results are stored in _capturedRestaurants for use by extractRestaurantList().
+ */
+function _extractAndCacheRestaurantList(data) {
+    if (!data || typeof data !== 'object') return;
+    const DOORDASH_BASE = 'https://www.doordash.com';
+    function walk(obj, depth) {
+        if (depth > 10 || !obj || typeof obj !== 'object') return;
+        if (Array.isArray(obj)) { for (const el of obj) walk(el, depth + 1); return; }
+        const id = String(obj.id || obj.store_id || obj.storeId || '');
+        const name = typeof obj.name === 'string' ? obj.name.trim() : '';
+        if (/^\d{5,}$/.test(id) && name.length >= 3 && !obj.price && !obj.menus && !obj.menu) {
+            if (!_capturedRestaurants.find(r => r.id === id)) {
+                const rating = String(obj.rating || obj.averageRating || obj.average_rating || '');
+                const dt = obj.deliveryTime || obj.delivery_time || obj.estimatedDeliveryTime || '';
+                _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: `${DOORDASH_BASE}/store/${id}/` });
+                console.log(`[DoorDash] Network store: ${name} (${id})`);
+            }
+        }
+        for (const v of Object.values(obj)) walk(v, depth + 1);
+    }
     walk(data, 0);
 }
 
@@ -2277,6 +2307,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // Set up network response interceptor to capture DoorDash's own API responses.
         // DoorDash's JavaScript makes authenticated API calls that pass CF — we intercept those.
         _capturedStoreMenus = {}; // clear old data for this search
+        _capturedRestaurants = []; // clear restaurant list from previous search
         _capturedDoorDashHeaders = null; // reset headers cache
 
         // Capture DoorDash's own GraphQL request headers so we can reuse them.
@@ -2306,8 +2337,10 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             try {
                 const data = await response.json().catch(() => null);
                 if (!data) return;
-                // Try to extract menu item data for any store ID we find
+                // Extract menu items for store pages
                 _extractAndCacheMenuData(data);
+                // Also extract restaurant listings from search result responses
+                _extractAndCacheRestaurantList(data);
             } catch (e) {}
         };
         page.on('response', _apiInterceptor);
@@ -2465,32 +2498,24 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         const restaurants = await extractRestaurantList(_searchPageHtml);
         console.log(`[DoorDash] Extracted ${restaurants.length} restaurants`);
 
-        // If nothing found, try a browser restart (likely CF challenge/session stale)
+        // If nothing found, try a retry (likely CF challenge or session stale)
         if (restaurants.length === 0) {
             const currentUrl = page.url();
-            // Avoid page.evaluate/page.$$ which can OOM crash Chrome — just log URL
             console.log(`[DoorDash] 0 restaurants — URL: ${currentUrl} | HTML bytes: ${_searchPageHtml.length}`);
 
-            // If the body looks like a CF challenge, retry WITHOUT restarting the browser.
-            // Key insight: restarting gives a new proxy IP which may be even more flagged.
-            // The IP we got on initial browser launch is the cleanest — preserve it.
-            const isCFPage = bodyText.includes('Just a moment') || bodyText.includes('security') || bodyText.includes('challenge') || bodyText.includes('Verifying') || storeLinks.length === 0;
-            if (isCFPage && !_browserRestartedThisSearch) {
-                console.log('[DoorDash] CF on search — soft retrying (keeping same proxy IP, no browser restart)...');
+            // Retry by navigating directly to the search URL again
+            if (!_browserRestartedThisSearch) {
+                console.log('[DoorDash] 0 restaurants — retrying search...');
                 _browserRestartedThisSearch = true;
                 try {
-                    // Navigate back to homepage, give CF extra time to auto-clear, then retry
-                    await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                    await delay(5000);
-                    await waitForCFChallenge(30000);
-                    await delay(2000);
+                    _capturedRestaurants = [];
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
                     await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                     await delay(4000);
                     await waitForCFChallenge(20000);
                     await handlePopups();
                     const retryRestaurants = await extractRestaurantList();
-                    console.log(`[DoorDash] After soft retry: extracted ${retryRestaurants.length} restaurants`);
+                    console.log(`[DoorDash] After retry: extracted ${retryRestaurants.length} restaurants`);
                     if (retryRestaurants.length > 0) {
                         const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
                         return { success: true, restaurants: sorted };
@@ -2498,35 +2523,9 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 } catch (retryErr) {
                     console.log('[DoorDash] Soft retry error:', retryErr.message);
                 }
-                // Still blocked — hard restart as last resort
-                console.log('[DoorDash] Soft retry failed — hard restarting browser as last resort...');
-                try {
-                    await closeBrowser();
-                    await delay(3000);
-                    await launchBrowser(HEADLESS, true);
-                    await delay(2000);
-                    await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                    await waitForCFChallenge(20000);
-                    await delay(2000);
-                    const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
-                    await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                    await delay(3000);
-                    await waitForCFChallenge(15000);
-                    await handlePopups();
-                    const retryRestaurants = await extractRestaurantList();
-                    console.log(`[DoorDash] After hard restart: extracted ${retryRestaurants.length} restaurants`);
-                    if (retryRestaurants.length > 0) {
-                        const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
-                        return { success: true, restaurants: sorted };
-                    }
-                } catch (restartErr) {
-                    console.log('[DoorDash] Hard restart error:', restartErr.message);
-                }
             }
 
-            const diagMsg = `0 restaurants extracted. URL: ${currentUrl}. Store links: ${storeLinks.length}. Sample hrefs: ${JSON.stringify(sampleHrefs)}`;
-            console.log('[DoorDash] DIAG:', diagMsg);
-            return { success: false, error: diagMsg, restaurants: [] };
+            return { success: false, error: `0 restaurants found at ${currentUrl}`, restaurants: [] };
         }
 
         // Stop intercepting responses
@@ -2634,7 +2633,13 @@ async function extractRestaurantList(searchPageHtml = '') {
     try {
         console.log('[DoorDash] Extracting restaurant list...');
 
-        // Primary: parse store URLs from the raw HTML response (captured before JS runs).
+        // Priority 1: network-intercepted restaurants from GraphQL responses (zero DOM needed)
+        if (_capturedRestaurants.length > 0) {
+            console.log(`[DoorDash] Using ${_capturedRestaurants.length} network-captured restaurants`);
+            return _capturedRestaurants.slice(0, 10).map((r, i) => ({ ...r, index: i }));
+        }
+
+        // Priority 2: parse store URLs from the raw HTML response (captured before JS runs).
         // This requires zero DOM interaction and zero page.evaluate() — avoids OOM crash.
         if (searchPageHtml && searchPageHtml.length > 1000) {
             const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
