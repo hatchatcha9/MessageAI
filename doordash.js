@@ -3896,17 +3896,35 @@ async function selectRestaurantFromSearch(indexOrUrl) {
 
             _preloadedMenuItems = null; // clear any cached pre-fetch data
 
-            // Use the URL from the DB cache directly. The DOM slug-lookup (cursor param) was
-            // an optimization for CF session context — with fresh cookies CF doesn't challenge,
-            // so the plain store URL works fine.
+            // Use the URL from the DB cache directly.
             let targetUrl = indexOrUrl;
 
+            // Navigate to lightweight homepage first (establishes CF session, avoids OOM).
+            // Then try in-context API to get menu data without loading the heavy store page.
+            // The store page alone can push Chrome over Railway's 512MB RAM limit.
+            console.log('[DoorDash] Loading homepage to establish session before store nav...');
+            await page.goto('https://www.doordash.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+            await waitForCFChallenge(15000);
+
+            const storeId = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
+            if (storeId) {
+                console.log(`[DoorDash] Trying API menu pre-fetch for store ${storeId}...`);
+                const apiItems = await fetchMenuFromInContextAPI(storeId);
+                if (apiItems && apiItems.length > 0) {
+                    console.log(`[DoorDash] API pre-fetch got ${apiItems.length} items — skipping store page load`);
+                    _preloadedMenuItems = apiItems;
+                    updateSessionState({ currentRestaurantUrl: targetUrl });
+                    return {
+                        success: true,
+                        restaurantName: '',  // server.js falls back to the cached search result name
+                        categories: [],
+                        url: targetUrl
+                    };
+                }
+                console.log('[DoorDash] API pre-fetch returned no items — falling back to store page');
+            }
+
             try {
-                // Use page.goto() instead of window.location.href JS navigation.
-                // JS navigation via window.location.href leaves Playwright with a pending navigation
-                // (React SPA does pushState after domcontentloaded) which causes ALL subsequent
-                // page.evaluate() calls to hang forever. page.goto() properly waits for navigation
-                // to settle. Fresh cookies bypass CF so page.goto() works fine on Railway.
                 await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
                     console.log('[DoorDash] Store page goto error (continuing):', e.message);
                 });
