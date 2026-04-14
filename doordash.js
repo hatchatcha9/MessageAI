@@ -2575,6 +2575,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 try {
                     const apolloCache = JSON.parse(apolloResult.cacheJson);
 
+                    // Log first ExternalStore object to find slug fields
+                    const firstExtKey = Object.keys(apolloCache).find(k => k.startsWith('ExternalStore:'));
+                    if (firstExtKey) {
+                        console.log(`[DoorDash] ExternalStore sample (${firstExtKey}): ${JSON.stringify(apolloCache[firstExtKey])}`);
+                    }
+
                     // Resolve Apollo's __ref pointers (normalized cache uses refs for related objects)
                     function resolveRef(obj, cache, depth = 0) {
                         if (depth > 5 || !obj || typeof obj !== 'object') return obj;
