@@ -419,9 +419,9 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             '--disable-extensions',
             '--disable-sync',
             '--disable-translate',
-            // Limit V8 heap to force aggressive GC — keeps each page's JS under 100 MB
+            // Limit V8 heap to force aggressive GC — keeps each page's JS under 200 MB
             // so Chrome stays within Railway's 512 MB container limit.
-            '--js-flags=--max-old-space-size=100',
+            '--js-flags=--max-old-space-size=200',
             // --no-zygote is headless-only (causes issues in headed+Xvfb).
             // --use-gl=swiftshader is needed in BOTH modes:
             //   headless: no display, must use software GL
