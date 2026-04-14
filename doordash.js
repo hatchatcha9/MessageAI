@@ -3904,11 +3904,31 @@ async function selectRestaurantFromSearch(indexOrUrl) {
 
             _preloadedMenuItems = null; // clear any cached pre-fetch data
 
-            // Navigate directly from the search page to the store page — no about:blank step.
-            // about:blank drops the DoorDash CF session context and triggers Turnstile challenges.
-            // With --max-old-space-size=200, V8 GCs the search page heap during navigation
-            // so Chrome stays within Railway's 512MB limit.
+            // Extract store ID and try to get the full slug URL from the DOM.
+            // DoorDash 404s on ID-only URLs (/store/12345/) — the slug URL
+            // (/store/dominos-pizza-draper/12345/) is needed. The externalStores
+            // GraphQL response doesn't include it, but the React-rendered DOM does.
             let targetUrl = indexOrUrl;
+            const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
+            if (storeIdMatch && currentUrl.includes('doordash.com')) {
+                const storeId = storeIdMatch[1];
+                const fullHref = await Promise.race([
+                    page.evaluate((id) => {
+                        const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
+                        return link ? link.href : null;
+                    }, storeId),
+                    new Promise(r => setTimeout(() => r(null), 5000))
+                ]).catch(() => null);
+                if (fullHref) {
+                    try {
+                        const u = new URL(fullHref);
+                        targetUrl = u.origin + u.pathname;
+                        console.log(`[DoorDash] Using slug URL from DOM: ${targetUrl}`);
+                    } catch (e) {}
+                } else {
+                    console.log('[DoorDash] No slug link found in DOM — using cached URL');
+                }
+            }
 
             try {
                 await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
