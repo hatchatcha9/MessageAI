@@ -199,8 +199,13 @@ function _extractAndCacheRestaurantList(data, opName = '') {
             if (!_capturedRestaurants.find(r => r.id === id)) {
                 const rating = String(obj.rating || obj.averageRating || obj.average_rating || '');
                 const dt = obj.deliveryTime || obj.delivery_time || obj.estimatedDeliveryTime || '';
-                _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: `${DOORDASH_BASE}/store/${id}/` });
-                console.log(`[DoorDash] Network store [${opName || 'unknown'}]: ${name} (${id})`);
+                // Prefer slug-based URL — DoorDash now 404s on ID-only URLs
+                const slug = obj.url_key || obj.urlKey || obj.slug || obj.url_slug || obj.urlSlug || '';
+                const url = slug
+                    ? `${DOORDASH_BASE}/store/${slug}/${id}/`
+                    : `${DOORDASH_BASE}/store/${id}/`;
+                _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url });
+                console.log(`[DoorDash] Network store [${opName || 'unknown'}]: ${name} (${id}) → ${url}`);
             }
         }
         for (const v of Object.values(obj)) walk(v, depth + 1);
@@ -419,9 +424,6 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             '--disable-extensions',
             '--disable-sync',
             '--disable-translate',
-            // Limit V8 heap to force aggressive GC — keeps each page's JS under 200 MB
-            // so Chrome stays within Railway's 512 MB container limit.
-            '--js-flags=--max-old-space-size=200',
             // --no-zygote is headless-only (causes issues in headed+Xvfb).
             // --use-gl=swiftshader is needed in BOTH modes:
             //   headless: no display, must use software GL
@@ -2586,8 +2588,10 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                             seenNames.add(name.toLowerCase());
                             const rating = String(store?.averageRating || store?.rating || '');
                             const dt = store?.deliveryTime || store?.estimatedDeliveryTime || '';
-                            _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: `${DOORDASH_URL}/store/${id}/` });
-                            console.log(`[DoorDash] Apollo search result: ${name} (${id})`);
+                            const slug2 = store?.url_key || store?.urlKey || store?.slug || store?.url_slug || '';
+                            const url2 = slug2 ? `${DOORDASH_URL}/store/${slug2}/${id}/` : `${DOORDASH_URL}/store/${id}/`;
+                            _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: url2 });
+                            console.log(`[DoorDash] Apollo search result: ${name} (${id}) → ${url2}`);
                             if (_capturedRestaurants.length >= 10) break;
                         }
                         console.log(`[DoorDash] Apollo searchWithFilterFacetFeed: ${_capturedRestaurants.length} restaurants`);
