@@ -2684,11 +2684,6 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         updateSessionState({ lastSearchUrl: page.url() });
         console.log('[DoorDash] === SEARCH COMPLETE ===');
 
-        // Navigate away from the heavy search page to free V8 heap memory before the
-        // next navigation (store page). DoorDash's React SPA uses 100-200 MB; releasing
-        // it before loading the store page keeps total usage within Railway's 512 MB limit.
-        page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-
         return {
             success: true,
             restaurants: sortedRestaurants,
@@ -3886,20 +3881,12 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const currentUrl = page.url();
             console.log(`[DoorDash] JS navigation from ${currentUrl} → ${indexOrUrl}`);
 
-            // Navigate to about:blank to free the search page (~400MB React) before loading
-            // the store page. The async goto fired at search-end gets cancelled if the user
-            // replies quickly, so we re-do it here explicitly.
-            // With --max-old-space-size=100 on Chrome, V8 GCs aggressively after navigation.
-            const isOnDoorDash = currentUrl.includes('doordash.com');
-            if (isOnDoorDash) {
-                console.log('[DoorDash] Navigating to about:blank to free search page memory...');
-                await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                await delay(2000); // let V8 GC collect freed heap
-            }
-
             _preloadedMenuItems = null; // clear any cached pre-fetch data
 
-            // Use the URL from the DB cache directly.
+            // Navigate directly from the search page to the store page — no about:blank step.
+            // about:blank drops the DoorDash CF session context and triggers Turnstile challenges.
+            // With --max-old-space-size=200, V8 GCs the search page heap during navigation
+            // so Chrome stays within Railway's 512MB limit.
             let targetUrl = indexOrUrl;
 
             try {
