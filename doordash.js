@@ -3883,30 +3883,22 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const currentUrl = page.url();
             console.log(`[DoorDash] JS navigation from ${currentUrl} → ${indexOrUrl}`);
 
-            // Try to get the full original href from the search page (includes slug)
-            // so DoorDash's router gets the cleanest possible URL.
-            let targetUrl = indexOrUrl;
-            const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
-            if (storeIdMatch && currentUrl.includes('doordash.com')) {
-                const storeId = storeIdMatch[1];
-
-                _preloadedMenuItems = null; // clear any cached pre-fetch data
-
-                const fullHref = await page.evaluate((id) => {
-                    const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
-                    return link ? link.href : null;
-                }, storeId);
-                if (fullHref) {
-                    // Keep cursor param — CF uses it as session context to whitelist navigation
-                    // from a legitimate search. Without it, ID-only URLs get CF-challenged.
-                    try {
-                        const u = new URL(fullHref);
-                        const cursor = u.searchParams.get('cursor');
-                        targetUrl = u.origin + u.pathname + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : '');
-                    } catch (e) {}
-                    console.log(`[DoorDash] Using full slug URL: ${targetUrl}`);
-                }
+            // If still on the heavy search page (~400MB React), navigate to about:blank first
+            // to free memory before loading the store page. The async goto fired at search end
+            // gets cancelled by the next navigation if the user replies quickly.
+            const isOnSearchPage = currentUrl.includes('/search/');
+            if (isOnSearchPage) {
+                console.log('[DoorDash] Freeing search page memory (about:blank) before store nav...');
+                await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                await delay(1500); // let GC collect React heap
             }
+
+            _preloadedMenuItems = null; // clear any cached pre-fetch data
+
+            // Use the URL from the DB cache directly. The DOM slug-lookup (cursor param) was
+            // an optimization for CF session context — with fresh cookies CF doesn't challenge,
+            // so the plain store URL works fine.
+            let targetUrl = indexOrUrl;
 
             try {
                 // Use page.goto() instead of window.location.href JS navigation.
