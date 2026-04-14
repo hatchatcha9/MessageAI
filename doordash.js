@@ -419,6 +419,9 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             '--disable-extensions',
             '--disable-sync',
             '--disable-translate',
+            // Limit V8 heap to force aggressive GC — keeps each page's JS under 100 MB
+            // so Chrome stays within Railway's 512 MB container limit.
+            '--js-flags=--max-old-space-size=100',
             // --no-zygote is headless-only (causes issues in headed+Xvfb).
             // --use-gl=swiftshader is needed in BOTH modes:
             //   headless: no display, must use software GL
@@ -3883,46 +3886,21 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const currentUrl = page.url();
             console.log(`[DoorDash] JS navigation from ${currentUrl} → ${indexOrUrl}`);
 
-            // If still on the heavy search page (~400MB React), restart Chrome before loading
-            // the store page. about:blank + delay isn't enough — V8 doesn't fully GC the heap
-            // in time and the store page (equally heavy) pushes Chrome over 512MB.
-            // A full browser restart drops memory from ~400MB back to ~150MB baseline.
-            const isOnSearchPage = currentUrl.includes('/search/') || currentUrl.includes('doordash.com');
-            if (isOnSearchPage) {
-                console.log('[DoorDash] Restarting browser to free search page memory before store nav...');
-                await closeBrowser();
-                await launchBrowser();
+            // Navigate to about:blank to free the search page (~400MB React) before loading
+            // the store page. The async goto fired at search-end gets cancelled if the user
+            // replies quickly, so we re-do it here explicitly.
+            // With --max-old-space-size=100 on Chrome, V8 GCs aggressively after navigation.
+            const isOnDoorDash = currentUrl.includes('doordash.com');
+            if (isOnDoorDash) {
+                console.log('[DoorDash] Navigating to about:blank to free search page memory...');
+                await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+                await delay(2000); // let V8 GC collect freed heap
             }
 
             _preloadedMenuItems = null; // clear any cached pre-fetch data
 
             // Use the URL from the DB cache directly.
             let targetUrl = indexOrUrl;
-
-            // Navigate to lightweight homepage first (establishes CF session, avoids OOM).
-            // Then try in-context API to get menu data without loading the heavy store page.
-            // The store page alone can push Chrome over Railway's 512MB RAM limit.
-            console.log('[DoorDash] Loading homepage to establish session before store nav...');
-            await page.goto('https://www.doordash.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-            await waitForCFChallenge(15000);
-
-            const storeId = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
-            if (storeId) {
-                console.log(`[DoorDash] Trying API menu pre-fetch for store ${storeId}...`);
-                const apiItems = await fetchMenuFromInContextAPI(storeId);
-                if (apiItems && apiItems.length > 0) {
-                    console.log(`[DoorDash] API pre-fetch got ${apiItems.length} items — skipping store page load`);
-                    _preloadedMenuItems = apiItems;
-                    updateSessionState({ currentRestaurantUrl: targetUrl });
-                    return {
-                        success: true,
-                        restaurantName: '',  // server.js falls back to the cached search result name
-                        categories: [],
-                        url: targetUrl
-                    };
-                }
-                console.log('[DoorDash] API pre-fetch returned no items — falling back to store page');
-            }
 
             try {
                 await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
