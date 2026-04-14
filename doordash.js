@@ -3937,7 +3937,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     }, storeId),
                     new Promise(r => setTimeout(() => r(null), 5000))
                 ]).catch(() => null);
-                console.log(`[DoorDash] DOM slug lookup: ${domInfo?.totalStoreLinks} links, match=${domInfo?.matchHref}`);
+                console.log(`[DoorDash] DOM slug lookup: ${domInfo?.totalStoreLinks} links, match=${domInfo?.matchHref}, samples=${JSON.stringify(domInfo?.sampleHrefs)}`);
                 if (domInfo?.matchHref) {
                     try {
                         const u = new URL(domInfo.matchHref);
