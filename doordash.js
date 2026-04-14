@@ -2364,6 +2364,19 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     'getAvailableAddresses', 'campaignDetails', 'getConsumerSubscription',
                     'getConsumerProfile', 'getConsumerAddresses'];
                 if (!SKIP_OPS.some(op => opName.includes(op))) {
+                    // Log a sample store object from externalStores to see available URL fields
+                    if (opName === 'externalStores') {
+                        try {
+                            const stores = data?.data?.externalStores || data?.data?.searchWithFilterFacetFeed?.storeSearchResults || [];
+                            const sample = Array.isArray(stores) ? stores[0] : (typeof stores === 'object' ? Object.values(stores)[0] : null);
+                            if (sample) {
+                                const sampleStore = sample?.store || sample;
+                                console.log('[DoorDash] externalStores sample keys:', Object.keys(sampleStore || {}).join(', '));
+                                const urlFields = Object.entries(sampleStore || {}).filter(([k]) => /url|slug|path|href/i.test(k));
+                                if (urlFields.length > 0) console.log('[DoorDash] externalStores URL fields:', JSON.stringify(urlFields));
+                            }
+                        } catch (e) {}
+                    }
                     _extractAndCacheRestaurantList(data, opName);
                 }
             } catch (e) {}
@@ -2869,14 +2882,16 @@ async function extractRestaurantList(searchPageHtml = '') {
                 }
                 if (!name || name.length < 3) continue;
                 if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                // Use the full href (includes slug) — DoorDash 404s on ID-only URLs
+                const fullUrl = `${DOORDASH_URL}${href.startsWith('/') ? href : '/' + href}`;
                 restaurants.push({
                     id: storeId, name,
                     rating: (ctx.match(/(\d\.\d)/) || [])[1] || '',
                     deliveryTime: (ctx.match(/(\d+[-–]\d+)\s*min/i) || [])[0] || '',
-                    url: `${DOORDASH_URL}/store/${storeId}/`,
+                    url: fullUrl,
                     index: restaurants.length,
                 });
-                console.log(`[DoorDash] HTML href: found restaurant: ${name} (${storeId})`);
+                console.log(`[DoorDash] HTML href: found restaurant: ${name} (${storeId}) → ${fullUrl}`);
             }
             if (restaurants.length > 0) {
                 console.log(`[DoorDash] HTML href extraction yielded ${restaurants.length} restaurants`);
@@ -2924,12 +2939,14 @@ async function extractRestaurantList(searchPageHtml = '') {
                     const text = link.textContent || '';
                     const ratingMatch = text.match(/(\d\.\d)/);
                     const timeMatch = text.match(/(\d+[-–]\d+)\s*min/i);
+                    // Use full href URL (includes slug) — DoorDash 404s on ID-only URLs
+                    const fullHref = link.href || `${baseUrl}${href}`;
                     results.push({
                         id: storeId,
                         name,
                         rating: ratingMatch ? ratingMatch[1] : '',
                         deliveryTime: timeMatch ? timeMatch[0] : '',
-                        url: `${baseUrl}/store/${storeId}/`,
+                        url: fullHref,
                     });
                 }
                 return results;
