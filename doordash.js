@@ -3912,16 +3912,22 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
             if (storeIdMatch && currentUrl.includes('doordash.com')) {
                 const storeId = storeIdMatch[1];
-                const fullHref = await Promise.race([
+                const domInfo = await Promise.race([
                     page.evaluate((id) => {
-                        const link = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
-                        return link ? link.href : null;
+                        const allStoreLinks = document.querySelectorAll('a[href*="/store/"]');
+                        const match = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
+                        return {
+                            totalStoreLinks: allStoreLinks.length,
+                            sampleHrefs: [...allStoreLinks].slice(0, 3).map(a => a.href),
+                            matchHref: match ? match.href : null
+                        };
                     }, storeId),
                     new Promise(r => setTimeout(() => r(null), 5000))
                 ]).catch(() => null);
-                if (fullHref) {
+                console.log('[DoorDash] DOM slug debug:', JSON.stringify(domInfo));
+                if (domInfo?.matchHref) {
                     try {
-                        const u = new URL(fullHref);
+                        const u = new URL(domInfo.matchHref);
                         targetUrl = u.origin + u.pathname;
                         console.log(`[DoorDash] Using slug URL from DOM: ${targetUrl}`);
                     } catch (e) {}
