@@ -3910,8 +3910,21 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             // GraphQL response doesn't include it, but the React-rendered DOM does.
             let targetUrl = indexOrUrl;
             const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
-            if (storeIdMatch && currentUrl.includes('doordash.com')) {
+            if (storeIdMatch) {
                 const storeId = storeIdMatch[1];
+
+                // If not on a DoorDash search page, navigate back to it so React
+                // has rendered the store card links (which contain the slug URL).
+                // DoorDash 404s on ID-only URLs — the slug is required.
+                if (!currentUrl.includes('doordash.com/search/')) {
+                    const searchUrl = sessionState.lastSearchUrl;
+                    if (searchUrl && searchUrl.includes('doordash.com')) {
+                        console.log(`[DoorDash] Returning to search page for slug lookup: ${searchUrl}`);
+                        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+                        await delay(3000); // let React hydrate and render store links
+                    }
+                }
+
                 const domInfo = await Promise.race([
                     page.evaluate((id) => {
                         const allStoreLinks = document.querySelectorAll('a[href*="/store/"]');
@@ -3924,15 +3937,13 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     }, storeId),
                     new Promise(r => setTimeout(() => r(null), 5000))
                 ]).catch(() => null);
-                console.log('[DoorDash] DOM slug debug:', JSON.stringify(domInfo));
+                console.log(`[DoorDash] DOM slug lookup: ${domInfo?.totalStoreLinks} links, match=${domInfo?.matchHref}`);
                 if (domInfo?.matchHref) {
                     try {
                         const u = new URL(domInfo.matchHref);
                         targetUrl = u.origin + u.pathname;
-                        console.log(`[DoorDash] Using slug URL from DOM: ${targetUrl}`);
+                        console.log(`[DoorDash] Using slug URL: ${targetUrl}`);
                     } catch (e) {}
-                } else {
-                    console.log('[DoorDash] No slug link found in DOM — using cached URL');
                 }
             }
 
