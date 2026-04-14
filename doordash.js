@@ -3883,14 +3883,15 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const currentUrl = page.url();
             console.log(`[DoorDash] JS navigation from ${currentUrl} → ${indexOrUrl}`);
 
-            // If still on the heavy search page (~400MB React), navigate to about:blank first
-            // to free memory before loading the store page. The async goto fired at search end
-            // gets cancelled by the next navigation if the user replies quickly.
-            const isOnSearchPage = currentUrl.includes('/search/');
+            // If still on the heavy search page (~400MB React), restart Chrome before loading
+            // the store page. about:blank + delay isn't enough — V8 doesn't fully GC the heap
+            // in time and the store page (equally heavy) pushes Chrome over 512MB.
+            // A full browser restart drops memory from ~400MB back to ~150MB baseline.
+            const isOnSearchPage = currentUrl.includes('/search/') || currentUrl.includes('doordash.com');
             if (isOnSearchPage) {
-                console.log('[DoorDash] Freeing search page memory (about:blank) before store nav...');
-                await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
-                await delay(1500); // let GC collect React heap
+                console.log('[DoorDash] Restarting browser to free search page memory before store nav...');
+                await closeBrowser();
+                await launchBrowser();
             }
 
             _preloadedMenuItems = null; // clear any cached pre-fetch data
