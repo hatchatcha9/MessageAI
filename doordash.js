@@ -2371,7 +2371,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                             const sample = Array.isArray(stores) ? stores[0] : (typeof stores === 'object' ? Object.values(stores)[0] : null);
                             if (sample) {
                                 const sampleStore = sample?.store || sample;
-                                console.log('[DoorDash] externalStores sample keys:', Object.keys(sampleStore || {}).join(', '));
+                                console.log('[DoorDash] externalStores full sample:', JSON.stringify(sampleStore));
                                 const urlFields = Object.entries(sampleStore || {}).filter(([k]) => /url|slug|path|href/i.test(k));
                                 if (urlFields.length > 0) console.log('[DoorDash] externalStores URL fields:', JSON.stringify(urlFields));
                             }
