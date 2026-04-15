@@ -2653,6 +2653,58 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             console.log('[DoorDash] Apollo extraction error:', e.message);
         }
 
+        // Step 5c: Capture DOM carousel links — these are NATIVE DoorDash store URLs
+        // that actually work (/store/ID?cursor=...), unlike the externalStores IDs
+        // which are "selection_intel_store" type and 404 on /store/ID/ pages.
+        // Match carousel stores to _capturedRestaurants by restaurant name and update URLs.
+        try {
+            await delay(3000); // wait for React to render carousels
+            const carouselData = await Promise.race([
+                page.evaluate(() => {
+                    const seen = new Set();
+                    const carousels = [];
+                    for (const link of document.querySelectorAll('a[href*="/store/"]')) {
+                        const m = link.href.match(/\/store\/(\d+)/);
+                        if (!m) continue;
+                        const storeId = m[1];
+                        if (seen.has(storeId)) continue;
+                        seen.add(storeId);
+                        // Walk up to find a heading for this carousel section
+                        let name = '';
+                        let el = link;
+                        for (let i = 0; i < 12; i++) {
+                            el = el.parentElement;
+                            if (!el || el.tagName === 'BODY') break;
+                            const h = el.querySelector('h2,h3,h4,[data-telemetry-id="storeCarousel.header"]');
+                            if (h) { name = h.textContent.trim(); break; }
+                        }
+                        // Use clean href (strip cursor for matching, keep for navigation)
+                        const cleanHref = link.href.replace(/[?&]cursor=[^&]*/g, '').replace(/[?&]pickup=[^&]*/g, '');
+                        carousels.push({ storeId, name, href: link.href, cleanHref });
+                    }
+                    return carousels;
+                }),
+                new Promise(r => setTimeout(() => r([]), 5000))
+            ]).catch(() => []);
+
+            if (carouselData.length > 0) {
+                console.log(`[DoorDash] DOM carousel stores: ${carouselData.map(c => `${c.storeId}(${c.name})`).join(', ')}`);
+                // Update _capturedRestaurants URLs to use carousel URLs where name matches
+                for (const r of _capturedRestaurants) {
+                    const nameLower = r.name.toLowerCase();
+                    const match = carouselData.find(c => c.name.toLowerCase().includes(nameLower) || nameLower.includes(c.name.toLowerCase()));
+                    if (match) {
+                        const oldUrl = r.url;
+                        r.url = match.href;
+                        r.carouselStoreId = match.storeId;
+                        console.log(`[DoorDash] Mapped ${r.name} (${r.id}) → carousel ${match.storeId}: ${match.href.substring(0, 80)}`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('[DoorDash] Carousel capture error:', e.message);
+        }
+
         // Step 6: Extract restaurants
         console.log('[DoorDash] Extracting restaurants...');
         const restaurants = await extractRestaurantList(_searchPageHtml);
@@ -3911,153 +3963,17 @@ async function selectRestaurantFromSearch(indexOrUrl) {
 
             _preloadedMenuItems = null; // clear any cached pre-fetch data
 
-            // DoorDash 404s on ID-only URLs (/store/12345/).  The correct format is
-            // /store/slug/12345/ but externalStores GraphQL returns no slug.
-            // DoorDash renders search result cards as React onClick divs (no <a href>),
-            // so we can't get the slug from the DOM.
-            //
-            // Strategy: click the React store card and let DoorDash's router navigate
-            // to the correct slug URL.  Fall back to slug-from-name construction.
+            // The indexOrUrl may already be a carousel URL (updated by search flow step 5c).
+            // Carousel URLs (/store/ID?cursor=...) work; externalStores ID-only URLs 404.
             let targetUrl = indexOrUrl;
-            const storeIdMatch = indexOrUrl.match(/\/store\/[^/?#]*?\/(\d{5,})/) || indexOrUrl.match(/\/store\/(\d+)/);
-            let alreadyNavigated = false;
 
-            if (storeIdMatch) {
-                const storeId = storeIdMatch[1];
-                const storeInfo = _capturedRestaurants.find(r => r.id === storeId);
-                const storeName = storeInfo?.name || '';
-
-                // Make sure we're on the search page so the store cards are rendered.
-                if (!currentUrl.includes('doordash.com/search/')) {
-                    const searchUrl = sessionState.lastSearchUrl;
-                    if (searchUrl && searchUrl.includes('doordash.com')) {
-                        console.log(`[DoorDash] Returning to search page to click store card: ${searchUrl}`);
-                        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-                    }
-                }
-                // Wait for React to render the store cards
-                await delay(4000);
-
-                if (storeName) {
-                    // Strategy 1: Click the React store card — DoorDash's router will navigate
-                    // to the correct slug URL without us needing to know the slug.
-                    console.log(`[DoorDash] Attempting React card click for "${storeName}"`);
-                    const clickResult = await Promise.race([
-                        page.evaluate((name) => {
-                            const nameLower = name.toLowerCase();
-                            function tryClick(el) {
-                                // Walk up to find a clickable ancestor (role=link/button or tabindex)
-                                let p = el;
-                                for (let i = 0; i < 10; i++) {
-                                    p = p.parentElement;
-                                    if (!p || p.tagName === 'BODY') break;
-                                    const role = p.getAttribute('role');
-                                    const tabindex = p.getAttribute('tabindex');
-                                    if (role === 'link' || role === 'button' || tabindex === '0' || tabindex === '-1') {
-                                        p.click();
-                                        return { clicked: true, tag: p.tagName, role };
-                                    }
-                                }
-                                el.click();
-                                return { clicked: true, tag: el.tagName, forced: true };
-                            }
-                            // Approach 1: telemetry attribute (DoorDash may use this)
-                            for (const el of document.querySelectorAll('[data-telemetry-id="store.name"],[data-anchor-id*="StoreName"],[data-testid*="store-name"]')) {
-                                if (el.textContent.trim().toLowerCase() === nameLower) return tryClick(el);
-                            }
-                            // Approach 2: any leaf element with exact store name text
-                            for (const el of document.querySelectorAll('h3,h4,h5,span,p')) {
-                                if (el.childElementCount === 0 && el.textContent.trim().toLowerCase() === nameLower) {
-                                    return tryClick(el);
-                                }
-                            }
-                            // Approach 3: partial match on any visible store-like element
-                            for (const el of document.querySelectorAll('h3,h4,h5')) {
-                                if (el.textContent.trim().toLowerCase().startsWith(nameLower)) {
-                                    return tryClick(el);
-                                }
-                            }
-                            return { clicked: false };
-                        }, storeName),
-                        new Promise(r => setTimeout(() => r({ clicked: false }), 3000))
-                    ]).catch(() => ({ clicked: false }));
-
-                    console.log(`[DoorDash] Card click result: ${JSON.stringify(clickResult)}`);
-
-                    if (clickResult.clicked) {
-                        // Wait for React router to navigate to the store page
-                        try {
-                            await page.waitForURL(/doordash\.com\/store\//, { timeout: 8000 });
-                            const navigatedUrl = page.url();
-                            console.log(`[DoorDash] React navigation URL: ${navigatedUrl}`);
-                            if (navigatedUrl.includes('/store/')) {
-                                alreadyNavigated = true;
-                                targetUrl = navigatedUrl;
-                            }
-                        } catch (e) {
-                            console.log('[DoorDash] React navigation timeout — falling back to slug construction');
-                        }
-                    }
-                }
-
-                // Strategy 2: Try multiple URL patterns — DoorDash 404s on ID-only with
-                // trailing slash (/store/ID/). Try without slash, with constructed slug, etc.
-                if (!alreadyNavigated) {
-                    // Build candidate URLs in priority order
-                    const candidates = [];
-                    // 1. No trailing slash (DOM carousel links use this format)
-                    candidates.push(`https://www.doordash.com/store/${storeId}`);
-                    // 2. Slug from name + city
-                    if (storeName && storeInfo?.address) {
-                        const nameSlug = storeName.toLowerCase().replace(/[''']/g, '').replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-                        const addrParts = storeInfo.address.split(',').map(s => s.trim());
-                        const city = addrParts.length >= 3 ? addrParts[addrParts.length - 2] : '';
-                        const citySlug = city.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-                        if (citySlug) {
-                            candidates.push(`https://www.doordash.com/store/${nameSlug}-${citySlug}/${storeId}/`);
-                            candidates.push(`https://www.doordash.com/store/${nameSlug}-pizza-${citySlug}/${storeId}/`);
-                        }
-                        candidates.push(`https://www.doordash.com/store/${nameSlug}/${storeId}/`);
-                    }
-                    // 3. ID-only with trailing slash (current fallback, likely 404)
-                    candidates.push(`https://www.doordash.com/store/${storeId}/`);
-
-                    for (const candidateUrl of candidates) {
-                        console.log(`[DoorDash] Trying URL: ${candidateUrl}`);
-                        await page.goto(candidateUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(e => {
-                            console.log('[DoorDash] goto error:', e.message);
-                        });
-                        // Check if page loaded successfully (not a 404)
-                        const bodyText = await Promise.race([
-                            page.evaluate(() => document.body.innerText.substring(0, 200)).catch(() => ''),
-                            new Promise(r => setTimeout(() => r(''), 5000))
-                        ]);
-                        const is404 = bodyText.includes("couldn't find") || bodyText.includes("not found") || bodyText.includes("Go home");
-                        console.log(`[DoorDash] URL ${candidateUrl}: is404=${is404}`);
-                        if (!is404) {
-                            targetUrl = candidateUrl;
-                            alreadyNavigated = true;
-                            console.log(`[DoorDash] Working URL found: ${candidateUrl}`);
-                            break;
-                        }
-                    }
-                    if (!alreadyNavigated) {
-                        // All candidates failed — use last one anyway and proceed
-                        console.log('[DoorDash] All URL candidates failed, using last one');
-                        alreadyNavigated = true; // already on a page, skip goto below
-                    }
-                }
-            }
-
-            if (!alreadyNavigated) {
-                try {
-                    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
-                        console.log('[DoorDash] Store page goto error (continuing):', e.message);
-                    });
-                    console.log('[DoorDash] Navigation landed at:', page.url());
-                } catch (e) {
-                    console.log('[DoorDash] Navigation error:', e.message);
-                }
+            try {
+                await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
+                    console.log('[DoorDash] Store page goto error (continuing):', e.message);
+                });
+                console.log('[DoorDash] Navigation landed at:', page.url());
+            } catch (e) {
+                console.log('[DoorDash] Navigation error:', e.message);
             }
 
             const cfWait = 30000;
