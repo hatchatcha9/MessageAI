@@ -2653,56 +2653,38 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             console.log('[DoorDash] Apollo extraction error:', e.message);
         }
 
-        // Step 5c: Capture DOM carousel links — these are NATIVE DoorDash store URLs
-        // that actually work (/store/ID?cursor=...), unlike the externalStores IDs
-        // which are "selection_intel_store" type and 404 on /store/ID/ pages.
-        // Match carousel stores to _capturedRestaurants by restaurant name and update URLs.
+        // Step 5c: Capture the cursor parameter from DOM carousel links.
+        // DoorDash appends ?cursor=... to store URLs in their search results.
+        // The cursor contains search context and may be required for React to render
+        // the store page correctly (without it, the SPA may show 404).
+        // We attach this cursor to the externalStores URLs when navigating.
         try {
             await delay(3000); // wait for React to render carousels
-            const carouselData = await Promise.race([
+            const cursorResult = await Promise.race([
                 page.evaluate(() => {
-                    const seen = new Set();
-                    const carousels = [];
-                    for (const link of document.querySelectorAll('a[href*="/store/"]')) {
-                        const m = link.href.match(/\/store\/(\d+)/);
-                        if (!m) continue;
-                        const storeId = m[1];
-                        if (seen.has(storeId)) continue;
-                        seen.add(storeId);
-                        // Walk up to find a heading for this carousel section
-                        let name = '';
-                        let el = link;
-                        for (let i = 0; i < 12; i++) {
-                            el = el.parentElement;
-                            if (!el || el.tagName === 'BODY') break;
-                            const h = el.querySelector('h2,h3,h4,[data-telemetry-id="storeCarousel.header"]');
-                            if (h) { name = h.textContent.trim(); break; }
-                        }
-                        // Use clean href (strip cursor for matching, keep for navigation)
-                        const cleanHref = link.href.replace(/[?&]cursor=[^&]*/g, '').replace(/[?&]pickup=[^&]*/g, '');
-                        carousels.push({ storeId, name, href: link.href, cleanHref });
+                    for (const link of document.querySelectorAll('a[href*="/store/"][href*="?cursor="]')) {
+                        const m = link.href.match(/[?&]cursor=([^&]+)/);
+                        if (m) return { cursor: m[1], fullHref: link.href };
                     }
-                    return carousels;
+                    return null;
                 }),
-                new Promise(r => setTimeout(() => r([]), 5000))
-            ]).catch(() => []);
+                new Promise(r => setTimeout(() => r(null), 5000))
+            ]).catch(() => null);
 
-            if (carouselData.length > 0) {
-                console.log(`[DoorDash] DOM carousel stores: ${carouselData.map(c => `${c.storeId}(${c.name})`).join(', ')}`);
-                // Update _capturedRestaurants URLs to use carousel URLs where name matches
+            if (cursorResult?.cursor) {
+                console.log(`[DoorDash] Captured search cursor (${cursorResult.cursor.length} chars)`);
+                // Update _capturedRestaurants URLs to include the cursor parameter
                 for (const r of _capturedRestaurants) {
-                    const nameLower = r.name.toLowerCase();
-                    const match = carouselData.find(c => c.name.toLowerCase().includes(nameLower) || nameLower.includes(c.name.toLowerCase()));
-                    if (match) {
-                        const oldUrl = r.url;
-                        r.url = match.href;
-                        r.carouselStoreId = match.storeId;
-                        console.log(`[DoorDash] Mapped ${r.name} (${r.id}) → carousel ${match.storeId}: ${match.href.substring(0, 80)}`);
+                    if (r.url && !r.url.includes('?cursor=')) {
+                        r.url = `${r.url.replace(/\/$/, '')}?cursor=${cursorResult.cursor}&pickup=false`;
+                        console.log(`[DoorDash] Updated URL for ${r.name}: ${r.url.substring(0, 80)}...`);
                     }
                 }
+            } else {
+                console.log('[DoorDash] No cursor found in DOM carousel links');
             }
         } catch (e) {
-            console.log('[DoorDash] Carousel capture error:', e.message);
+            console.log('[DoorDash] Cursor capture error:', e.message);
         }
 
         // Step 6: Extract restaurants
