@@ -3934,16 +3934,28 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 const domInfo = await Promise.race([
                     page.evaluate((id) => {
                         const allStoreLinks = document.querySelectorAll('a[href*="/store/"]');
+                        // Get unique store IDs and sample hrefs
+                        const uniqueIds = new Set();
+                        const uniqueHrefs = [];
+                        for (const a of allStoreLinks) {
+                            const m = a.href.match(/\/store\/(\d+)/);
+                            if (m && !uniqueIds.has(m[1])) {
+                                uniqueIds.add(m[1]);
+                                uniqueHrefs.push(a.href.replace(/cursor=[^&]+/, 'cursor=...'));
+                                if (uniqueHrefs.length >= 8) break;
+                            }
+                        }
                         const match = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
                         return {
                             totalStoreLinks: allStoreLinks.length,
-                            sampleHrefs: [...allStoreLinks].slice(0, 3).map(a => a.href),
+                            uniqueStoreIds: [...uniqueIds],
+                            sampleHrefs: uniqueHrefs,
                             matchHref: match ? match.href : null
                         };
                     }, storeId),
                     new Promise(r => setTimeout(() => r(null), 5000))
                 ]).catch(() => null);
-                console.log(`[DoorDash] DOM slug lookup: ${domInfo?.totalStoreLinks} links, match=${domInfo?.matchHref}, samples=${JSON.stringify(domInfo?.sampleHrefs)}`);
+                console.log(`[DoorDash] DOM slug lookup: ${domInfo?.totalStoreLinks} links, uniqueIds=${JSON.stringify(domInfo?.uniqueStoreIds)}, match=${domInfo?.matchHref}`);
                 if (domInfo?.matchHref) {
                     try {
                         const u = new URL(domInfo.matchHref);
