@@ -4000,15 +4000,52 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     }
                 }
 
-                // Strategy 2: Construct slug from name + city (fallback)
-                if (!alreadyNavigated && storeName && storeInfo?.address) {
-                    const nameSlug = storeName.toLowerCase().replace(/[''']/g, '').replace(/[^a-z0-9]+/g, '-').replace(/-$/, '');
-                    const addrParts = storeInfo.address.split(',').map(s => s.trim());
-                    const city = addrParts.length >= 3 ? addrParts[addrParts.length - 2] : '';
-                    const citySlug = city.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-$/, '');
-                    const slug = citySlug ? `${nameSlug}-${citySlug}` : nameSlug;
-                    targetUrl = `https://www.doordash.com/store/${slug}/${storeId}/`;
-                    console.log(`[DoorDash] Trying constructed slug URL: ${targetUrl}`);
+                // Strategy 2: Try multiple URL patterns — DoorDash 404s on ID-only with
+                // trailing slash (/store/ID/). Try without slash, with constructed slug, etc.
+                if (!alreadyNavigated) {
+                    // Build candidate URLs in priority order
+                    const candidates = [];
+                    // 1. No trailing slash (DOM carousel links use this format)
+                    candidates.push(`https://www.doordash.com/store/${storeId}`);
+                    // 2. Slug from name + city
+                    if (storeName && storeInfo?.address) {
+                        const nameSlug = storeName.toLowerCase().replace(/[''']/g, '').replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+                        const addrParts = storeInfo.address.split(',').map(s => s.trim());
+                        const city = addrParts.length >= 3 ? addrParts[addrParts.length - 2] : '';
+                        const citySlug = city.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+                        if (citySlug) {
+                            candidates.push(`https://www.doordash.com/store/${nameSlug}-${citySlug}/${storeId}/`);
+                            candidates.push(`https://www.doordash.com/store/${nameSlug}-pizza-${citySlug}/${storeId}/`);
+                        }
+                        candidates.push(`https://www.doordash.com/store/${nameSlug}/${storeId}/`);
+                    }
+                    // 3. ID-only with trailing slash (current fallback, likely 404)
+                    candidates.push(`https://www.doordash.com/store/${storeId}/`);
+
+                    for (const candidateUrl of candidates) {
+                        console.log(`[DoorDash] Trying URL: ${candidateUrl}`);
+                        await page.goto(candidateUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(e => {
+                            console.log('[DoorDash] goto error:', e.message);
+                        });
+                        // Check if page loaded successfully (not a 404)
+                        const bodyText = await Promise.race([
+                            page.evaluate(() => document.body.innerText.substring(0, 200)).catch(() => ''),
+                            new Promise(r => setTimeout(() => r(''), 5000))
+                        ]);
+                        const is404 = bodyText.includes("couldn't find") || bodyText.includes("not found") || bodyText.includes("Go home");
+                        console.log(`[DoorDash] URL ${candidateUrl}: is404=${is404}`);
+                        if (!is404) {
+                            targetUrl = candidateUrl;
+                            alreadyNavigated = true;
+                            console.log(`[DoorDash] Working URL found: ${candidateUrl}`);
+                            break;
+                        }
+                    }
+                    if (!alreadyNavigated) {
+                        // All candidates failed — use last one anyway and proceed
+                        console.log('[DoorDash] All URL candidates failed, using last one');
+                        alreadyNavigated = true; // already on a page, skip goto below
+                    }
                 }
             }
 
