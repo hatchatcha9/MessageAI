@@ -204,7 +204,8 @@ function _extractAndCacheRestaurantList(data, opName = '') {
                 const url = slug
                     ? `${DOORDASH_BASE}/store/${slug}/${id}/`
                     : `${DOORDASH_BASE}/store/${id}/`;
-                _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url });
+                const address = typeof obj.address === 'string' ? obj.address.trim() : '';
+                _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url, address });
                 console.log(`[DoorDash] Network store [${opName || 'unknown'}]: ${name} (${id}) → ${url}`);
             }
         }
@@ -3943,33 +3944,37 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     console.log(`[DoorDash] Attempting React card click for "${storeName}"`);
                     const clickResult = await Promise.race([
                         page.evaluate((name) => {
-                            // DoorDash uses data-telemetry-id="store.name" on the store name element
-                            const nameEls = document.querySelectorAll('[data-telemetry-id="store.name"]');
-                            for (const el of nameEls) {
-                                if (el.textContent.trim().toLowerCase() === name.toLowerCase()) {
-                                    // Walk up to find a clickable ancestor (role=link/button or tabindex)
-                                    let p = el;
-                                    for (let i = 0; i < 8; i++) {
-                                        p = p.parentElement;
-                                        if (!p || p.tagName === 'BODY') break;
-                                        const role = p.getAttribute('role');
-                                        const tabindex = p.getAttribute('tabindex');
-                                        if (role === 'link' || role === 'button' || tabindex === '0') {
-                                            p.click();
-                                            return { clicked: true, tag: p.tagName, role };
-                                        }
+                            const nameLower = name.toLowerCase();
+                            function tryClick(el) {
+                                // Walk up to find a clickable ancestor (role=link/button or tabindex)
+                                let p = el;
+                                for (let i = 0; i < 10; i++) {
+                                    p = p.parentElement;
+                                    if (!p || p.tagName === 'BODY') break;
+                                    const role = p.getAttribute('role');
+                                    const tabindex = p.getAttribute('tabindex');
+                                    if (role === 'link' || role === 'button' || tabindex === '0' || tabindex === '-1') {
+                                        p.click();
+                                        return { clicked: true, tag: p.tagName, role };
                                     }
-                                    // No proper target found — click the name element's parent anyway
-                                    el.parentElement && el.parentElement.click();
-                                    return { clicked: true, tag: 'parent', forced: true };
+                                }
+                                el.click();
+                                return { clicked: true, tag: el.tagName, forced: true };
+                            }
+                            // Approach 1: telemetry attribute (DoorDash may use this)
+                            for (const el of document.querySelectorAll('[data-telemetry-id="store.name"],[data-anchor-id*="StoreName"],[data-testid*="store-name"]')) {
+                                if (el.textContent.trim().toLowerCase() === nameLower) return tryClick(el);
+                            }
+                            // Approach 2: any leaf element with exact store name text
+                            for (const el of document.querySelectorAll('h3,h4,h5,span,p')) {
+                                if (el.childElementCount === 0 && el.textContent.trim().toLowerCase() === nameLower) {
+                                    return tryClick(el);
                                 }
                             }
-                            // Fallback: search for any element with matching text
-                            const all = document.querySelectorAll('h3,h4,[class*="store"],[class*="restaurant"]');
-                            for (const el of all) {
-                                if (el.textContent.trim().toLowerCase() === name.toLowerCase()) {
-                                    el.click();
-                                    return { clicked: true, tag: el.tagName, fallback: true };
+                            // Approach 3: partial match on any visible store-like element
+                            for (const el of document.querySelectorAll('h3,h4,h5')) {
+                                if (el.textContent.trim().toLowerCase().startsWith(nameLower)) {
+                                    return tryClick(el);
                                 }
                             }
                             return { clicked: false };
