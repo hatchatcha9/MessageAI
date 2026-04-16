@@ -2866,6 +2866,50 @@ async function extractRestaurantList(searchPageHtml = '') {
                 return true;
             });
             console.log(`[DoorDash] Using ${deduped.length} network-captured restaurants (deduped from ${_capturedRestaurants.length})`);
+
+            // externalStores returns chain-level IDs that 404 when navigated to.
+            // Do a quick DOM scan to find real navigable URLs and match by name.
+            try {
+                const domNameUrlMap = await Promise.race([
+                    page.evaluate(() => {
+                        const map = {};
+                        for (const a of document.querySelectorAll('a[href*="/store/"]')) {
+                            const href = a.getAttribute('href') || '';
+                            // Only care about links with a real store ID (5+ digits)
+                            if (!/\/store\/[^/]*\d{5,}/.test(href)) continue;
+                            // Try telemetry name span first, then first clean text line
+                            let name = '';
+                            const nameEl = a.querySelector('[data-telemetry-id="store.name"]');
+                            if (nameEl) {
+                                name = nameEl.textContent.trim();
+                            } else {
+                                const lines = (a.textContent || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
+                                name = lines[0] || '';
+                                name = name.replace(/^\d+\.\d+\s*/, '').replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '').replace(/\d+[-–]\d+\s*min.*$/i, '').trim();
+                            }
+                            if (name && name.length >= 3) map[name.toLowerCase()] = a.href;
+                        }
+                        return map;
+                    }),
+                    new Promise(r => setTimeout(() => r({}), 4000))
+                ]).catch(() => ({}));
+
+                const domCount = Object.keys(domNameUrlMap).length;
+                console.log(`[DoorDash] DOM name→URL map: ${domCount} entries (${Object.keys(domNameUrlMap).slice(0, 3).join(', ')})`);
+
+                if (domCount > 0) {
+                    for (const r of deduped) {
+                        const domUrl = domNameUrlMap[r.name.toLowerCase()];
+                        if (domUrl && domUrl !== r.url) {
+                            console.log(`[DoorDash] Updated URL for ${r.name}: chain-level → ${domUrl.substring(0, 60)}`);
+                            r.url = domUrl;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log('[DoorDash] DOM URL resolution error:', e.message);
+            }
+
             return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
         }
 
