@@ -2653,38 +2653,56 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             console.log('[DoorDash] Apollo extraction error:', e.message);
         }
 
-        // Step 5c: Capture the cursor parameter from DOM carousel links.
-        // DoorDash appends ?cursor=... to store URLs in their search results.
-        // The cursor contains search context and may be required for React to render
-        // the store page correctly (without it, the SPA may show 404).
-        // We attach this cursor to the externalStores URLs when navigating.
+        // Step 5c: Extract real navigable store URLs from DOM carousel links.
+        // externalStores returns chain-level selection_intel_store IDs that 404 when navigated to.
+        // The DOM carousel has real individual store links with slug + real store ID, e.g.:
+        //   /store/pizza-hut-draper/34015879?cursor=...
+        // We match these to _capturedRestaurants by position (DOM order = externalStores order).
         try {
             await delay(3000); // wait for React to render carousels
-            const cursorResult = await Promise.race([
+            const domStoreLinks = await Promise.race([
                 page.evaluate(() => {
-                    for (const link of document.querySelectorAll('a[href*="/store/"][href*="?cursor="]')) {
-                        const m = link.href.match(/[?&]cursor=([^&]+)/);
-                        if (m) return { cursor: m[1], fullHref: link.href };
+                    const results = [];
+                    const seen = new Set();
+                    for (const link of document.querySelectorAll('a[href*="/store/"]')) {
+                        const href = link.getAttribute('href') || '';
+                        // Real store links have slug format: /store/some-slug/12345
+                        // Chain-level links have no slug: /store/12345
+                        const slugMatch = href.match(/\/store\/([a-z0-9][a-z0-9-]+[a-z0-9])\/(\d{5,})/);
+                        if (!slugMatch) continue;
+                        const slug = slugMatch[1];
+                        const realId = slugMatch[2];
+                        const fullHref = link.href; // absolute URL with cursor param
+                        const key = `${slug}/${realId}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        results.push({ slug, realId, fullHref });
                     }
-                    return null;
+                    return results;
                 }),
-                new Promise(r => setTimeout(() => r(null), 5000))
-            ]).catch(() => null);
+                new Promise(r => setTimeout(() => r([]), 5000))
+            ]).catch(() => []);
 
-            if (cursorResult?.cursor) {
-                console.log(`[DoorDash] Captured search cursor (${cursorResult.cursor.length} chars)`);
-                // Update _capturedRestaurants URLs to include the cursor parameter
-                for (const r of _capturedRestaurants) {
-                    if (r.url && !r.url.includes('?cursor=')) {
-                        r.url = `${r.url.replace(/\/$/, '')}?cursor=${cursorResult.cursor}&pickup=false`;
-                        console.log(`[DoorDash] Updated URL for ${r.name}: ${r.url.substring(0, 80)}...`);
-                    }
+            console.log(`[DoorDash] DOM slugged store links: ${domStoreLinks.length} found`);
+            for (const l of domStoreLinks.slice(0, 5)) {
+                console.log(`[DoorDash] DOM link: /store/${l.slug}/${l.realId}`);
+            }
+
+            if (domStoreLinks.length > 0) {
+                // Match by position: DOM order matches externalStores order
+                for (let i = 0; i < _capturedRestaurants.length && i < domStoreLinks.length; i++) {
+                    const r = _capturedRestaurants[i];
+                    const dom = domStoreLinks[i];
+                    const oldUrl = r.url;
+                    r.url = dom.fullHref || `https://www.doordash.com/store/${dom.slug}/${dom.realId}/`;
+                    r.id = dom.realId; // update to real store ID
+                    console.log(`[DoorDash] Resolved ${r.name}: ${oldUrl.substring(0, 40)} → /store/${dom.slug}/${dom.realId}/`);
                 }
             } else {
-                console.log('[DoorDash] No cursor found in DOM carousel links');
+                console.log('[DoorDash] No slugged DOM links found — keeping chain-level URLs');
             }
         } catch (e) {
-            console.log('[DoorDash] Cursor capture error:', e.message);
+            console.log('[DoorDash] DOM slug extraction error:', e.message);
         }
 
         // Step 6: Extract restaurants
@@ -3972,7 +3990,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                                     const data = JSON.parse(text);
                                     const stores = data?.stores || data?.data?.stores || [];
                                     return { ok: r.ok, path, status: r.status, firstStore: stores[0] || null, rawSnippet: text.substring(0, 500) };
-                                } catch (e) { /* try next */ }
+                                } catch (e) { return { ok: false, path, error: e.message }; }
                             }
                             return { ok: false };
                         }, { name: capturedEntry.name, lat: 40.5247, lng: -111.8638 }),
