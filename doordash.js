@@ -2592,29 +2592,14 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                         return out;
                     }
 
-                    // Extract search results from ROOT_QUERY.searchWithFilterFacetFeed
-                    // This is the accurate source — DoorDash's own search result data, no DOM needed.
+                    // NOTE: Apollo cache ROOT_QUERY.searchWithFilterFacetFeed is intentionally
+                    // skipped here. The Apollo cache persists across searches in the browser
+                    // profile and returns STALE results from the previous search query.
+                    // Only network-intercepted responses (current request) are reliable.
                     const rootQuery = apolloCache['ROOT_QUERY'] || {};
                     const searchKey = Object.keys(rootQuery).find(k => k.startsWith('searchWithFilterFacetFeed'));
                     if (searchKey) {
-                        const searchVal = resolveRef(rootQuery[searchKey], apolloCache);
-                        const storeList = searchVal?.storeSearchResults || searchVal?.results || searchVal?.stores || [];
-                        const seenNames = new Set();
-                        for (const entry of storeList) {
-                            const store = entry?.store || entry;
-                            const id = String(store?.id || store?.storeId || store?.store_id || '');
-                            const name = (store?.name || store?.business?.name || '').trim();
-                            if (!id || !name || seenNames.has(name.toLowerCase())) continue;
-                            seenNames.add(name.toLowerCase());
-                            const rating = String(store?.averageRating || store?.rating || '');
-                            const dt = store?.deliveryTime || store?.estimatedDeliveryTime || '';
-                            const slug2 = store?.url_key || store?.urlKey || store?.slug || store?.url_slug || '';
-                            const url2 = slug2 ? `${DOORDASH_URL}/store/${slug2}/${id}/` : `${DOORDASH_URL}/store/${id}/`;
-                            _capturedRestaurants.push({ id, name, rating, deliveryTime: String(dt), url: url2 });
-                            console.log(`[DoorDash] Apollo search result: ${name} (${id}) → ${url2}`);
-                            if (_capturedRestaurants.length >= 10) break;
-                        }
-                        console.log(`[DoorDash] Apollo searchWithFilterFacetFeed: ${_capturedRestaurants.length} restaurants`);
+                        console.log(`[DoorDash] Apollo searchWithFilterFacetFeed key found (skipping — may be stale from previous search)`);
                     }
 
                     // Extract featured menu items from ExternalStore / Store objects
