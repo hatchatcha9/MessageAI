@@ -2662,44 +2662,53 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             await delay(3000); // wait for React to render carousels
             const domStoreLinks = await Promise.race([
                 page.evaluate(() => {
-                    const results = [];
+                    const slugged = [];
+                    const idOnly = [];
                     const seen = new Set();
                     for (const link of document.querySelectorAll('a[href*="/store/"]')) {
                         const href = link.getAttribute('href') || '';
-                        // Real store links have slug format: /store/some-slug/12345
-                        // Chain-level links have no slug: /store/12345
                         const slugMatch = href.match(/\/store\/([a-z0-9][a-z0-9-]+[a-z0-9])\/(\d{5,})/);
-                        if (!slugMatch) continue;
-                        const slug = slugMatch[1];
-                        const realId = slugMatch[2];
-                        const fullHref = link.href; // absolute URL with cursor param
-                        const key = `${slug}/${realId}`;
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        results.push({ slug, realId, fullHref });
+                        if (slugMatch) {
+                            const key = `${slugMatch[1]}/${slugMatch[2]}`;
+                            if (!seen.has(key)) { seen.add(key); slugged.push({ slug: slugMatch[1], realId: slugMatch[2], fullHref: link.href }); }
+                        } else {
+                            const idMatch = href.match(/\/store\/(\d{5,})/);
+                            if (idMatch && !seen.has(idMatch[1])) { seen.add(idMatch[1]); idOnly.push({ id: idMatch[1], fullHref: link.href }); }
+                        }
                     }
-                    return results;
+                    return { slugged, idOnly: idOnly.slice(0, 10), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')) };
                 }),
-                new Promise(r => setTimeout(() => r([]), 5000))
-            ]).catch(() => []);
+                new Promise(r => setTimeout(() => r({ slugged: [], idOnly: [], sampleHrefs: [] }), 5000))
+            ]).catch(() => ({ slugged: [], idOnly: [], sampleHrefs: [] }));
 
-            console.log(`[DoorDash] DOM slugged store links: ${domStoreLinks.length} found`);
-            for (const l of domStoreLinks.slice(0, 5)) {
-                console.log(`[DoorDash] DOM link: /store/${l.slug}/${l.realId}`);
-            }
+            console.log(`[DoorDash] DOM store links: ${domStoreLinks.slugged.length} slugged, ${domStoreLinks.idOnly.length} id-only`);
+            console.log(`[DoorDash] DOM sample hrefs: ${JSON.stringify(domStoreLinks.sampleHrefs)}`);
 
-            if (domStoreLinks.length > 0) {
-                // Match by position: DOM order matches externalStores order
-                for (let i = 0; i < _capturedRestaurants.length && i < domStoreLinks.length; i++) {
+            if (domStoreLinks.slugged.length > 0) {
+                // Real slug URLs — match by position to _capturedRestaurants
+                for (let i = 0; i < _capturedRestaurants.length && i < domStoreLinks.slugged.length; i++) {
                     const r = _capturedRestaurants[i];
-                    const dom = domStoreLinks[i];
-                    const oldUrl = r.url;
+                    const dom = domStoreLinks.slugged[i];
                     r.url = dom.fullHref || `https://www.doordash.com/store/${dom.slug}/${dom.realId}/`;
-                    r.id = dom.realId; // update to real store ID
-                    console.log(`[DoorDash] Resolved ${r.name}: ${oldUrl.substring(0, 40)} → /store/${dom.slug}/${dom.realId}/`);
+                    r.id = dom.realId;
+                    console.log(`[DoorDash] Resolved ${r.name}: chain-level → /store/${dom.slug}/${dom.realId}/`);
+                }
+            } else if (domStoreLinks.idOnly.length > 0) {
+                // ID-only DOM links — these may be different (real) store IDs vs chain-level externalStores IDs
+                console.log(`[DoorDash] ID-only DOM links: ${domStoreLinks.idOnly.map(l => l.id).join(', ')}`);
+                console.log(`[DoorDash] externalStores IDs: ${_capturedRestaurants.map(r => r.id).join(', ')}`);
+                // Update by position if IDs differ
+                for (let i = 0; i < _capturedRestaurants.length && i < domStoreLinks.idOnly.length; i++) {
+                    const r = _capturedRestaurants[i];
+                    const dom = domStoreLinks.idOnly[i];
+                    if (dom.id !== r.id) {
+                        console.log(`[DoorDash] Replacing chain ID ${r.id} with DOM ID ${dom.id} for ${r.name}`);
+                        r.url = dom.fullHref || `https://www.doordash.com/store/${dom.id}/`;
+                        r.id = dom.id;
+                    }
                 }
             } else {
-                console.log('[DoorDash] No slugged DOM links found — keeping chain-level URLs');
+                console.log('[DoorDash] No store links found in DOM');
             }
         } catch (e) {
             console.log('[DoorDash] DOM slug extraction error:', e.message);
