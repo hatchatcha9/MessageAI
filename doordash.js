@@ -119,6 +119,7 @@ let _capturedRestaurants = [];
 // Auth headers captured from DoorDash's own successful GraphQL requests.
 // Reused for our own in-browser menu fetch (same headers = passes CF).
 let _capturedDoorDashHeaders = null;
+let _capturedSearchQueryFired = false; // true when searchWithFilterFacetFeed is intercepted
 
 /**
  * Parse a DoorDash API response and cache any menu items found for each store ID.
@@ -2326,6 +2327,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         _capturedStoreMenus = {}; // clear old data for this search
         _capturedRestaurants = []; // clear restaurant list from previous search
         _capturedDoorDashHeaders = null; // reset headers cache
+        _capturedSearchQueryFired = false; // reset search-specific query flag
 
         // Capture DoorDash's own GraphQL request headers so we can reuse them.
         // Their requests pass CF because they include auth tokens (x-chk-token etc.).
@@ -2365,6 +2367,11 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     'getAvailableAddresses', 'campaignDetails', 'getConsumerSubscription',
                     'getConsumerProfile', 'getConsumerAddresses'];
                 if (!SKIP_OPS.some(op => opName.includes(op))) {
+                    // Mark when the actual search results query fires (not just nearby stores)
+                    if (opName === 'searchWithFilterFacetFeed') {
+                        _capturedSearchQueryFired = true;
+                        console.log('[DoorDash] searchWithFilterFacetFeed intercepted — actual search results');
+                    }
                     // Log a sample store object from externalStores to see available URL fields
                     if (opName === 'externalStores') {
                         try {
@@ -2525,15 +2532,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         });
         page.off('response', _htmlCapture);
 
-        // Wait for GraphQL responses to fire (externalStores fires after React hydration,
-        // which happens well after domcontentloaded). Poll every 500ms up to 8s but exit
-        // early once we have restaurants so we don't burn time unnecessarily.
+        // Wait for searchWithFilterFacetFeed (actual query-specific results) to fire.
+        // externalStores fires at ~3s with general nearby stores regardless of query —
+        // don't exit on that alone. Wait for the real search results (up to 8s total).
         {
             const waitStart = Date.now();
-            while (_capturedRestaurants.length === 0 && Date.now() - waitStart < 8000) {
+            while (!_capturedSearchQueryFired && Date.now() - waitStart < 8000) {
                 await delay(500);
             }
-            console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} restaurants captured from network`);
+            console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} restaurants captured (searchQueryFired=${_capturedSearchQueryFired})`);
         }
         await waitForCFChallenge(30000);
         await handlePopups();
