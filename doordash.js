@@ -4517,31 +4517,28 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         if (bestExact) break; // exact match found, stop
                     }
 
-                    // Helper: disable Turnstile overlay + JS-click the card in one shot.
-                    // Avoids a second page.evaluate round-trip which can fail if Chrome
-                    // is under memory pressure after the DOM traversal.
-                    function clickCard(card) {
-                        const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"]');
-                        overlays.forEach(el => { el.style.pointerEvents = 'none'; });
-                        // Dispatch React-compatible synthetic events
-                        ['mousedown', 'mouseup', 'click'].forEach(type => {
-                            card.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }));
+                    // Helper: disable Turnstile overlay and return card center coords.
+                    // We do NOT click here — clicking via CDP page.mouse.click(x,y) after
+                    // evaluate is more reliable than JS dispatchEvent for React 18 event delegation.
+                    function prepareCard(card) {
+                        document.querySelectorAll('[data-testid="turnstile/overlay"]').forEach(el => {
+                            el.style.pointerEvents = 'none';
+                            el.style.display = 'none';
                         });
-                        card.click();
-                        return true;
+                        card.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        const r = card.getBoundingClientRect();
+                        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
                     }
 
                     const matchEl = bestExact || bestPrefix;
                     if (matchEl) {
                         const card = findCard(matchEl);
                         if (card) {
-                            card.scrollIntoView({ behavior: 'instant', block: 'center' });
-                            const r = card.getBoundingClientRect();
-                            clickCard(card);
+                            const coords = prepareCard(card);
                             return {
-                                found: true, clicked: true, strategy: 'treewalker',
+                                found: true, clicked: false, strategy: 'treewalker',
                                 text: matchEl.textContent.trim().substring(0, 40),
-                                x: r.left + r.width / 2, y: r.top + r.height / 2
+                                x: coords.x, y: coords.y
                             };
                         }
                     }
@@ -4561,13 +4558,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         if (rect.height < 50 || rect.height > 350) continue;
                         if (rect.left < 50) continue;
                         if (rect.top < -50 || rect.top > window.innerHeight + 50) continue;
-                        card.scrollIntoView({ behavior: 'instant', block: 'center' });
-                        const cr = card.getBoundingClientRect();
-                        clickCard(card);
+                        const coords = prepareCard(card);
                         return {
-                            found: true, clicked: true, strategy: 'card-match',
+                            found: true, clicked: false, strategy: 'card-match',
                             text: firstLine.substring(0, 40),
-                            x: cr.left + cr.width / 2, y: cr.top + cr.height / 2
+                            x: coords.x, y: coords.y
                         };
                     }
 
@@ -4592,9 +4587,10 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 if (result.found) {
                     console.log(`[DoorDash] Found "${searchName}" via ${result.strategy}: ${result.text}`);
                     console.log(`[DoorDash] Card center: (${result.x?.toFixed(0)}, ${result.y?.toFixed(0)})`);
-                    // Click was already dispatched inside the evaluate (clickCard()) to avoid
-                    // a second page.evaluate round-trip under memory pressure.
-                    console.log('[DoorDash] JS click dispatched inside evaluate');
+                    // Use CDP mouse click — works with React 18 event delegation where
+                    // JS dispatchEvent does not. Overlay already hidden via prepareCard().
+                    await page.mouse.click(result.x, result.y);
+                    console.log('[DoorDash] CDP mouse click dispatched');
                     clicked = true;
                     break;
                 }
@@ -4839,13 +4835,34 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 // Check if CF overlay was blocking
                 const cfOverlay = await page.$('[data-testid="turnstile/overlay"]');
                 if (cfOverlay) {
-                    console.log('[DoorDash] CF overlay detected — disabling pointer-events and retrying click...');
-                    await page.evaluate(() => {
-                        document.querySelectorAll('[data-testid="turnstile/overlay"]').forEach(el => { el.style.pointerEvents = 'none'; });
-                    });
+                    console.log('[DoorDash] CF overlay still present — hiding and retrying with CDP click...');
+                    const retryCoords = await page.evaluate((name) => {
+                        document.querySelectorAll('[data-testid="turnstile/overlay"]').forEach(el => {
+                            el.style.pointerEvents = 'none';
+                            el.style.display = 'none';
+                        });
+                        // Find item again and return its center coords
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (node.textContent.trim().toLowerCase() === name.toLowerCase()) {
+                                let el = node.parentElement;
+                                for (let i = 0; i < 6; i++) {
+                                    const r = el.getBoundingClientRect();
+                                    if (r.width > 100 && r.height > 50) return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                                    el = el.parentElement;
+                                    if (!el) break;
+                                }
+                            }
+                        }
+                        return null;
+                    }, searchName);
                     await delay(300);
-                    // Re-click via the item locator (overlay no longer intercepts)
-                    await page.locator(`text="${searchName}"`).first().click({ timeout: 5000 }).catch(() => {});
+                    if (retryCoords) {
+                        await page.mouse.click(retryCoords.x, retryCoords.y);
+                    } else {
+                        await page.locator(`text="${searchName}"`).first().click({ timeout: 5000 }).catch(() => {});
+                    }
                     await delay(1500);
                     const modalAfterRetry = await page.$('[role="dialog"], [aria-modal="true"]');
                     if (modalAfterRetry) {
