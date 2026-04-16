@@ -420,10 +420,17 @@ async function processCommands(response, user, phoneNumber) {
                     actions.push({ type: 'search_doordash', query, count: searchResult.restaurants.length });
                 } else {
                     const reason = searchResult.error || 'no results returned';
-                    additionalContext = `\n\nSearch failed (${reason}). Try again?`;
+                    // Save the failed query so "try again" retries the right search
+                    prefs.lastSearchQuery = query;
+                    prefs.lastSearchResults = null;
+                    db.setUserPreferences(user.id, prefs);
+                    additionalContext = `\n\nSearch for "${query}" failed (${reason}). Use [SEARCH: ${query}] to try again.`;
                 }
             } catch (error) {
-                additionalContext = `\n\nSearch crashed: ${error.message}. Try again?`;
+                prefs.lastSearchQuery = query;
+                prefs.lastSearchResults = null;
+                db.setUserPreferences(user.id, prefs);
+                additionalContext = `\n\nSearch for "${query}" crashed: ${error.message}. Use [SEARCH: ${query}] to try again.`;
             }
         }
     }
