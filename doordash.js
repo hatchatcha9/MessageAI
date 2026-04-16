@@ -3755,13 +3755,15 @@ async function waitForCFChallenge(timeoutMs = 60000) {
             return await Promise.race([
                 page.evaluate(() => {
                     const text = document.body?.innerText || '';
+                    // window._cf_chl_opt is always present on DoorDash (global Turnstile init) —
+                    // only treat it as a real challenge if the iframe is also present.
+                    const hasCFIframe = !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
                     return text.includes('Just a moment') ||
                            text.includes('Performing security verification') ||
                            text.includes('cf-browser-verification') ||
                            text.includes('Enable JavaScript and cookies to continue') ||
                            text.includes('jschl_vc') ||
-                           !!(window._cf_chl_opt) ||
-                           !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                           hasCFIframe;
                 }),
                 new Promise((resolve) => setTimeout(() => resolve(false), 5000))
             ]);
@@ -3904,7 +3906,7 @@ async function solveCFWithCaptchaService(apiKey) {
                     const stillCF = await Promise.race([
                         page.evaluate(() => {
                             const text = document.body?.innerText || '';
-                            return text.includes('Just a moment') || text.includes('Performing security verification') || !!(window._cf_chl_opt);
+                            return text.includes('Just a moment') || text.includes('Performing security verification') || !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
                         }),
                         new Promise((resolve) => setTimeout(() => resolve(false), 5000))
                     ]).catch(() => false);
@@ -3948,6 +3950,66 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             // The indexOrUrl may already be a carousel URL (updated by search flow step 5c).
             // Carousel URLs (/store/ID?cursor=...) work; externalStores ID-only URLs 404.
             let targetUrl = indexOrUrl;
+
+            // Resolve chain-level selection_intel_store IDs → navigable slug URLs.
+            // externalStores returns chain-level IDs (e.g. 10017934) that redirect to DoorDash home.
+            // In-browser /v2/store/search/ should return real individual stores with url_key slugs.
+            const storeIdFromUrl = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
+            const capturedEntry = _capturedRestaurants.find(r => r.id === storeIdFromUrl);
+            if (storeIdFromUrl && capturedEntry?.name) {
+                console.log(`[DoorDash] Resolving navigable URL for ${capturedEntry.name} (id=${storeIdFromUrl})...`);
+                try {
+                    const resolveResult = await Promise.race([
+                        page.evaluate(async ({ name, lat, lng }) => {
+                            const paths = [
+                                `/v2/store/search/?query=${encodeURIComponent(name)}&lat=${lat}&lng=${lng}&limit=5`,
+                                `/api/v1/consumer/consumer_store_search/?query=${encodeURIComponent(name)}&lat=${lat}&lng=${lng}&limit=5`,
+                            ];
+                            for (const path of paths) {
+                                try {
+                                    const r = await fetch(path, { credentials: 'include', headers: { accept: 'application/json' } });
+                                    const text = await r.text();
+                                    const data = JSON.parse(text);
+                                    const stores = data?.stores || data?.data?.stores || [];
+                                    return { ok: r.ok, path, status: r.status, firstStore: stores[0] || null, rawSnippet: text.substring(0, 500) };
+                                } catch (e) { /* try next */ }
+                            }
+                            return { ok: false };
+                        }, { name: capturedEntry.name, lat: 40.5247, lng: -111.8638 }),
+                        new Promise(r => setTimeout(() => r({ ok: false, timeout: true }), 8000))
+                    ]);
+
+                    console.log(`[DoorDash] Store search resolve: ok=${resolveResult.ok} status=${resolveResult.status} path=${resolveResult.path}`);
+                    if (resolveResult.ok && resolveResult.firstStore) {
+                        const s = resolveResult.firstStore;
+                        console.log(`[DoorDash] Store search first result keys: ${Object.keys(s).join(', ')}`);
+                        const urlKey = s.url_key || s.urlKey || s.slug || s.url_slug || s.urlSlug || s.page_url || s.pageUrl || '';
+                        const realId = String(s.id || s.storeId || '');
+                        if (urlKey) {
+                            targetUrl = `https://www.doordash.com/store/${urlKey}/${realId}/`;
+                            console.log(`[DoorDash] Resolved navigable URL: ${targetUrl}`);
+                        } else if (realId && realId !== storeIdFromUrl) {
+                            targetUrl = `https://www.doordash.com/store/${realId}/`;
+                            console.log(`[DoorDash] No url_key found — using real store id: ${targetUrl}`);
+                        } else {
+                            console.log(`[DoorDash] No url_key or new id found. rawSnippet: ${resolveResult.rawSnippet}`);
+                        }
+                    } else if (resolveResult.rawSnippet) {
+                        console.log(`[DoorDash] Store search not ok. rawSnippet: ${resolveResult.rawSnippet}`);
+                    }
+                } catch (e) {
+                    console.log('[DoorDash] Store URL resolve error:', e.message);
+                }
+            }
+
+            // OOM fix: navigate to about:blank before the store page to free search page React
+            // memory. Search page React holds ~400-500MB; jumping straight to a store page
+            // pushes Chrome past 512MB → "Target crashed".
+            if (page.url().includes('/search/')) {
+                console.log('[DoorDash] Clearing search page from memory (about:blank) before store load...');
+                await page.goto('about:blank', { waitUntil: 'load', timeout: 10000 }).catch(() => {});
+                await delay(500);
+            }
 
             try {
                 await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
