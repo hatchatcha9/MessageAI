@@ -2534,13 +2534,20 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         // Wait for searchWithFilterFacetFeed (actual query-specific results) to fire.
         // externalStores fires at ~3s with general nearby stores regardless of query —
-        // don't exit on that alone. Wait for the real search results (up to 8s total).
+        // don't rely on that. Wait for the real search results (up to 8s total).
         {
             const waitStart = Date.now();
             while (!_capturedSearchQueryFired && Date.now() - waitStart < 8000) {
                 await delay(500);
             }
-            console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} restaurants captured (searchQueryFired=${_capturedSearchQueryFired})`);
+            console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} captured (searchQueryFired=${_capturedSearchQueryFired})`);
+            // If only externalStores fired (not the query-specific call), clear the results
+            // so DOM extraction runs instead — externalStores returns general nearby stores
+            // unrelated to the search query (e.g. nearby Mexican places for "costa vida").
+            if (!_capturedSearchQueryFired && _capturedRestaurants.length > 0) {
+                console.log('[DoorDash] searchWithFilterFacetFeed did not fire — discarding externalStores results, using DOM extraction');
+                _capturedRestaurants = [];
+            }
         }
         await waitForCFChallenge(30000);
         await handlePopups();
