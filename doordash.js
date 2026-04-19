@@ -2220,26 +2220,30 @@ async function checkoutCurrentCart() {
             return { success: false, error: 'Could not reach checkout page' };
         }
 
-        // Place order — use locators here too
-        const placeOrderLoc = page.locator('button, [role="button"]')
-            .filter({ hasText: /place order|submit order/i })
-            .first();
-        const placeOrderByAttr = page.locator('[data-testid="PlaceOrderButton"], [data-anchor-id="CheckoutButton"]').first();
-
+        // Wait up to 12s for the Place Order button to appear (vogue=t1 checkout renders slowly)
         let orderBtn = null;
-        if (await placeOrderLoc.count() > 0 && await placeOrderLoc.isVisible().catch(() => false)) {
-            orderBtn = placeOrderLoc;
-        } else if (await placeOrderByAttr.count() > 0 && await placeOrderByAttr.isVisible().catch(() => false)) {
-            orderBtn = placeOrderByAttr;
-        } else {
-            // fallback: first submit button
-            const submitBtn = page.locator('button[type="submit"]').first();
-            if (await submitBtn.count() > 0 && await submitBtn.isVisible().catch(() => false)) {
-                orderBtn = submitBtn;
+        for (let attempt = 0; attempt < 4 && !orderBtn; attempt++) {
+            if (attempt > 0) await delay(3000);
+            const placeOrderLoc = page.locator('button, [role="button"]')
+                .filter({ hasText: /place order|submit order/i })
+                .first();
+            const placeOrderByAttr = page.locator('[data-testid="PlaceOrderButton"], [data-anchor-id="CheckoutButton"]').first();
+            if (await placeOrderLoc.count() > 0 && await placeOrderLoc.isVisible().catch(() => false)) {
+                orderBtn = placeOrderLoc;
+            } else if (await placeOrderByAttr.count() > 0 && await placeOrderByAttr.isVisible().catch(() => false)) {
+                orderBtn = placeOrderByAttr;
+            } else {
+                const submitBtn = page.locator('button[type="submit"]').first();
+                if (await submitBtn.count() > 0 && await submitBtn.isVisible().catch(() => false)) {
+                    orderBtn = submitBtn;
+                }
             }
+            if (!orderBtn) console.log(`[DoorDash] Place Order button not found yet (attempt ${attempt + 1}/4)...`);
         }
 
         if (!orderBtn) {
+            const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500)).catch(() => '');
+            console.log('[DoorDash] Checkout page text at failure:', pageText);
             return { success: false, error: 'Could not find Place Order button' };
         }
 
