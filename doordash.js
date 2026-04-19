@@ -2661,18 +2661,16 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     const seen = new Set();
                     for (const link of document.querySelectorAll('a[href*="/store/"]')) {
                         const href = link.getAttribute('href') || '';
-                        // Extract name: telemetry span first, then first clean text line
+                        // Name element is a sibling of the link, not a child — walk up to container
                         let name = '';
                         try {
-                            const nameEl = link.querySelector('[data-telemetry-id="store.name"]');
-                            if (nameEl) name = nameEl.textContent.trim();
+                            let el = link.parentElement;
+                            while (el && el !== document.body) {
+                                const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
+                                if (nameEl) { name = nameEl.textContent.trim(); break; }
+                                el = el.parentElement;
+                            }
                         } catch(e) {}
-                        if (!name) {
-                            try {
-                                const lines = (link.textContent || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
-                                name = (lines[0] || '').replace(/^\d+\.\d+\s*/, '').replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '').replace(/\d+[-–]\d+\s*min.*$/i, '').trim();
-                            } catch(e) {}
-                        }
                         if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) name = '';
                         const slugMatch = href.match(/\/store\/([a-z0-9][a-z0-9-]+[a-z0-9])\/(\d{5,})/);
                         if (slugMatch) {
@@ -2793,8 +2791,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                                     if (!idMatch || seen.has(idMatch[1])) continue;
                                     seen.add(idMatch[1]);
                                     let name = '';
-                                    try { const el = link.querySelector('[data-telemetry-id="store.name"]'); if (el) name = el.textContent.trim(); } catch(e) {}
-                                    if (!name) { try { const lines = (link.textContent||'').split('\n').map(l=>l.trim()).filter(l=>l.length>2); name = (lines[0]||'').replace(/^\d+\.\d+\s*/,'').replace(/\s*[•(].*$/,'').replace(/\$+.*$/,'').replace(/\d+[-–]\d+\s*min.*$/i,'').trim(); } catch(e) {} }
+                                    try { let el = link.parentElement; while (el && el !== document.body) { const n = el.querySelector('[data-telemetry-id="store.name"]'); if (n) { name = n.textContent.trim(); break; } el = el.parentElement; } } catch(e) {}
                                     if (!name || name.length < 3 || PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
                                     results.push({ id: idMatch[1], name, url: link.href });
                                 }
@@ -2943,15 +2940,13 @@ async function extractRestaurantList(searchPageHtml = '') {
                             const href = a.getAttribute('href') || '';
                             // Only care about links with a real store ID (5+ digits)
                             if (!/\/store\/[^/]*\d{5,}/.test(href)) continue;
-                            // Try telemetry name span first, then first clean text line
+                            // Name element is sibling of link — walk up to container
                             let name = '';
-                            const nameEl = a.querySelector('[data-telemetry-id="store.name"]');
-                            if (nameEl) {
-                                name = nameEl.textContent.trim();
-                            } else {
-                                const lines = (a.textContent || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
-                                name = lines[0] || '';
-                                name = name.replace(/^\d+\.\d+\s*/, '').replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '').replace(/\d+[-–]\d+\s*min.*$/i, '').trim();
+                            let el = a.parentElement;
+                            while (el && el !== document.body) {
+                                const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
+                                if (nameEl) { name = nameEl.textContent.trim(); break; }
+                                el = el.parentElement;
                             }
                             if (name && name.length >= 3) map[name.toLowerCase()] = a.href;
                         }
@@ -3109,17 +3104,16 @@ async function extractRestaurantList(searchPageHtml = '') {
                     if (seenIds.has(storeId)) continue;
                     seenIds.add(storeId);
 
-                    // Prefer telemetry name span, then first non-empty text line
-                    const nameEl = link.querySelector('[data-telemetry-id="store.name"]');
-                    let name = nameEl ? nameEl.textContent.trim() : '';
-                    if (!name) {
-                        const text = (link.textContent || '').trim();
-                        const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 2);
-                        name = lines[0] || '';
-                        name = name.replace(/^\d+\.\d+\s*/, '').replace(/\d+\.\d+\(.*$/, '')
-                                   .replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '')
-                                   .replace(/\d+[-–]\d+\s*min.*$/i, '').replace(/\d+\s*min.*$/i, '').trim();
-                    }
+                    // Name element is sibling of link — walk up to container
+                    let name = '';
+                    try {
+                        let el = link.parentElement;
+                        while (el && el !== document.body) {
+                            const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
+                            if (nameEl) { name = nameEl.textContent.trim(); break; }
+                            el = el.parentElement;
+                        }
+                    } catch(e) {}
                     if (!name || name.length < 3) continue;
                     if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
                     if (seenNames.has(name.toLowerCase())) continue;
