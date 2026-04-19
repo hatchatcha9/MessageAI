@@ -2246,10 +2246,42 @@ async function checkoutCurrentCart() {
         const btnText = (await orderBtn.textContent().catch(() => '')).trim();
         console.log(`[DoorDash] Found order button: "${btnText}"`);
 
-        const isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
+        let isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
         if (isDisabled !== null) {
-            console.log('[DoorDash] Order button is disabled');
-            return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
+            console.log('[DoorDash] Order button is disabled — checking why...');
+            // Dump page text to identify the issue
+            const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+            console.log('[DoorDash] Checkout page text (first 1000):', pageText.substring(0, 1000));
+
+            // Try to select a payment method if none selected
+            try {
+                const paymentSection = await page.$('[data-anchor-id="PaymentSection"], [data-testid="payment-section"], [data-testid*="payment"]');
+                if (paymentSection) {
+                    console.log('[DoorDash] Found payment section — clicking to expand/select');
+                    await paymentSection.click().catch(() => {});
+                    await delay(1500);
+                    const cards = await page.$$('[data-anchor-id="PaymentCard"], [data-testid="saved-card"], [data-testid="payment-card"]');
+                    if (cards.length > 0) {
+                        console.log(`[DoorDash] Found ${cards.length} payment card(s) — selecting first`);
+                        await cards[0].click().catch(() => {});
+                        await delay(1500);
+                    }
+                }
+            } catch(e) {
+                console.log('[DoorDash] Payment section interaction error:', e.message);
+            }
+
+            // Wait up to 5s for button to become enabled
+            for (let i = 0; i < 5; i++) {
+                await delay(1000);
+                isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
+                if (isDisabled === null) { console.log('[DoorDash] Order button became enabled!'); break; }
+            }
+
+            if (isDisabled !== null) {
+                await takeScreenshot('checkout-disabled');
+                return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
+            }
         }
 
         const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
