@@ -2655,18 +2655,32 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             await delay(3000); // wait for React to render carousels
             const domStoreLinks = await Promise.race([
                 page.evaluate(() => {
+                    const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
                     const slugged = [];
                     const idOnly = [];
                     const seen = new Set();
                     for (const link of document.querySelectorAll('a[href*="/store/"]')) {
                         const href = link.getAttribute('href') || '';
+                        // Extract name: telemetry span first, then first clean text line
+                        let name = '';
+                        try {
+                            const nameEl = link.querySelector('[data-telemetry-id="store.name"]');
+                            if (nameEl) name = nameEl.textContent.trim();
+                        } catch(e) {}
+                        if (!name) {
+                            try {
+                                const lines = (link.textContent || '').split('\n').map(l => l.trim()).filter(l => l.length > 2);
+                                name = (lines[0] || '').replace(/^\d+\.\d+\s*/, '').replace(/\s*[•(].*$/, '').replace(/\$+.*$/, '').replace(/\d+[-–]\d+\s*min.*$/i, '').trim();
+                            } catch(e) {}
+                        }
+                        if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) name = '';
                         const slugMatch = href.match(/\/store\/([a-z0-9][a-z0-9-]+[a-z0-9])\/(\d{5,})/);
                         if (slugMatch) {
                             const key = `${slugMatch[1]}/${slugMatch[2]}`;
-                            if (!seen.has(key)) { seen.add(key); slugged.push({ slug: slugMatch[1], realId: slugMatch[2], fullHref: link.href }); }
+                            if (!seen.has(key)) { seen.add(key); slugged.push({ slug: slugMatch[1], realId: slugMatch[2], fullHref: link.href, name }); }
                         } else {
                             const idMatch = href.match(/\/store\/(\d{5,})/);
-                            if (idMatch && !seen.has(idMatch[1])) { seen.add(idMatch[1]); idOnly.push({ id: idMatch[1], fullHref: link.href }); }
+                            if (idMatch && !seen.has(idMatch[1])) { seen.add(idMatch[1]); idOnly.push({ id: idMatch[1], fullHref: link.href, name }); }
                         }
                     }
                     return { slugged, idOnly: idOnly.slice(0, 10), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')) };
@@ -2702,6 +2716,23 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 }
             } else {
                 console.log('[DoorDash] No store links found in DOM');
+            }
+
+            // If network results were discarded (externalStores mismatch), populate from DOM
+            if (_capturedRestaurants.length === 0) {
+                const domLinks = [...domStoreLinks.slugged, ...domStoreLinks.idOnly];
+                const named = domLinks.filter(l => l.name && l.name.length >= 3);
+                if (named.length > 0) {
+                    console.log(`[DoorDash] Populating ${named.length} restaurants from DOM links`);
+                    _capturedRestaurants = named.map(l => ({
+                        id: l.realId || l.id,
+                        name: l.name,
+                        url: l.fullHref,
+                        rating: '',
+                        deliveryTime: '',
+                    }));
+                    console.log(`[DoorDash] DOM restaurants: ${_capturedRestaurants.map(r => r.name).join(', ')}`);
+                }
             }
         } catch (e) {
             console.log('[DoorDash] DOM slug extraction error:', e.message);
@@ -2739,6 +2770,34 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     }
                     await waitForCFChallenge(20000);
                     await handlePopups();
+                    // If still no network results, do a DOM scan to populate before extracting
+                    if (_capturedRestaurants.length === 0) {
+                        await delay(2000);
+                        const retryDomLinks = await Promise.race([
+                            page.evaluate(() => {
+                                const PROMO_STARTS = ['enjoy', 'get ', 'save ', 'free ', 'order ', 'up to', 'top deal'];
+                                const results = [];
+                                const seen = new Set();
+                                for (const link of document.querySelectorAll('a[href*="/store/"]')) {
+                                    const href = link.getAttribute('href') || '';
+                                    const idMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
+                                    if (!idMatch || seen.has(idMatch[1])) continue;
+                                    seen.add(idMatch[1]);
+                                    let name = '';
+                                    try { const el = link.querySelector('[data-telemetry-id="store.name"]'); if (el) name = el.textContent.trim(); } catch(e) {}
+                                    if (!name) { try { const lines = (link.textContent||'').split('\n').map(l=>l.trim()).filter(l=>l.length>2); name = (lines[0]||'').replace(/^\d+\.\d+\s*/,'').replace(/\s*[•(].*$/,'').replace(/\$+.*$/,'').replace(/\d+[-–]\d+\s*min.*$/i,'').trim(); } catch(e) {} }
+                                    if (!name || name.length < 3 || PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
+                                    results.push({ id: idMatch[1], name, url: link.href });
+                                }
+                                return results.slice(0, 10);
+                            }),
+                            new Promise(r => setTimeout(() => r([]), 5000))
+                        ]).catch(() => []);
+                        if (retryDomLinks.length > 0) {
+                            console.log(`[DoorDash] Retry DOM scan: ${retryDomLinks.map(r => r.name).join(', ')}`);
+                            _capturedRestaurants = retryDomLinks;
+                        }
+                    }
                     const retryRestaurants = await extractRestaurantList();
                     console.log(`[DoorDash] After retry: extracted ${retryRestaurants.length} restaurants`);
                     if (retryRestaurants.length > 0) {
