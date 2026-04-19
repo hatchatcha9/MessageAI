@@ -2253,30 +2253,47 @@ async function checkoutCurrentCart() {
         let isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
         if (isDisabled !== null) {
             console.log('[DoorDash] Order button is disabled — checking why...');
-            // Dump page text to identify the issue
             const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
             console.log('[DoorDash] Checkout page text (first 1000):', pageText.substring(0, 1000));
 
-            // Try to select a payment method if none selected
-            try {
-                const paymentSection = await page.$('[data-anchor-id="PaymentSection"], [data-testid="payment-section"], [data-testid*="payment"]');
-                if (paymentSection) {
-                    console.log('[DoorDash] Found payment section — clicking to expand/select');
-                    await paymentSection.click().catch(() => {});
-                    await delay(1500);
-                    const cards = await page.$$('[data-anchor-id="PaymentCard"], [data-testid="saved-card"], [data-testid="payment-card"]');
-                    if (cards.length > 0) {
-                        console.log(`[DoorDash] Found ${cards.length} payment card(s) — selecting first`);
-                        await cards[0].click().catch(() => {});
-                        await delay(1500);
+            // "Order unavailable at selected time" — scheduled time is invalid, switch to ASAP
+            if (pageText.includes('unavailable at selected time') || pageText.includes('Order unavailable')) {
+                console.log('[DoorDash] Scheduled time is unavailable — switching to ASAP delivery');
+                try {
+                    // Click the "Change" button next to the unavailable time
+                    const changeBtn = page.locator('button, [role="button"]').filter({ hasText: /^change$/i }).first();
+                    if (await changeBtn.count() > 0) {
+                        await changeBtn.click();
+                        await delay(2000);
+                        // Select ASAP / As soon as possible
+                        const asapBtn = page.locator('button, [role="button"], [role="option"], label').filter({ hasText: /asap|as soon as possible|now/i }).first();
+                        if (await asapBtn.count() > 0) {
+                            console.log('[DoorDash] Clicking ASAP option');
+                            await asapBtn.click();
+                            await delay(1500);
+                        } else {
+                            // Try clicking the first available time option
+                            const firstOption = page.locator('[role="option"], [role="radio"]').first();
+                            if (await firstOption.count() > 0) {
+                                console.log('[DoorDash] Clicking first available time option');
+                                await firstOption.click();
+                                await delay(1500);
+                            }
+                        }
+                        // Confirm if there's a confirm/save button
+                        const confirmBtn = page.locator('button').filter({ hasText: /confirm|save|done|apply/i }).first();
+                        if (await confirmBtn.count() > 0) {
+                            await confirmBtn.click();
+                            await delay(1500);
+                        }
                     }
+                } catch(e) {
+                    console.log('[DoorDash] ASAP switch error:', e.message);
                 }
-            } catch(e) {
-                console.log('[DoorDash] Payment section interaction error:', e.message);
             }
 
-            // Wait up to 5s for button to become enabled
-            for (let i = 0; i < 5; i++) {
+            // Wait up to 8s for button to become enabled
+            for (let i = 0; i < 8; i++) {
                 await delay(1000);
                 isDisabled = await orderBtn.getAttribute('disabled').catch(() => null);
                 if (isDisabled === null) { console.log('[DoorDash] Order button became enabled!'); break; }
