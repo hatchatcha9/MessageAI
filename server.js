@@ -154,6 +154,15 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n- Example: If user says "tres leches" and menu shows "13. Tres Leches - $4.99", use [ADD_ITEM_NUM: 13]`;
     }
 
+    // Pending option selection — user must pick an option, NOT add a new item
+    if (preferences.pendingDoordashItem && preferences.pendingDoordashOptions) {
+        const itemName = preferences.pendingDoordashItem.name;
+        context += `\n\n⚠️ AWAITING OPTION SELECTION for "${itemName}". The user is responding to an options prompt.`;
+        context += `\n- A NUMBER response means [SELECT_OPTION: number] — NOT [ADD_ITEM_NUM:]`;
+        context += `\n- A TEXT response means [SELECT_OPTIONS_TEXT: text]`;
+        context += `\n- Do NOT use [ADD_ITEM_NUM:] until the pending options are resolved.`;
+    }
+
     // Budget mode
     if (preferences.budget) {
         context += `\n\nBudget: $${preferences.budget.toFixed(2)} per order - focus on items under this price`;
@@ -1115,6 +1124,7 @@ async function processCommands(response, user, phoneNumber) {
                         prefs.currentRestaurant = null;
                         prefs.currentRestaurantSource = null;
                         prefs.currentRestaurantUrl = null;
+                        prefs.scheduledOrder = null;
                         db.setUserPreferences(user.id, prefs);
 
                         additionalContext = `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`;
