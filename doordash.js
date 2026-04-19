@@ -586,15 +586,9 @@ async function ensureLoggedIn(email, password) {
         console.log('[DoorDash] Session validation result:', validation);
 
         if (validation.valid && validation.loggedIn) {
-            // Already logged in - verify it's the same account if we know
-            if (sessionState.loginEmail && sessionState.loginEmail !== email) {
-                console.log('[DoorDash] Different account requested, need to re-login');
-                // Could add logout logic here if needed
-            } else {
-                console.log('[DoorDash] Already logged in, reusing session');
-                updateSessionState({ loggedIn: true, loginEmail: email });
-                return { success: true, message: 'Session reused' };
-            }
+            console.log('[DoorDash] Already logged in, reusing session');
+            updateSessionState({ loggedIn: true, loginEmail: email });
+            return { success: true, message: 'Session reused' };
         }
 
         // Need to login
