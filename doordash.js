@@ -2722,15 +2722,20 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 console.log('[DoorDash] 0 restaurants — retrying search...');
                 _browserRestartedThisSearch = true;
                 try {
-                    // Do NOT reset _capturedRestaurants — keep any restaurants from the first load.
+                    _capturedRestaurants = [];
+                    _capturedSearchQueryFired = false;
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
                     await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                     {
                         const waitStart = Date.now();
-                        while (_capturedRestaurants.length === 0 && Date.now() - waitStart < 8000) {
+                        while (!_capturedSearchQueryFired && Date.now() - waitStart < 8000) {
                             await delay(500);
                         }
-                        console.log(`[DoorDash] Retry waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} captured`);
+                        console.log(`[DoorDash] Retry waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} captured (searchQueryFired=${_capturedSearchQueryFired})`);
+                        if (!_capturedSearchQueryFired && _capturedRestaurants.length > 0) {
+                            console.log('[DoorDash] Retry: searchWithFilterFacetFeed did not fire — discarding externalStores, using DOM');
+                            _capturedRestaurants = [];
+                        }
                     }
                     await waitForCFChallenge(20000);
                     await handlePopups();
@@ -2891,19 +2896,30 @@ async function extractRestaurantList(searchPageHtml = '') {
                 console.log(`[DoorDash] DOM name→URL map: ${domCount} entries (${Object.keys(domNameUrlMap).slice(0, 3).join(', ')})`);
 
                 if (domCount > 0) {
-                    for (const r of deduped) {
-                        const domUrl = domNameUrlMap[r.name.toLowerCase()];
-                        if (domUrl && domUrl !== r.url) {
-                            console.log(`[DoorDash] Updated URL for ${r.name}: chain-level → ${domUrl.substring(0, 60)}`);
-                            r.url = domUrl;
+                    // If DOM has several restaurants but none match network results,
+                    // the network data is irrelevant (externalStores mismatch) — use DOM instead.
+                    const matchCount = deduped.filter(r => domNameUrlMap[r.name.toLowerCase()]).length;
+                    if (domCount >= 5 && matchCount === 0) {
+                        console.log(`[DoorDash] 0/${deduped.length} network restaurants found in DOM (${domCount} DOM entries) — falling through to DOM extraction`);
+                        _capturedRestaurants = [];
+                        // fall through to Priority 2/3
+                    } else {
+                        for (const r of deduped) {
+                            const domUrl = domNameUrlMap[r.name.toLowerCase()];
+                            if (domUrl && domUrl !== r.url) {
+                                console.log(`[DoorDash] Updated URL for ${r.name}: chain-level → ${domUrl.substring(0, 60)}`);
+                                r.url = domUrl;
+                            }
                         }
+                        return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
                     }
+                } else {
+                    return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
                 }
             } catch (e) {
                 console.log('[DoorDash] DOM URL resolution error:', e.message);
+                return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
             }
-
-            return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
         }
 
         // Priority 2: parse restaurant data from the raw HTML response (captured before JS runs).
