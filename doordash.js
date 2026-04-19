@@ -2794,6 +2794,11 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 try {
                     _capturedRestaurants = [];
                     _capturedSearchQueryFired = false;
+                    // Re-warmup homepage first to clear any CF challenge before searching again
+                    console.log('[DoorDash] Retry: re-warming up homepage...');
+                    await page.goto(`${DOORDASH_URL}/home`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await waitForCFChallenge(20000);
+                    await delay(2000);
                     const retrySearchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
                     await page.goto(retrySearchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                     {
