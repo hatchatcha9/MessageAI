@@ -276,7 +276,7 @@ CRITICAL RULES:
 - NEVER describe cart contents, list items, or calculate totals yourself. The system appends the real cart automatically.
 - NEVER list restaurant search results or menu items in your text. The system appends results after [SEARCH:] and [SELECT:] automatically. Just say one short sentence like "Looking for pizza!" and use the command.
 - When user says a NUMBER after seeing restaurants, use [SELECT: number]
-- When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number]
+- When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number] — BUT if ⚠️ AWAITING OPTION SELECTION appears above in this prompt, use [SELECT_OPTION: number] instead
 - When user says an item NAME, use [ADD_ITEM_NUM: number] with the matching number
 - The full menu is in your system prompt above — scan ALL items to find what the user wants, even if their SMS only showed 15 items. NEVER tell the user an item isn't available without checking the full menu above.
 - NEVER use [SHOW_MENU] - the system shows it automatically after selecting
