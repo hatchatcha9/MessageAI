@@ -2683,13 +2683,22 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                             if (idMatch && !seen.has(idMatch[1])) { seen.add(idMatch[1]); idOnly.push({ id: idMatch[1], fullHref: link.href, name }); }
                         }
                     }
-                    return { slugged, idOnly: idOnly.slice(0, 10), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')) };
+                    const firstLink = document.querySelector('a[href*="/store/"]');
+                    const nameEls = document.querySelectorAll('[data-telemetry-id="store.name"]');
+                    const nameDebug = {
+                        firstInnerText: firstLink ? (firstLink.innerText || '').substring(0, 150) : '',
+                        firstTextContent: firstLink ? (firstLink.textContent || '').substring(0, 150) : '',
+                        telemetryNameCount: nameEls.length,
+                        telemetryNames: [...nameEls].slice(0, 5).map(el => el.textContent.trim()),
+                    };
+                    return { slugged, idOnly: idOnly.slice(0, 10), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')), nameDebug };
                 }),
                 new Promise(r => setTimeout(() => r({ slugged: [], idOnly: [], sampleHrefs: [] }), 5000))
             ]).catch(() => ({ slugged: [], idOnly: [], sampleHrefs: [] }));
 
             console.log(`[DoorDash] DOM store links: ${domStoreLinks.slugged.length} slugged, ${domStoreLinks.idOnly.length} id-only`);
             console.log(`[DoorDash] DOM sample hrefs: ${JSON.stringify(domStoreLinks.sampleHrefs)}`);
+            console.log(`[DoorDash] DOM name debug: ${JSON.stringify(domStoreLinks.nameDebug || {})}`);
 
             if (domStoreLinks.slugged.length > 0) {
                 // Real slug URLs — match by position to _capturedRestaurants
