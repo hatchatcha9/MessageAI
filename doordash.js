@@ -2313,19 +2313,31 @@ async function checkoutCurrentCart() {
 
         console.log('[DoorDash] Clicking Place Order...');
         await orderBtn.click();
-        await delay(5000);
 
-        const pageContent = await page.content();
-        const isConfirmed = pageContent.includes('Order confirmed') ||
+        // Wait for navigation to settle — DoorDash navigates to confirmation page after order
+        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+        await delay(2000);
+
+        const currentUrl = page.url();
+        console.log('[DoorDash] Post-order URL:', currentUrl);
+
+        let pageContent = '';
+        try { pageContent = await page.content(); } catch(e) {
+            console.log('[DoorDash] page.content() error (still navigating):', e.message);
+        }
+
+        const isConfirmed = currentUrl.includes('confirmation') ||
+                           pageContent.includes('Order confirmed') ||
                            pageContent.includes('Order placed') ||
                            pageContent.includes('Your order is on') ||
-                           pageContent.includes('Thanks for your order') ||
-                           page.url().includes('confirmation');
+                           pageContent.includes('Thanks for your order');
 
         if (isConfirmed) {
-            console.log('[DoorDash] Order placed! URL:', page.url());
-            return { success: true, message: 'Order placed!', orderUrl: page.url() };
+            console.log('[DoorDash] Order confirmed! URL:', currentUrl);
+            return { success: true, message: 'Order placed!', orderUrl: currentUrl };
         }
+        // Order was clicked — if no error thrown, assume it went through
+        console.log('[DoorDash] Place Order clicked, assuming success');
         return { success: true, message: 'Order submitted - check DoorDash app for confirmation' };
 
     } catch (error) {
