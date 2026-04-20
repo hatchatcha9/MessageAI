@@ -2180,15 +2180,15 @@ async function checkoutCurrentCart() {
             await delay(2000);
             console.log('[DoorDash] URL after /cart/ nav:', page.url());
 
-            // Detect empty cart state: DoorDash shows "Go home" when cart is empty
-            const cartPageBtns = await page.evaluate(() =>
-                Array.from(document.querySelectorAll('button, a'))
-                    .filter(b => { const r = b.getBoundingClientRect(); return r.width > 40 && r.height > 20; })
-                    .map(b => (b.textContent || '').trim().toLowerCase())
-                    .filter(t => t)
-            );
-            const isEmptyCart = cartPageBtns.every(t => t.includes('go home') || t.includes('home'));
-            if (isEmptyCart && cartPageBtns.length > 0) {
+            // Detect empty cart state: DoorDash shows "Go home" and "0 items in cart"
+            const isEmptyCart = await page.evaluate(() => {
+                const pageText = document.body.innerText || '';
+                const hasGoHome = Array.from(document.querySelectorAll('button, a'))
+                    .some(b => (b.textContent || '').trim().toLowerCase() === 'go home');
+                const hasZeroItems = /\b0\s*items?\s*in\s*cart\b/i.test(pageText);
+                return hasGoHome || hasZeroItems;
+            });
+            if (isEmptyCart) {
                 console.log('[DoorDash] DoorDash cart is empty (browser session reset). User must re-add items.');
                 return { success: false, error: 'EMPTY_CART' };
             }
@@ -4860,6 +4860,26 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             await takeScreenshot('item-modal');
             await delay(1000);
 
+            // Check if modal is a "restaurant closed" notice (not a real item modal)
+            const closedMsg = await page.evaluate(() => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                if (!modal) return null;
+                const text = modal.textContent || '';
+                if (text.toLowerCase().includes('currently closed') || text.toLowerCase().includes('is closed')) {
+                    // Only "Browse menu" or similar — no add button
+                    const buttons = Array.from(modal.querySelectorAll('button')).map(b => b.textContent?.trim() || '');
+                    return buttons.join(', ');
+                }
+                return null;
+            }).catch(() => null);
+
+            if (closedMsg !== null) {
+                console.log(`[DoorDash] Restaurant is closed — modal buttons: ${closedMsg}`);
+                await page.keyboard.press('Escape').catch(() => {});
+                stopDebugScreenshots();
+                return { success: false, error: 'RESTAURANT_CLOSED', message: 'This restaurant is currently closed and not accepting orders.' };
+            }
+
             // Clear any pre-selected options from previous orders
             // DoorDash remembers your last customizations - we want fresh options
             await clearPreSelectedOptions();
@@ -4961,7 +4981,8 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             }
 
             stopDebugScreenshots();
-            return { success: true, message: 'Attempted to add item' };
+            // Modal is still open and we couldn't add — return failure
+            return { success: false, error: 'ITEM_NOT_ADDED', message: 'Could not add item to cart. The item may be unavailable or require options we could not detect.' };
         } else {
             // No modal opened. Verify the cart actually has items (the click may have been
             // absorbed by a CF Turnstile overlay which intercepts all pointer events).

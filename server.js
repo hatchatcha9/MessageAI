@@ -957,6 +957,8 @@ async function processCommands(response, user, phoneNumber) {
                             actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
                         } else if (addResult.browserNotOpen) {
                             additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
+                        } else if (addResult.error === 'RESTAURANT_CLOSED') {
+                            additionalContext = `\n\n⚠️ ${addResult.message} You can search for another restaurant that's open now.`;
                         } else {
                             additionalContext = `\n\nCouldn't add ${item.name}. Please try again.`;
                         }
