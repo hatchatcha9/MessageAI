@@ -5276,11 +5276,14 @@ async function extractRequiredOptions() {
                             if (heading) groupName = heading.textContent?.trim()?.split('\n')[0] || '';
                         }
                     }
-                    if (!groupName) groupName = 'Choose an option';
+                    if (!groupName) continue; // skip groups with no detectable name
                     // Trim noise from name
                     groupName = groupName.split(/required|select|choose|pick|\d+\s*cal/i)[0].trim();
                     if (groupName.length > 40) groupName = groupName.substring(0, 40);
                     if (!groupName) continue;
+                    // Skip UI elements that aren't option groups (e.g. "4 photos", "See more")
+                    if (/^\d+\s+(photo|image|pic|review)/i.test(groupName)) continue;
+                    if (/^see\s+more/i.test(groupName)) continue;
                     if (seen.has(groupName.toLowerCase())) continue;
 
                     // Extract options: radios, checkboxes, list items inside this group
@@ -5718,41 +5721,34 @@ async function autoSelectAllRequiredOptions() {
         // Click each unselected option using native Playwright clicks
         for (const opt of unselectedOptions) {
             // If element needs scrolling, scroll it into view first
-            if (opt.needsScroll) {
-                console.log(`[DoorDash] Scrolling to option: "${opt.text}"`);
-                await page.evaluate((optText) => {
-                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                    if (!modal) return;
-
-                    const radios = modal.querySelectorAll('[role="radio"]');
-                    for (const radio of radios) {
-                        if (radio.textContent?.includes(optText.substring(0, 20))) {
-                            radio.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            break;
-                        }
+            // Always scroll element into view and re-fetch coordinates
+            // (Y coords from initial scan may be outside 720px viewport)
+            console.log(`[DoorDash] Scrolling to option: "${opt.text}"`);
+            const newCoords = await page.evaluate((optText) => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                if (!modal) return null;
+                // Try [role="radio"] first, then label
+                const candidates = [
+                    ...modal.querySelectorAll('[role="radio"]'),
+                    ...modal.querySelectorAll('label')
+                ];
+                for (const el of candidates) {
+                    if ((el.textContent || '').trim().toLowerCase().startsWith(optText.toLowerCase().substring(0, 10))) {
+                        el.scrollIntoView({ block: 'center' });
+                        const rect = el.getBoundingClientRect();
+                        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
                     }
-                }, opt.text);
-                await delay(500);
-
-                // Re-get coordinates after scroll
-                const newCoords = await page.evaluate((optText) => {
-                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                    if (!modal) return null;
-
-                    const radios = modal.querySelectorAll('[role="radio"]');
-                    for (const radio of radios) {
-                        if (radio.textContent?.includes(optText.substring(0, 20))) {
-                            const rect = radio.getBoundingClientRect();
-                            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-                        }
-                    }
-                    return null;
-                }, opt.text);
-
-                if (newCoords) {
-                    opt.x = newCoords.x;
-                    opt.y = newCoords.y;
                 }
+                return null;
+            }, opt.text);
+            await delay(400);
+            if (newCoords && newCoords.y > 0 && newCoords.y < 720) {
+                opt.x = newCoords.x;
+                opt.y = newCoords.y;
+            } else if (newCoords) {
+                console.log(`[DoorDash] Scroll re-fetch still outside viewport: y=${newCoords.y}`);
+                opt.x = newCoords.x;
+                opt.y = newCoords.y;
             }
 
             console.log(`[DoorDash] Auto-clicking: "${opt.text}" at (${opt.x}, ${opt.y})`);
@@ -5821,7 +5817,7 @@ async function applyOptionSelections(selections) {
 
             // Get click target coordinates from evaluate — find label by text or index,
             // then try the label AND its associated input. Return all candidate coords.
-            const targets = await page.evaluate((groupIdx, optText, optIdx) => {
+            const targets = await page.evaluate(({ groupIdx, optText, optIdx }) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return [];
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -5891,7 +5887,7 @@ async function applyOptionSelections(selections) {
                 }
 
                 return results;
-            }, sel.groupIndex, sel.optionText || null, sel.optionIndex || 0);
+            }, { groupIdx: sel.groupIndex, optText: sel.optionText || null, optIdx: sel.optionIndex || 0 });
 
             console.log(`[DoorDash] Click targets:`, JSON.stringify(targets.map(t => ({ type: t.type, x: Math.round(t.x), y: Math.round(t.y), pe: t.pointerEvents }))));
 
