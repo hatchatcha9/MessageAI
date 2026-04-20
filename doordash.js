@@ -5216,9 +5216,29 @@ async function extractRequiredOptions() {
 
         await takeScreenshot('options-extracted');
 
-        // If structured approach found nothing, dump modal HTML for debugging and try broader extraction
-        if (optionGroups.length === 0) {
-            console.log('[DoorDash] Structured extraction found 0 groups — dumping modal HTML and trying broad extraction...');
+        // Check add button to see how many required selections are needed
+        const requiredCount = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return 0;
+            for (const btn of modal.querySelectorAll('button')) {
+                const t = btn.textContent?.trim() || '';
+                const m = t.match(/make\s+(\d+)\s+required/i);
+                if (m) return parseInt(m[1], 10);
+            }
+            return 0;
+        }).catch(() => 0);
+
+        if (requiredCount > 0) {
+            console.log(`[DoorDash] Add button says ${requiredCount} required selections needed, structured found ${optionGroups.length}`);
+        }
+
+        // If structured approach found fewer groups than required (or none), use broad extraction
+        if (optionGroups.length === 0 || (requiredCount > 0 && optionGroups.length < requiredCount)) {
+            if (optionGroups.length === 0) {
+                console.log('[DoorDash] Structured extraction found 0 groups — dumping modal HTML and trying broad extraction...');
+            } else {
+                console.log(`[DoorDash] Structured found ${optionGroups.length} but need ${requiredCount} — using broad extraction...`);
+            }
 
             // Dump modal HTML to file for inspection
             const modalHtml = await page.evaluate(() => {
@@ -5590,46 +5610,48 @@ async function autoSelectAllRequiredOptions() {
             const radios = Array.from(modal.querySelectorAll('[role="radio"]'));
             console.log('[AutoSelect] Found', radios.length, 'radio buttons in modal');
 
-            if (radios.length === 0) return [];
-
-            // Group radios by finding their radiogroup parent or by proximity
-            // DoorDash uses [role="radiogroup"] for option groups
-            const radioGroups = modal.querySelectorAll('[role="radiogroup"]');
-            console.log('[AutoSelect] Found', radioGroups.length, 'radiogroups');
+            // Group radios by finding their radiogroup/group parent or by proximity
+            // DoorDash uses [role="radiogroup"] OR [role="group"] for option groups
+            const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+            console.log('[AutoSelect] Found', radioGroups.length, 'radiogroups/groups');
 
             if (radioGroups.length > 0) {
-                // Use radiogroups for grouping
+                // Use groups for grouping — check for [role="radio"] OR label children
                 for (const group of radioGroups) {
-                    const groupRadios = group.querySelectorAll('[role="radio"]');
-                    let hasSelection = false;
-                    let firstUnselected = null;
+                    const fullText = group.textContent?.toLowerCase() || '';
+                    if (fullText.includes('optional')) continue;
 
-                    for (const radio of groupRadios) {
-                        const isChecked = radio.getAttribute('aria-checked') === 'true';
-                        if (isChecked) {
-                            hasSelection = true;
-                            break;
-                        }
-                        if (!firstUnselected) {
-                            firstUnselected = radio;
-                        }
-                    }
+                    // Check if already selected via aria-checked, input.checked, or label[for]→input.checked
+                    const isSelected = group.querySelector('[aria-checked="true"]') !== null ||
+                        group.querySelector('input:checked') !== null ||
+                        Array.from(group.querySelectorAll('label[for]')).some(l => {
+                            const inp = document.getElementById(l.htmlFor);
+                            return inp && inp.checked;
+                        });
+                    if (isSelected) continue;
 
-                    if (!hasSelection && firstUnselected) {
-                        const rect = firstUnselected.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            const text = firstUnselected.textContent?.trim()?.substring(0, 50) || 'unknown';
-                            console.log('[AutoSelect] Will click (radiogroup):', text);
-                            options.push({
-                                x: rect.left + rect.width / 2,
-                                y: rect.top + rect.height / 2,
-                                text: text,
-                                needsScroll: rect.top < 0 || rect.top > window.innerHeight
-                            });
-                        }
+                    // Try to click the first label or [role="radio"] in this group
+                    const firstLabel = group.querySelector('label');
+                    const firstRadio = group.querySelector('[role="radio"]');
+                    const target = firstLabel || firstRadio;
+                    if (!target) continue;
+
+                    const rect = target.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0) {
+                        const text = target.textContent?.trim()?.substring(0, 50) || 'unknown';
+                        console.log('[AutoSelect] Will click (group):', text);
+                        options.push({
+                            x: rect.left + rect.width / 2,
+                            y: rect.top + rect.height / 2,
+                            text: text,
+                            needsScroll: rect.top < 0 || rect.top > window.innerHeight
+                        });
                     }
                 }
-            } else {
+            }
+
+            // Also check for [role="radio"] not inside a group (fallback)
+            if (options.length === 0 && radios.length > 0) {
                 // Fallback: group by vertical position (radios close together are in same group)
                 // Sort radios by vertical position
                 radios.sort((a, b) => {
