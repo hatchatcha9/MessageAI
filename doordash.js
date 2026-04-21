@@ -5260,9 +5260,11 @@ async function extractRequiredOptions() {
                 // Strategy A: Find [role="radiogroup"] elements — the most reliable indicator
                 const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 for (const rg of radioGroups) {
-                    const fullText = rg.textContent?.toLowerCase() || '';
-                    // Skip if it looks optional
-                    if (fullText.includes('optional')) continue;
+                    // Only check header text for "optional", not full descendant text
+                    const labelId = rg.getAttribute('aria-labelledby');
+                    const labelEl = labelId ? document.getElementById(labelId) : null;
+                    const rgHeaderText = (labelEl?.textContent || rg.querySelector('h1,h2,h3,h4,legend')?.textContent || '').toLowerCase();
+                    if (rgHeaderText.includes('optional')) continue;
 
                     // Find the group's label/name (sibling or nearby heading)
                     let groupName = '';
@@ -5622,8 +5624,17 @@ async function autoSelectAllRequiredOptions() {
                 // Use groups for grouping — check for [role="radio"] OR label children
                 for (let gIdx = 0; gIdx < radioGroups.length; gIdx++) {
                     const group = radioGroups[gIdx];
-                    const fullText = group.textContent?.toLowerCase() || '';
-                    if (fullText.includes('optional')) continue;
+
+                    // Only check the group HEADER text for "optional" — not the full text.
+                    // Full textContent includes descendant option labels (e.g. "optional add-ons")
+                    // which would incorrectly skip required groups.
+                    const labelId = group.getAttribute('aria-labelledby');
+                    const labelEl = labelId ? document.getElementById(labelId) : null;
+                    const headerText = (labelEl?.textContent || group.querySelector('h1,h2,h3,h4,legend')?.textContent || '').toLowerCase();
+                    if (headerText.includes('optional')) {
+                        console.log(`[AutoSelect] Skipping group ${gIdx} — header says optional: "${headerText.substring(0,50)}"`);
+                        continue;
+                    }
 
                     // Check if already selected via aria-checked, input.checked, or label[for]→input.checked
                     const isSelected = group.querySelector('[aria-checked="true"]') !== null ||
@@ -5632,13 +5643,19 @@ async function autoSelectAllRequiredOptions() {
                             const inp = document.getElementById(l.htmlFor);
                             return inp && inp.checked;
                         });
-                    if (isSelected) continue;
+                    if (isSelected) {
+                        console.log(`[AutoSelect] Skipping group ${gIdx} — already selected`);
+                        continue;
+                    }
 
                     // Try to click the first label or [role="radio"] in this group
                     const firstLabel = group.querySelector('label');
                     const firstRadio = group.querySelector('[role="radio"]');
                     const target = firstLabel || firstRadio;
-                    if (!target) continue;
+                    if (!target) {
+                        console.log(`[AutoSelect] Skipping group ${gIdx} — no label or radio found`);
+                        continue;
+                    }
 
                     const rect = target.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0) {
@@ -5651,6 +5668,8 @@ async function autoSelectAllRequiredOptions() {
                             groupIndex: gIdx,
                             needsScroll: rect.top < 0 || rect.top > window.innerHeight
                         });
+                    } else {
+                        console.log(`[AutoSelect] Skipping group ${gIdx} — target has zero size (rect=${JSON.stringify({w:Math.round(rect.width),h:Math.round(rect.height)})})`);
                     }
                 }
             }
