@@ -5623,6 +5623,27 @@ async function autoSelectAllRequiredOptions() {
         let remaining = await getCount();
         console.log(`[DoorDash] AutoSelect: ${remaining} required selections, ${numGroups} groups in modal`);
 
+        // Diagnostic: log structure of each group
+        const groupDiag = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return [];
+            return Array.from(modal.querySelectorAll('[role="radiogroup"], [role="group"]')).map((g, i) => {
+                const labelId = g.getAttribute('aria-labelledby');
+                const labelEl = labelId ? document.getElementById(labelId) : null;
+                const heading = g.querySelector('h1,h2,h3,h4,legend');
+                const name = (labelEl?.textContent || heading?.textContent || g.getAttribute('aria-label') || '').trim().substring(0, 40);
+                return {
+                    i,
+                    role: g.getAttribute('role'),
+                    name,
+                    labels: g.querySelectorAll('label').length,
+                    roleRadios: g.querySelectorAll('[role="radio"]').length,
+                    inputs: g.querySelectorAll('input[type="radio"],input[type="checkbox"]').length
+                };
+            });
+        }).catch(() => []);
+        groupDiag.forEach(g => console.log(`[DoorDash] Group[${g.i}] role=${g.role} name="${g.name}" labels=${g.labels} roleRadios=${g.roleRadios} inputs=${g.inputs}`));
+
         if (remaining === 0) {
             console.log('[DoorDash] No required selections needed');
             await takeScreenshot('after-auto-select-all');
@@ -5641,10 +5662,11 @@ async function autoSelectAllRequiredOptions() {
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 const grp = groups[idx];
                 if (!grp) return null;
-                // Try label first, then [role="radio"]
+                // Try label, then [role="radio"], then any input
                 const label = grp.querySelector('label');
                 const radio = grp.querySelector('[role="radio"]');
-                const target = label || radio;
+                const input = grp.querySelector('input[type="radio"],input[type="checkbox"]');
+                const target = label || radio || input;
                 if (!target) return null;
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 const rect = target.getBoundingClientRect();
@@ -5656,12 +5678,16 @@ async function autoSelectAllRequiredOptions() {
             console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text}"`);
             await delay(200);
 
-            // Try Playwright locator click first (label or [role="radio"])
+            // Try Playwright locator click: label first, then [role="radio"], then input
             let clickOk = false;
             try {
                 const labelLoc = group.locator('label').first();
                 const radioLoc = group.locator('[role="radio"]').first();
-                const target = (await labelLoc.count() > 0) ? labelLoc : ((await radioLoc.count() > 0) ? radioLoc : null);
+                const inputLoc = group.locator('input[type="radio"],input[type="checkbox"]').first();
+                let target = null;
+                if (await labelLoc.count() > 0) target = labelLoc;
+                else if (await radioLoc.count() > 0) target = radioLoc;
+                else if (await inputLoc.count() > 0) target = inputLoc;
                 if (target) {
                     await target.scrollIntoViewIfNeeded({ timeout: 2000 });
                     await delay(200);
@@ -5829,6 +5855,39 @@ async function applyOptionSelections(selections) {
                         console.log(`[DoorDash] Coordinate click registered! (${beforeCount} → ${afterCount} required)`);
                         clicked = true;
                     }
+                }
+            }
+
+            // Strategy 2b: click [role="radio"] ARIA element (DoorDash uses these instead of <input type="radio">)
+            if (!clicked) {
+                try {
+                    const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+                    const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(sel.groupIndex);
+                    const radioEls = group.locator('[role="radio"]');
+                    const radioCount = await radioEls.count();
+                    if (radioCount > 0) {
+                        let target;
+                        if (optText) {
+                            const byText = group.locator('[role="radio"]').filter({ hasText: new RegExp(optText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+                            target = (await byText.count() > 0) ? byText : radioEls.nth(Math.min(optIdx, radioCount - 1));
+                        } else {
+                            target = radioEls.nth(Math.min(optIdx, radioCount - 1));
+                        }
+                        console.log(`[DoorDash] Strategy 2b: click [role="radio"] (${radioCount} found)`);
+                        await target.scrollIntoViewIfNeeded({ timeout: 2000 });
+                        await delay(200);
+                        await target.click({ timeout: 4000 });
+                        await delay(600);
+                        const afterCount = await getRequiredCount();
+                        if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                            console.log(`[DoorDash] Strategy 2b registered! (${beforeCount} → ${afterCount})`);
+                            clicked = true;
+                        } else {
+                            console.log(`[DoorDash] Strategy 2b no change (${afterCount} required)`);
+                        }
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Strategy 2b error:`, e.message.substring(0, 100));
                 }
             }
 
