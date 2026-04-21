@@ -5243,7 +5243,7 @@ async function extractRequiredOptions() {
             // Dump modal HTML to file for inspection
             const modalHtml = await page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                return modal ? modal.innerHTML.substring(0, 30000) : 'NO MODAL FOUND';
+                return modal ? modal.innerHTML : 'NO MODAL FOUND';
             });
             const htmlPath = path.join(BROWSER_DATA_DIR, 'modal-debug.html');
             fs.writeFileSync(htmlPath, modalHtml);
@@ -5620,7 +5620,8 @@ async function autoSelectAllRequiredOptions() {
 
             if (radioGroups.length > 0) {
                 // Use groups for grouping — check for [role="radio"] OR label children
-                for (const group of radioGroups) {
+                for (let gIdx = 0; gIdx < radioGroups.length; gIdx++) {
+                    const group = radioGroups[gIdx];
                     const fullText = group.textContent?.toLowerCase() || '';
                     if (fullText.includes('optional')) continue;
 
@@ -5647,6 +5648,7 @@ async function autoSelectAllRequiredOptions() {
                             x: rect.left + rect.width / 2,
                             y: rect.top + rect.height / 2,
                             text: text,
+                            groupIndex: gIdx,
                             needsScroll: rect.top < 0 || rect.top > window.innerHeight
                         });
                     }
@@ -5718,42 +5720,53 @@ async function autoSelectAllRequiredOptions() {
 
         console.log(`[DoorDash] Found ${unselectedOptions.length} unselected options to auto-select`);
 
-        // Click each unselected option using native Playwright clicks
+        const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+
+        // Click each unselected option using Playwright locator (handles scroll + real pointer events)
         for (const opt of unselectedOptions) {
-            // If element needs scrolling, scroll it into view first
-            // Always scroll element into view and re-fetch coordinates
-            // (Y coords from initial scan may be outside 720px viewport)
-            console.log(`[DoorDash] Scrolling to option: "${opt.text}"`);
-            const newCoords = await page.evaluate((optText) => {
-                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                if (!modal) return null;
-                // Try [role="radio"] first, then label
-                const candidates = [
-                    ...modal.querySelectorAll('[role="radio"]'),
-                    ...modal.querySelectorAll('label')
-                ];
-                for (const el of candidates) {
-                    if ((el.textContent || '').trim().toLowerCase().startsWith(optText.toLowerCase().substring(0, 10))) {
-                        el.scrollIntoView({ block: 'center' });
-                        const rect = el.getBoundingClientRect();
-                        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-                    }
+            console.log(`[DoorDash] Auto-clicking: "${opt.text}" in group ${opt.groupIndex}`);
+            let clicked = false;
+
+            // Strategy: Playwright locator click on the first label of the group
+            // This is the same reliable approach used in applyOptionSelections Strategy 1
+            try {
+                const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(opt.groupIndex);
+                const label = group.locator('label').first();
+                const count = await label.count();
+                if (count > 0) {
+                    await label.scrollIntoViewIfNeeded({ timeout: 3000 });
+                    await delay(300);
+                    await label.click({ timeout: 5000 });
+                    clicked = true;
+                    console.log(`[DoorDash] Auto-click locator succeeded for group ${opt.groupIndex}`);
                 }
-                return null;
-            }, opt.text);
-            await delay(400);
-            if (newCoords && newCoords.y > 0 && newCoords.y < 720) {
-                opt.x = newCoords.x;
-                opt.y = newCoords.y;
-            } else if (newCoords) {
-                console.log(`[DoorDash] Scroll re-fetch still outside viewport: y=${newCoords.y}`);
-                opt.x = newCoords.x;
-                opt.y = newCoords.y;
+            } catch (e) {
+                console.log(`[DoorDash] Auto-click locator error for group ${opt.groupIndex}:`, e.message.substring(0, 150));
             }
 
-            console.log(`[DoorDash] Auto-clicking: "${opt.text}" at (${opt.x}, ${opt.y})`);
-            await page.mouse.click(opt.x, opt.y);
-            await delay(400);
+            // Fallback: coordinate click
+            if (!clicked) {
+                const newCoords = await page.evaluate((optText) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return null;
+                    const labels = modal.querySelectorAll('label');
+                    for (const el of labels) {
+                        if ((el.textContent || '').trim().toLowerCase().startsWith(optText.toLowerCase().substring(0, 10))) {
+                            el.scrollIntoView({ block: 'center' });
+                            const rect = el.getBoundingClientRect();
+                            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+                        }
+                    }
+                    return null;
+                }, opt.text);
+                await delay(400);
+                if (newCoords) {
+                    console.log(`[DoorDash] Auto-click fallback coords: (${Math.round(newCoords.x)}, ${Math.round(newCoords.y)})`);
+                    await page.mouse.click(newCoords.x, newCoords.y);
+                }
+            }
+
+            await delay(500);
         }
 
         await takeScreenshot('after-auto-select-all');
@@ -5800,6 +5813,20 @@ async function applyOptionSelections(selections) {
         });
         console.log('[DEBUG] Modal structure:', debugHtml);
 
+        // Helper: parse "Make N required selections" count from add button text
+        // Returns 0 when button says "Add to Order" (all required filled)
+        const getRequiredCount = async () => {
+            return page.evaluate(() => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                if (!modal) return 0;
+                for (const btn of modal.querySelectorAll('button')) {
+                    const m = (btn.textContent || '').match(/make\s+(\d+)\s+required/i);
+                    if (m) return parseInt(m[1]);
+                }
+                return 0;
+            });
+        };
+
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}"`);
 
@@ -5815,115 +5842,106 @@ async function applyOptionSelections(selections) {
                 continue;
             }
 
-            // Get click target coordinates from evaluate — find label by text or index,
-            // then try the label AND its associated input. Return all candidate coords.
-            const targets = await page.evaluate(({ groupIdx, optText, optIdx }) => {
-                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                if (!modal) return [];
-                const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
-                const group = groups[groupIdx];
-                if (!group) return [];
+            const beforeCount = await getRequiredCount();
+            console.log(`[DoorDash] Required selections before click: ${beforeCount}`);
 
-                const labels = Array.from(group.querySelectorAll('label'));
-                const lower = (optText || '').toLowerCase();
-
-                let targetLabel = null;
-                if (optText) {
-                    targetLabel = labels.find(l => {
-                        const t = (l.textContent || '').trim().toLowerCase();
-                        return t === lower || t.startsWith(lower);
-                    });
-                }
-                if (!targetLabel && labels.length > 0) {
-                    targetLabel = labels[Math.min(optIdx, labels.length - 1)];
-                }
-                if (!targetLabel) return [];
-
-                const results = [];
-
-                // Candidate 1: the label element itself
-                const labelRect = targetLabel.getBoundingClientRect();
-                if (labelRect.width > 0 && labelRect.height > 0) {
-                    const labelStyle = window.getComputedStyle(targetLabel);
-                    results.push({
-                        x: labelRect.left + labelRect.width / 2,
-                        y: labelRect.top + labelRect.height / 2,
-                        type: 'label',
-                        text: (targetLabel.textContent || '').trim().substring(0, 40),
-                        pointerEvents: labelStyle.pointerEvents
-                    });
-                }
-
-                // Candidate 2: associated input (if label has for= attribute)
-                if (targetLabel.htmlFor) {
-                    const input = document.getElementById(targetLabel.htmlFor);
-                    if (input) {
-                        const inputRect = input.getBoundingClientRect();
-                        const inputStyle = window.getComputedStyle(input);
-                        results.push({
-                            x: inputRect.left + inputRect.width / 2,
-                            y: inputRect.top + inputRect.height / 2,
-                            type: 'input',
-                            inputId: targetLabel.htmlFor,
-                            visible: inputRect.width > 0 && inputRect.height > 0,
-                            pointerEvents: inputStyle.pointerEvents
-                        });
-                    }
-                }
-
-                // Candidate 3: first clickable child div/span inside the label
-                for (const child of targetLabel.querySelectorAll('div, span')) {
-                    const rect = child.getBoundingClientRect();
-                    const style = window.getComputedStyle(child);
-                    if (rect.width > 10 && rect.height > 10 && style.pointerEvents !== 'none') {
-                        results.push({
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                            type: 'child-' + child.tagName,
-                            pointerEvents: style.pointerEvents
-                        });
-                        break;
-                    }
-                }
-
-                return results;
-            }, { groupIdx: sel.groupIndex, optText: sel.optionText || null, optIdx: sel.optionIndex || 0 });
-
-            console.log(`[DoorDash] Click targets:`, JSON.stringify(targets.map(t => ({ type: t.type, x: Math.round(t.x), y: Math.round(t.y), pe: t.pointerEvents }))));
-
-            // Helper: check if the button still requires selection
-            const btnStillRequired = async () => {
-                return page.evaluate(() => {
-                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                    if (!modal) return false;
-                    for (const btn of modal.querySelectorAll('button')) {
-                        if ((btn.textContent || '').toLowerCase().includes('required')) return true;
-                    }
-                    return false;
-                });
-            };
-
+            const optText = sel.optionText || null;
+            const optIdx = sel.optionIndex || 0;
             let clicked = false;
-            for (const target of targets) {
-                if (!target.x || !target.y || isNaN(target.x) || isNaN(target.y)) continue;
 
-                console.log(`[DoorDash] Trying ${target.type} click at (${Math.round(target.x)}, ${Math.round(target.y)}), pointerEvents=${target.pointerEvents}`);
-                await page.mouse.click(target.x, target.y).catch(e => console.log('[DoorDash] mouse.click error:', e.message));
-                await delay(500);
-
-                const stillRequired = await btnStillRequired();
-                if (!stillRequired) {
-                    console.log(`[DoorDash] Selection registered via ${target.type}!`);
-                    clicked = true;
-                    break;
+            // Strategy 1: Playwright locator click on label scoped to the correct group
+            // This uses Playwright's built-in scroll + real pointer events
+            try {
+                const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+                const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(sel.groupIndex);
+                let label;
+                if (optText) {
+                    label = group.locator('label').filter({ hasText: new RegExp('^' + optText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+                } else {
+                    label = group.locator('label').nth(optIdx);
                 }
-                console.log(`[DoorDash] ${target.type} click did not register — trying next candidate`);
+                const labelCount = await label.count();
+                if (labelCount > 0) {
+                    console.log(`[DoorDash] Strategy 1: Playwright locator click on label`);
+                    await label.scrollIntoViewIfNeeded({ timeout: 3000 });
+                    await delay(300);
+                    await label.click({ timeout: 5000 });
+                    await delay(600);
+                    const afterCount = await getRequiredCount();
+                    if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                        console.log(`[DoorDash] Locator click registered! (${beforeCount} → ${afterCount} required)`);
+                        clicked = true;
+                    } else {
+                        console.log(`[DoorDash] Locator click did not register (still ${afterCount} required)`);
+                    }
+                }
+            } catch (e) {
+                console.log(`[DoorDash] Strategy 1 error:`, e.message.substring(0, 200));
             }
 
-            if (!clicked && targets.length === 0) {
-                console.log(`[DoorDash] No click targets found for group ${sel.groupIndex}`);
-            } else if (!clicked) {
-                console.log(`[DoorDash] All click candidates failed — selection may not have registered`);
+            // Strategy 2: coordinate click after scrollIntoView — logs elementFromPoint for overlay diagnosis
+            if (!clicked) {
+                const coords = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return null;
+                    const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                    const group = groups[groupIdx];
+                    if (!group) return null;
+                    const labels = Array.from(group.querySelectorAll('label'));
+                    const lower = (optText || '').toLowerCase();
+                    let targetLabel = optText ? labels.find(l => (l.textContent || '').trim().toLowerCase().startsWith(lower)) : null;
+                    if (!targetLabel) targetLabel = labels[Math.min(optIdx, labels.length - 1)];
+                    if (!targetLabel) return null;
+                    targetLabel.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    const rect = targetLabel.getBoundingClientRect();
+                    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+                    const el = document.elementFromPoint(cx, cy);
+                    return { x: cx, y: cy, tag: el?.tagName, cls: (el?.className || '').substring(0, 80) };
+                }, { groupIdx: sel.groupIndex, optText, optIdx });
+                if (coords) {
+                    console.log(`[DoorDash] Strategy 2: mouse.click at (${Math.round(coords.x)}, ${Math.round(coords.y)}), elementAtPoint=${coords.tag}.${coords.cls}`);
+                    await delay(200);
+                    await page.mouse.click(coords.x, coords.y);
+                    await delay(600);
+                    const afterCount = await getRequiredCount();
+                    if (afterCount < beforeCount) {
+                        console.log(`[DoorDash] Coordinate click registered! (${beforeCount} → ${afterCount} required)`);
+                        clicked = true;
+                    }
+                }
+            }
+
+            // Strategy 3: force-click on radio input scoped to the modal group
+            if (!clicked) {
+                try {
+                    const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+                    const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(sel.groupIndex);
+                    const radio = group.locator('input[type="radio"]').nth(optIdx);
+                    console.log(`[DoorDash] Strategy 3: force-click radio input`);
+                    await radio.click({ force: true, timeout: 3000 });
+                    await delay(600);
+                    const afterCount = await getRequiredCount();
+                    if (afterCount < beforeCount) {
+                        console.log(`[DoorDash] Force-click registered! (${beforeCount} → ${afterCount} required)`);
+                        clicked = true;
+                    } else {
+                        console.log(`[DoorDash] Force-click did not register, trying Space key`);
+                        await radio.focus({ timeout: 2000 }).catch(() => {});
+                        await page.keyboard.press('Space');
+                        await delay(600);
+                        const afterCount2 = await getRequiredCount();
+                        if (afterCount2 < beforeCount) {
+                            console.log(`[DoorDash] Space key registered!`);
+                            clicked = true;
+                        }
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Strategy 3 error:`, e.message.substring(0, 200));
+                }
+            }
+
+            if (!clicked) {
+                console.log(`[DoorDash] All strategies failed for "${optText}" in group ${sel.groupIndex}`);
             }
 
             await delay(400);
