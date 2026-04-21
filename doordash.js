@@ -5317,7 +5317,8 @@ async function extractRequiredOptions() {
                 }
 
                 // Strategy B: Look for divs that contain "Required" text (looser than before)
-                if (groups.length === 0) {
+                // Also runs when Strategy A found fewer groups than the button indicates are required
+                if (groups.length === 0 || groups.length < requiredCount) {
                     const allDivs = modal.querySelectorAll('div, section, fieldset');
                     for (const div of allDivs) {
                         const ownText = Array.from(div.childNodes)
@@ -5605,38 +5606,30 @@ async function autoSelectAllRequiredOptions() {
         await delay(300);
 
         // Find unselected radio buttons and get their coordinates
-        const unselectedOptions = await page.evaluate(() => {
+        const { options: unselectedOptions, diagnostics: autoSelectDiag } = await page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            if (!modal) return [];
+            if (!modal) return { options: [], diagnostics: 'no modal' };
 
             const options = [];
+            const diag = [];
 
-            // Find all radio buttons in the modal
             const radios = Array.from(modal.querySelectorAll('[role="radio"]'));
-            console.log('[AutoSelect] Found', radios.length, 'radio buttons in modal');
-
-            // Group radios by finding their radiogroup/group parent or by proximity
-            // DoorDash uses [role="radiogroup"] OR [role="group"] for option groups
             const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
-            console.log('[AutoSelect] Found', radioGroups.length, 'radiogroups/groups');
+            diag.push(`radios=${radios.length} groups=${radioGroups.length}`);
 
             if (radioGroups.length > 0) {
-                // Use groups for grouping — check for [role="radio"] OR label children
                 for (let gIdx = 0; gIdx < radioGroups.length; gIdx++) {
                     const group = radioGroups[gIdx];
 
-                    // Only check the group HEADER text for "optional" — not the full text.
-                    // Full textContent includes descendant option labels (e.g. "optional add-ons")
-                    // which would incorrectly skip required groups.
+                    // Only check header text for "optional" — not full descendant text
                     const labelId = group.getAttribute('aria-labelledby');
                     const labelEl = labelId ? document.getElementById(labelId) : null;
                     const headerText = (labelEl?.textContent || group.querySelector('h1,h2,h3,h4,legend')?.textContent || '').toLowerCase();
                     if (headerText.includes('optional')) {
-                        console.log(`[AutoSelect] Skipping group ${gIdx} — header says optional: "${headerText.substring(0,50)}"`);
+                        diag.push(`skip[${gIdx}]=optional-header:"${headerText.substring(0,30)}"`);
                         continue;
                     }
 
-                    // Check if already selected via aria-checked, input.checked, or label[for]→input.checked
                     const isSelected = group.querySelector('[aria-checked="true"]') !== null ||
                         group.querySelector('input:checked') !== null ||
                         Array.from(group.querySelectorAll('label[for]')).some(l => {
@@ -5644,23 +5637,22 @@ async function autoSelectAllRequiredOptions() {
                             return inp && inp.checked;
                         });
                     if (isSelected) {
-                        console.log(`[AutoSelect] Skipping group ${gIdx} — already selected`);
+                        diag.push(`skip[${gIdx}]=already-selected`);
                         continue;
                     }
 
-                    // Try to click the first label or [role="radio"] in this group
                     const firstLabel = group.querySelector('label');
                     const firstRadio = group.querySelector('[role="radio"]');
                     const target = firstLabel || firstRadio;
                     if (!target) {
-                        console.log(`[AutoSelect] Skipping group ${gIdx} — no label or radio found`);
+                        diag.push(`skip[${gIdx}]=no-label-or-radio`);
                         continue;
                     }
 
                     const rect = target.getBoundingClientRect();
                     if (rect.width > 0 && rect.height > 0) {
                         const text = target.textContent?.trim()?.substring(0, 50) || 'unknown';
-                        console.log('[AutoSelect] Will click (group):', text);
+                        diag.push(`queue[${gIdx}]="${text.substring(0,30)}"`);
                         options.push({
                             x: rect.left + rect.width / 2,
                             y: rect.top + rect.height / 2,
@@ -5669,72 +5661,43 @@ async function autoSelectAllRequiredOptions() {
                             needsScroll: rect.top < 0 || rect.top > window.innerHeight
                         });
                     } else {
-                        console.log(`[AutoSelect] Skipping group ${gIdx} — target has zero size (rect=${JSON.stringify({w:Math.round(rect.width),h:Math.round(rect.height)})})`);
+                        diag.push(`skip[${gIdx}]=zero-size`);
                     }
                 }
             }
 
-            // Also check for [role="radio"] not inside a group (fallback)
+            // Fallback: group by vertical position when no role-based groups found
             if (options.length === 0 && radios.length > 0) {
-                // Fallback: group by vertical position (radios close together are in same group)
-                // Sort radios by vertical position
-                radios.sort((a, b) => {
-                    const rectA = a.getBoundingClientRect();
-                    const rectB = b.getBoundingClientRect();
-                    return rectA.top - rectB.top;
-                });
-
-                // Group radios that are within 150px vertically of each other
-                const groups = [];
+                radios.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+                const posGroups = [];
                 let currentGroup = [];
                 let lastTop = -1000;
-
                 for (const radio of radios) {
                     const rect = radio.getBoundingClientRect();
-                    if (rect.top - lastTop > 150 && currentGroup.length > 0) {
-                        groups.push(currentGroup);
-                        currentGroup = [];
-                    }
+                    if (rect.top - lastTop > 150 && currentGroup.length > 0) { posGroups.push(currentGroup); currentGroup = []; }
                     currentGroup.push(radio);
                     lastTop = rect.top;
                 }
-                if (currentGroup.length > 0) groups.push(currentGroup);
-
-                console.log('[AutoSelect] Grouped into', groups.length, 'groups by position');
-
-                // For each group, check if it has a selection
-                for (const group of groups) {
+                if (currentGroup.length > 0) posGroups.push(currentGroup);
+                diag.push(`fallback-pos-groups=${posGroups.length}`);
+                for (const grp of posGroups) {
                     let hasSelection = false;
                     let firstUnselected = null;
-
-                    for (const radio of group) {
-                        const isChecked = radio.getAttribute('aria-checked') === 'true';
-                        if (isChecked) {
-                            hasSelection = true;
-                            break;
-                        }
-                        if (!firstUnselected) {
-                            firstUnselected = radio;
-                        }
+                    for (const radio of grp) {
+                        if (radio.getAttribute('aria-checked') === 'true') { hasSelection = true; break; }
+                        if (!firstUnselected) firstUnselected = radio;
                     }
-
                     if (!hasSelection && firstUnselected) {
                         const rect = firstUnselected.getBoundingClientRect();
                         if (rect.width > 0 && rect.height > 0) {
                             const text = firstUnselected.textContent?.trim()?.substring(0, 50) || 'unknown';
-                            console.log('[AutoSelect] Will click (position group):', text);
-                            options.push({
-                                x: rect.left + rect.width / 2,
-                                y: rect.top + rect.height / 2,
-                                text: text,
-                                needsScroll: rect.top < 0 || rect.top > window.innerHeight
-                            });
+                            options.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text, needsScroll: rect.top < 0 || rect.top > window.innerHeight });
                         }
                     }
                 }
             }
 
-            return options;
+            return { options, diagnostics: diag.join(' | ') };
         });
 
         console.log(`[DoorDash] Found ${unselectedOptions.length} unselected options to auto-select`);
