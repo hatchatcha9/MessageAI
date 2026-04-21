@@ -5250,7 +5250,7 @@ async function extractRequiredOptions() {
             console.log(`[DoorDash] Modal HTML saved to: ${htmlPath}`);
 
             // Broad extraction: find ALL radiogroups and groups with "Required" anywhere
-            const broadGroups = await page.evaluate(() => {
+            const broadGroups = await page.evaluate((reqCount) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return [];
 
@@ -5318,7 +5318,7 @@ async function extractRequiredOptions() {
 
                 // Strategy B: Look for divs that contain "Required" text (looser than before)
                 // Also runs when Strategy A found fewer groups than the button indicates are required
-                if (groups.length === 0 || groups.length < requiredCount) {
+                if (groups.length === 0 || groups.length < reqCount) {
                     const allDivs = modal.querySelectorAll('div, section, fieldset');
                     for (const div of allDivs) {
                         const ownText = Array.from(div.childNodes)
@@ -5371,7 +5371,7 @@ async function extractRequiredOptions() {
                 }
 
                 return groups;
-            });
+            }, requiredCount);
 
             if (broadGroups.length > 0) {
                 console.log(`[DoorDash] Broad extraction found ${broadGroups.length} groups`);
@@ -5606,11 +5606,13 @@ async function autoSelectAllRequiredOptions() {
         await delay(300);
 
         // Find unselected radio buttons and get their coordinates
-        const { options: unselectedOptions, diagnostics: autoSelectDiag } = await page.evaluate(() => {
+        // Also collect "preSelected" groups — ones that look selected but DoorDash may still require confirmation
+        const { options: unselectedOptions, preSelected: preSelectedGroups, diagnostics: autoSelectDiag } = await page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            if (!modal) return { options: [], diagnostics: 'no modal' };
+            if (!modal) return { options: [], preSelected: [], diagnostics: 'no modal' };
 
             const options = [];
+            const preSelected = []; // groups skipped as "already selected"
             const diag = [];
 
             const radios = Array.from(modal.querySelectorAll('[role="radio"]'));
@@ -5638,6 +5640,14 @@ async function autoSelectAllRequiredOptions() {
                         });
                     if (isSelected) {
                         diag.push(`skip[${gIdx}]=already-selected`);
+                        // Track it — DoorDash sometimes pre-selects a recommended option that still
+                        // needs explicit confirmation (button still says "Make N required selections")
+                        const firstLabel = group.querySelector('label');
+                        const firstRadio = group.querySelector('[role="radio"]');
+                        const preTarget = firstLabel || firstRadio;
+                        if (preTarget) {
+                            preSelected.push({ groupIndex: gIdx, text: preTarget.textContent?.trim()?.substring(0, 50) || 'unknown' });
+                        }
                         continue;
                     }
 
@@ -5697,7 +5707,7 @@ async function autoSelectAllRequiredOptions() {
                 }
             }
 
-            return { options, diagnostics: diag.join(' | ') };
+            return { options, preSelected, diagnostics: diag.join(' | ') };
         });
 
         console.log(`[DoorDash] Found ${unselectedOptions.length} unselected options to auto-select`);
@@ -5749,6 +5759,39 @@ async function autoSelectAllRequiredOptions() {
             }
 
             await delay(500);
+        }
+
+        // If button still requires selections after clicking unselected groups,
+        // re-click "pre-selected" groups — DoorDash sometimes pre-selects a recommended
+        // option (aria-checked=true) that still needs explicit user confirmation.
+        const remainingAfterFirst = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!modal) return 0;
+            for (const btn of modal.querySelectorAll('button')) {
+                const m = (btn.textContent || '').match(/make\s+(\d+)\s+required/i);
+                if (m) return parseInt(m[1]);
+            }
+            return 0;
+        }).catch(() => 0);
+
+        if (remainingAfterFirst > 0 && preSelectedGroups.length > 0) {
+            console.log(`[DoorDash] Still ${remainingAfterFirst} required after first pass — re-clicking ${preSelectedGroups.length} pre-selected groups to confirm`);
+            for (const ps of preSelectedGroups) {
+                console.log(`[DoorDash] Re-clicking pre-selected group ${ps.groupIndex}: "${ps.text}"`);
+                try {
+                    const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(ps.groupIndex);
+                    const label = group.locator('label').first();
+                    if (await label.count() > 0) {
+                        await label.scrollIntoViewIfNeeded({ timeout: 3000 });
+                        await delay(300);
+                        await label.click({ timeout: 5000 });
+                        console.log(`[DoorDash] Re-click succeeded for group ${ps.groupIndex}`);
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Re-click error for group ${ps.groupIndex}:`, e.message.substring(0, 100));
+                }
+                await delay(500);
+            }
         }
 
         await takeScreenshot('after-auto-select-all');
