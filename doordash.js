@@ -5590,13 +5590,10 @@ async function autoSelectAllRequiredOptions() {
         console.log('[DoorDash] Auto-selecting remaining required options...');
         await takeScreenshot('before-auto-select-all');
 
-        // First, scroll through the modal to make sure all sections are loaded
+        // Scroll modal bottom→top to trigger lazy loading of all sections
         await page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            if (modal) {
-                // Scroll to bottom and back to trigger lazy loading
-                modal.scrollTop = modal.scrollHeight;
-            }
+            if (modal) { modal.scrollTop = modal.scrollHeight; }
         });
         await delay(300);
         await page.evaluate(() => {
@@ -5605,166 +5602,10 @@ async function autoSelectAllRequiredOptions() {
         });
         await delay(300);
 
-        // Find unselected radio buttons and get their coordinates
-        // Also collect "preSelected" groups — ones that look selected but DoorDash may still require confirmation
-        const { options: unselectedOptions, preSelected: preSelectedGroups, diagnostics: autoSelectDiag } = await page.evaluate(() => {
-            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            if (!modal) return { options: [], preSelected: [], diagnostics: 'no modal' };
-
-            const options = [];
-            const preSelected = []; // groups skipped as "already selected"
-            const diag = [];
-
-            const radios = Array.from(modal.querySelectorAll('[role="radio"]'));
-            const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
-            diag.push(`radios=${radios.length} groups=${radioGroups.length}`);
-
-            if (radioGroups.length > 0) {
-                for (let gIdx = 0; gIdx < radioGroups.length; gIdx++) {
-                    const group = radioGroups[gIdx];
-
-                    // Only check header text for "optional" — not full descendant text
-                    const labelId = group.getAttribute('aria-labelledby');
-                    const labelEl = labelId ? document.getElementById(labelId) : null;
-                    const headerText = (labelEl?.textContent || group.querySelector('h1,h2,h3,h4,legend')?.textContent || '').toLowerCase();
-                    if (headerText.includes('optional')) {
-                        diag.push(`skip[${gIdx}]=optional-header:"${headerText.substring(0,30)}"`);
-                        continue;
-                    }
-
-                    const isSelected = group.querySelector('[aria-checked="true"]') !== null ||
-                        group.querySelector('input:checked') !== null ||
-                        Array.from(group.querySelectorAll('label[for]')).some(l => {
-                            const inp = document.getElementById(l.htmlFor);
-                            return inp && inp.checked;
-                        });
-                    if (isSelected) {
-                        diag.push(`skip[${gIdx}]=already-selected`);
-                        // Track it — DoorDash sometimes pre-selects a recommended option that still
-                        // needs explicit confirmation (button still says "Make N required selections")
-                        const firstLabel = group.querySelector('label');
-                        const firstRadio = group.querySelector('[role="radio"]');
-                        const preTarget = firstLabel || firstRadio;
-                        if (preTarget) {
-                            preSelected.push({ groupIndex: gIdx, text: preTarget.textContent?.trim()?.substring(0, 50) || 'unknown' });
-                        }
-                        continue;
-                    }
-
-                    const firstLabel = group.querySelector('label');
-                    const firstRadio = group.querySelector('[role="radio"]');
-                    const target = firstLabel || firstRadio;
-                    if (!target) {
-                        diag.push(`skip[${gIdx}]=no-label-or-radio`);
-                        continue;
-                    }
-
-                    const rect = target.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0) {
-                        const text = target.textContent?.trim()?.substring(0, 50) || 'unknown';
-                        diag.push(`queue[${gIdx}]="${text.substring(0,30)}"`);
-                        options.push({
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                            text: text,
-                            groupIndex: gIdx,
-                            needsScroll: rect.top < 0 || rect.top > window.innerHeight
-                        });
-                    } else {
-                        diag.push(`skip[${gIdx}]=zero-size`);
-                    }
-                }
-            }
-
-            // Fallback: group by vertical position when no role-based groups found
-            if (options.length === 0 && radios.length > 0) {
-                radios.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-                const posGroups = [];
-                let currentGroup = [];
-                let lastTop = -1000;
-                for (const radio of radios) {
-                    const rect = radio.getBoundingClientRect();
-                    if (rect.top - lastTop > 150 && currentGroup.length > 0) { posGroups.push(currentGroup); currentGroup = []; }
-                    currentGroup.push(radio);
-                    lastTop = rect.top;
-                }
-                if (currentGroup.length > 0) posGroups.push(currentGroup);
-                diag.push(`fallback-pos-groups=${posGroups.length}`);
-                for (const grp of posGroups) {
-                    let hasSelection = false;
-                    let firstUnselected = null;
-                    for (const radio of grp) {
-                        if (radio.getAttribute('aria-checked') === 'true') { hasSelection = true; break; }
-                        if (!firstUnselected) firstUnselected = radio;
-                    }
-                    if (!hasSelection && firstUnselected) {
-                        const rect = firstUnselected.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            const text = firstUnselected.textContent?.trim()?.substring(0, 50) || 'unknown';
-                            options.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text, needsScroll: rect.top < 0 || rect.top > window.innerHeight });
-                        }
-                    }
-                }
-            }
-
-            return { options, preSelected, diagnostics: diag.join(' | ') };
-        });
-
-        console.log(`[DoorDash] Found ${unselectedOptions.length} unselected options to auto-select`);
-
-        const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
-
-        // Click each unselected option using Playwright locator (handles scroll + real pointer events)
-        for (const opt of unselectedOptions) {
-            console.log(`[DoorDash] Auto-clicking: "${opt.text}" in group ${opt.groupIndex}`);
-            let clicked = false;
-
-            // Strategy: Playwright locator click on the first label of the group
-            // This is the same reliable approach used in applyOptionSelections Strategy 1
-            try {
-                const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(opt.groupIndex);
-                const label = group.locator('label').first();
-                const count = await label.count();
-                if (count > 0) {
-                    await label.scrollIntoViewIfNeeded({ timeout: 3000 });
-                    await delay(300);
-                    await label.click({ timeout: 5000 });
-                    clicked = true;
-                    console.log(`[DoorDash] Auto-click locator succeeded for group ${opt.groupIndex}`);
-                }
-            } catch (e) {
-                console.log(`[DoorDash] Auto-click locator error for group ${opt.groupIndex}:`, e.message.substring(0, 150));
-            }
-
-            // Fallback: coordinate click
-            if (!clicked) {
-                const newCoords = await page.evaluate((optText) => {
-                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                    if (!modal) return null;
-                    const labels = modal.querySelectorAll('label');
-                    for (const el of labels) {
-                        if ((el.textContent || '').trim().toLowerCase().startsWith(optText.toLowerCase().substring(0, 10))) {
-                            el.scrollIntoView({ block: 'center' });
-                            const rect = el.getBoundingClientRect();
-                            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-                        }
-                    }
-                    return null;
-                }, opt.text);
-                await delay(400);
-                if (newCoords) {
-                    console.log(`[DoorDash] Auto-click fallback coords: (${Math.round(newCoords.x)}, ${Math.round(newCoords.y)})`);
-                    await page.mouse.click(newCoords.x, newCoords.y);
-                }
-            }
-
-            await delay(500);
-        }
-
-        // If button still requires selections after clicking unselected groups,
-        // re-click "pre-selected" groups — DoorDash sometimes pre-selects a recommended
-        // option (aria-checked=true) that still needs explicit user confirmation.
-        const remainingAfterFirst = await page.evaluate(() => {
+        // Count-feedback approach: iterate ALL groups, click each one, keep it only if
+        // the required count decreases. This works regardless of pre-selected state,
+        // optional vs required detection, or element type (label/radio/[role="radio"]).
+        const getCount = async () => page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return 0;
             for (const btn of modal.querySelectorAll('button')) {
@@ -5774,28 +5615,83 @@ async function autoSelectAllRequiredOptions() {
             return 0;
         }).catch(() => 0);
 
-        if (remainingAfterFirst > 0 && preSelectedGroups.length > 0) {
-            console.log(`[DoorDash] Still ${remainingAfterFirst} required after first pass — re-clicking ${preSelectedGroups.length} pre-selected groups to confirm`);
-            for (const ps of preSelectedGroups) {
-                console.log(`[DoorDash] Re-clicking pre-selected group ${ps.groupIndex}: "${ps.text}"`);
-                try {
-                    const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(ps.groupIndex);
-                    const label = group.locator('label').first();
-                    if (await label.count() > 0) {
-                        await label.scrollIntoViewIfNeeded({ timeout: 3000 });
-                        await delay(300);
-                        await label.click({ timeout: 5000 });
-                        console.log(`[DoorDash] Re-click succeeded for group ${ps.groupIndex}`);
-                    }
-                } catch (e) {
-                    console.log(`[DoorDash] Re-click error for group ${ps.groupIndex}:`, e.message.substring(0, 100));
+        const numGroups = await page.evaluate(() => {
+            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            return modal ? modal.querySelectorAll('[role="radiogroup"], [role="group"]').length : 0;
+        });
+
+        let remaining = await getCount();
+        console.log(`[DoorDash] AutoSelect: ${remaining} required selections, ${numGroups} groups in modal`);
+
+        if (remaining === 0) {
+            console.log('[DoorDash] No required selections needed');
+            await takeScreenshot('after-auto-select-all');
+            return 0;
+        }
+
+        const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+
+        for (let gIdx = 0; gIdx < numGroups && remaining > 0; gIdx++) {
+            const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(gIdx);
+
+            // Get clickable target: prefer label, then [role="radio"], skip if neither
+            const targetInfo = await page.evaluate((idx) => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                if (!modal) return null;
+                const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                const grp = groups[idx];
+                if (!grp) return null;
+                // Try label first, then [role="radio"]
+                const label = grp.querySelector('label');
+                const radio = grp.querySelector('[role="radio"]');
+                const target = label || radio;
+                if (!target) return null;
+                target.scrollIntoView({ block: 'center', inline: 'nearest' });
+                const rect = target.getBoundingClientRect();
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || '').trim().substring(0, 40) };
+            }, gIdx);
+
+            if (!targetInfo) continue;
+
+            console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text}"`);
+            await delay(200);
+
+            // Try Playwright locator click first (label or [role="radio"])
+            let clickOk = false;
+            try {
+                const labelLoc = group.locator('label').first();
+                const radioLoc = group.locator('[role="radio"]').first();
+                const target = (await labelLoc.count() > 0) ? labelLoc : ((await radioLoc.count() > 0) ? radioLoc : null);
+                if (target) {
+                    await target.scrollIntoViewIfNeeded({ timeout: 2000 });
+                    await delay(200);
+                    await target.click({ timeout: 4000 });
+                    clickOk = true;
                 }
-                await delay(500);
+            } catch (e) {
+                // Fall through to coordinate click
+            }
+
+            if (!clickOk && targetInfo.x && targetInfo.y) {
+                await page.mouse.click(targetInfo.x, targetInfo.y);
+                clickOk = true;
+            }
+
+            if (!clickOk) continue;
+
+            await delay(500);
+            const newCount = await getCount();
+            if (newCount < remaining) {
+                console.log(`[DoorDash] AutoSelect[${gIdx}]: registered! (${remaining} → ${newCount})`);
+                remaining = newCount;
+            } else {
+                console.log(`[DoorDash] AutoSelect[${gIdx}]: no change (optional or already handled)`);
             }
         }
 
+        console.log(`[DoorDash] AutoSelect done — remaining required: ${remaining}`);
         await takeScreenshot('after-auto-select-all');
-        return unselectedOptions.length;
+        return remaining;
     } catch (error) {
         console.error('[DoorDash] Auto-select all error:', error.message);
         return 0;
