@@ -4026,33 +4026,46 @@ async function solveCFWithCaptchaService(apiKey) {
         console.log('[CF Solver] Attempting to solve CF challenge...');
 
         // Extract Turnstile sitekey from the page (CF embeds it in _cf_chl_opt or data-sitekey)
-        const sitekey = await page.evaluate(() => {
+        const tsInfo = await page.evaluate(() => {
+            let sitekey = null, action = null, cdata = null;
             // Method 1: window._cf_chl_opt (managed challenge)
-            if (window._cf_chl_opt?.cSitekey) return window._cf_chl_opt.cSitekey;
-            // Method 2: data-sitekey attribute on Turnstile div
+            if (window._cf_chl_opt?.cSitekey) sitekey = window._cf_chl_opt.cSitekey;
+            // Method 2: data-sitekey attribute on Turnstile div (also grab action/cdata)
             const el = document.querySelector('[data-sitekey]');
-            if (el) return el.getAttribute('data-sitekey');
+            if (el) {
+                sitekey = sitekey || el.getAttribute('data-sitekey');
+                action = el.getAttribute('data-action');
+                cdata = el.getAttribute('data-cdata');
+            }
             // Method 3: Turnstile iframe src param
             for (const iframe of document.querySelectorAll('iframe')) {
                 try {
                     const u = new URL(iframe.src);
                     const sk = u.searchParams.get('sitekey');
-                    if (sk) return sk;
+                    if (sk) {
+                        sitekey = sitekey || sk;
+                        action = action || u.searchParams.get('action');
+                        cdata = cdata || u.searchParams.get('cData') || u.searchParams.get('cdata');
+                        break;
+                    }
                 } catch {}
             }
             // Method 4: scan inline scripts for sitekey pattern
-            for (const s of document.querySelectorAll('script:not([src])')) {
-                const m = s.textContent.match(/['"](0x4[A-Za-z0-9_-]{20,})['"]/);
-                if (m) return m[1];
+            if (!sitekey) {
+                for (const s of document.querySelectorAll('script:not([src])')) {
+                    const m = s.textContent.match(/['"](0x4[A-Za-z0-9_-]{20,})['"]/);
+                    if (m) { sitekey = m[1]; break; }
+                }
             }
-            return null;
+            return sitekey ? { sitekey, action, cdata } : null;
         }).catch(() => null);
 
-        if (!sitekey) {
+        if (!tsInfo) {
             console.log('[CF Solver] No sitekey found — cannot solve');
             return false;
         }
-        console.log(`[CF Solver] Sitekey: ${sitekey}`);
+        const { sitekey, action: tsAction, cdata: tsCdata } = tsInfo;
+        console.log(`[CF Solver] Sitekey: ${sitekey}${tsAction ? ', action: ' + tsAction : ''}${tsCdata ? ', cdata: ' + tsCdata : ''}`);
 
         // Determine API endpoint — CapSolver uses capsolver.com, 2captcha uses 2captcha.com
         const isCapSolver = !!process.env.CAPSOLVER_API_KEY;
@@ -4065,7 +4078,7 @@ async function solveCFWithCaptchaService(apiKey) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 clientKey: apiKey,
-                task: { type: taskType, websiteURL: pageUrl, websiteKey: sitekey },
+                task: { type: taskType, websiteURL: pageUrl, websiteKey: sitekey, ...(tsAction && { action: tsAction }), ...(tsCdata && { data: tsCdata }) },
             }),
         });
         const submitData = await submitResp.json();
@@ -4097,19 +4110,53 @@ async function solveCFWithCaptchaService(apiKey) {
                 }
                 console.log(`[CF Solver] Got token (${token.length} chars) — injecting...`);
 
-                // Inject the Turnstile token into the page and submit
+                // Inject the Turnstile token into the page and trigger the callback.
+                // Two cases:
+                //   1. Full-page CF challenge: has forms to submit + navigation follows
+                //   2. DoorDash Turnstile overlay: no form, need to call widget callback directly
+                const hasOverlay = await page.evaluate(() => !!document.querySelector('[data-testid="turnstile/overlay"]')).catch(() => false);
                 await page.evaluate((t) => {
-                    // Set all cf-turnstile-response inputs
-                    document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => el.value = t);
-                    // Trigger Turnstile callback if available
-                    if (window.turnstile?.execute) window.turnstile.execute();
-                    // Submit any CF challenge forms
-                    document.querySelectorAll('form').forEach(f => {
-                        try { f.submit(); } catch {}
+                    // Set all cf-turnstile-response inputs and fire events
+                    document.querySelectorAll('[name="cf-turnstile-response"]').forEach(el => {
+                        el.value = t;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
                     });
+                    // Trigger Turnstile widget callback directly if available
+                    if (window.turnstile) {
+                        // Try to find and call the success callback registered with the widget
+                        try {
+                            const widgetIds = Object.keys(window.__turnstile_cbs__ || {});
+                            widgetIds.forEach(id => { try { window.__turnstile_cbs__[id]?.(t); } catch {} });
+                        } catch {}
+                        // Fallback: trigger execute/reset which may re-validate
+                        try { if (window.turnstile.execute) window.turnstile.execute(); } catch {}
+                    }
+                    // Submit CF challenge forms (full-page challenge case only)
+                    if (!document.querySelector('[data-testid="turnstile/overlay"]')) {
+                        document.querySelectorAll('form').forEach(f => { try { f.submit(); } catch {} });
+                    }
                 }, token);
 
-                // Wait for page to navigate away from CF challenge
+                // For overlay case: wait for overlay to disappear (no page navigation)
+                // For full-page case: wait for navigation
+                if (hasOverlay) {
+                    await delay(3000);
+                    const overlayGone = await page.evaluate(() => {
+                        const el = document.querySelector('[data-testid="turnstile/overlay"]');
+                        if (!el) return true;
+                        const s = window.getComputedStyle(el);
+                        return s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0';
+                    }).catch(() => true);
+                    if (overlayGone) {
+                        console.log('[CF Solver] Turnstile overlay cleared after token injection!');
+                        return true;
+                    }
+                    console.log('[CF Solver] Overlay still present after injection — token may be invalid');
+                    return false;
+                }
+
+                // Wait for page to navigate away from full-page CF challenge
                 await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
                 await delay(2000);
 
@@ -4246,6 +4293,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             // The overlay is present while CF fingerprints the session; once it passes,
             // the overlay is removed and in-page API calls (item pricing etc.) start working.
             const turnstileStart = Date.now();
+            let triedSolver = false;
             for (let t = 0; t < 30; t++) {
                 const overlayPresent = await page.evaluate(() => {
                     const el = document.querySelector('[data-testid="turnstile/overlay"]');
@@ -4258,7 +4306,17 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                     else console.log('[DoorDash] No Turnstile overlay detected');
                     break;
                 }
-                if (t === 0) console.log('[DoorDash] Waiting for Turnstile overlay to clear...');
+                if (t === 0) {
+                    console.log('[DoorDash] Waiting for Turnstile overlay to clear...');
+                    // Try 2captcha/CapSolver on first detection
+                    const solverKey = process.env.TWOCAPTCHA_API_KEY || process.env.CAPSOLVER_API_KEY;
+                    if (solverKey && !triedSolver) {
+                        triedSolver = true;
+                        console.log('[DoorDash] Turnstile overlay detected — attempting captcha solver...');
+                        const solved = await solveCFWithCaptchaService(solverKey);
+                        if (solved) { console.log('[DoorDash] Turnstile solved via captcha service'); break; }
+                    }
+                }
                 await delay(1000);
                 if (t === 29) console.log('[DoorDash] Turnstile overlay still present after 30s — proceeding anyway');
             }
@@ -5260,18 +5318,21 @@ async function extractRequiredOptions() {
                 // Strategy A: Find [role="radiogroup"] elements — the most reliable indicator
                 const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 for (const rg of radioGroups) {
-                    // Only check header text for "optional", not full descendant text
+                    // Check header area for "optional" — look at heading's parent to catch sibling "(Optional)" spans
                     const labelId = rg.getAttribute('aria-labelledby');
                     const labelEl = labelId ? document.getElementById(labelId) : null;
-                    const rgHeaderText = (labelEl?.textContent || rg.querySelector('h1,h2,h3,h4,legend')?.textContent || '').toLowerCase();
+                    const headingEl = rg.querySelector('h1,h2,h3,h4,legend');
+                    const rgHeaderText = (labelEl?.textContent || headingEl?.parentElement?.textContent || headingEl?.textContent || '').toLowerCase();
                     if (rgHeaderText.includes('optional')) continue;
 
-                    // Find the group's label/name (sibling or nearby heading)
-                    let groupName = '';
-                    const prev = rg.previousElementSibling;
-                    if (prev) groupName = prev.textContent?.trim() || '';
+                    // Find the group's label/name — prefer aria-labelledby or own heading (most reliable)
+                    let groupName = (labelEl?.textContent || rg.querySelector('h1,h2,h3,h4,h5,legend')?.textContent || '').trim();
                     if (!groupName || groupName.length > 50) {
-                        // Try parent's first heading
+                        const prev = rg.previousElementSibling;
+                        const prevText = prev?.textContent?.trim() || '';
+                        if (prevText && prevText.length <= 50) groupName = prevText;
+                    }
+                    if (!groupName || groupName.length > 50) {
                         const parent = rg.parentElement;
                         if (parent) {
                             const heading = parent.querySelector('h1,h2,h3,h4,h5,span,p');
@@ -5303,17 +5364,40 @@ async function extractRequiredOptions() {
                         optSeen.add(txt.toLowerCase());
                         options.push(txt);
                     }
+                    // Stepper-type groups (e.g. Sauce) use IncrementQuantity buttons instead of radio/checkbox
+                    if (options.length === 0) {
+                        const stepperBtns = rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]');
+                        for (const btn of stepperBtns) {
+                            // Walk up to find the item container, then find the name span
+                            let container = btn.parentElement;
+                            for (let i = 0; i < 4 && container; i++) {
+                                const nameEl = container.querySelector('span');
+                                if (nameEl) {
+                                    let txt = nameEl.textContent?.trim() || '';
+                                    txt = txt.split(/\d{2,4}\s*cal/i)[0].trim();
+                                    if (txt.length > 1 && txt.length < 80 && !/^[\d$+\s]+$/.test(txt) && !optSeen.has(txt.toLowerCase())) {
+                                        optSeen.add(txt.toLowerCase());
+                                        options.push(txt);
+                                        break;
+                                    }
+                                }
+                                container = container.parentElement;
+                            }
+                        }
+                    }
                     if (options.length === 0) continue;
 
                     // Check selection: aria-checked OR input:checked OR label[for]→input.checked
+                    // Also check stepper groups: any IncrementQuantity sibling with decrement visible (qty > 0)
                     const isSelected = rg.querySelector('[aria-checked="true"]') !== null ||
                         Array.from(rg.querySelectorAll('label[for]')).some(l => {
                             const inp = document.getElementById(l.htmlFor);
                             return inp && inp.checked;
                         }) ||
-                        rg.querySelector('input:checked') !== null;
+                        rg.querySelector('input:checked') !== null ||
+                        rg.querySelector('[data-anchor-id="DecrementQuantity"]') !== null;
                     seen.add(groupName.toLowerCase());
-                    groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
+                    groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected, isStepperType: options.length > 0 && rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]').length > 0 });
                 }
 
                 // Strategy B: Look for divs that contain "Required" text (looser than before)
@@ -5655,39 +5739,42 @@ async function autoSelectAllRequiredOptions() {
         for (let gIdx = 0; gIdx < numGroups && remaining > 0; gIdx++) {
             const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(gIdx);
 
-            // Get clickable target: prefer label, then [role="radio"], skip if neither
+            // Get clickable target: prefer label, then [role="radio"], then stepper button, skip if none
             const targetInfo = await page.evaluate((idx) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return null;
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 const grp = groups[idx];
                 if (!grp) return null;
-                // Try label, then [role="radio"], then any input
+                // Try label, then [role="radio"], then input, then stepper IncrementQuantity button
                 const label = grp.querySelector('label');
                 const radio = grp.querySelector('[role="radio"]');
                 const input = grp.querySelector('input[type="radio"],input[type="checkbox"]');
-                const target = label || radio || input;
+                const stepper = grp.querySelector('[data-anchor-id="IncrementQuantity"]');
+                const target = label || radio || input || stepper;
                 if (!target) return null;
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 const rect = target.getBoundingClientRect();
-                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || '').trim().substring(0, 40) };
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim().substring(0, 40), isStepper: !!stepper && !label && !radio && !input };
             }, gIdx);
 
             if (!targetInfo) continue;
 
-            console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text}"`);
+            console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text}"${targetInfo.isStepper ? ' (stepper)' : ''}`);
             await delay(200);
 
-            // Try Playwright locator click: label first, then [role="radio"], then input
+            // Try Playwright locator click: label first, then [role="radio"], then input, then stepper
             let clickOk = false;
             try {
                 const labelLoc = group.locator('label').first();
                 const radioLoc = group.locator('[role="radio"]').first();
                 const inputLoc = group.locator('input[type="radio"],input[type="checkbox"]').first();
+                const stepperLoc = group.locator('[data-anchor-id="IncrementQuantity"]').first();
                 let target = null;
                 if (await labelLoc.count() > 0) target = labelLoc;
                 else if (await radioLoc.count() > 0) target = radioLoc;
                 else if (await inputLoc.count() > 0) target = inputLoc;
+                else if (await stepperLoc.count() > 0) target = stepperLoc;
                 if (target) {
                     await target.scrollIntoViewIfNeeded({ timeout: 2000 });
                     await delay(200);
@@ -5820,6 +5907,38 @@ async function applyOptionSelections(selections) {
                         clicked = true;
                     } else {
                         console.log(`[DoorDash] Locator click did not register (still ${afterCount} required)`);
+                    }
+                } else {
+                    // Strategy 1b: stepper-type group — click IncrementQuantity button for matching item
+                    const stepperBtns = group.locator('[data-anchor-id="IncrementQuantity"]');
+                    const stepperCount = await stepperBtns.count();
+                    if (stepperCount > 0) {
+                        // Find the stepper button whose sibling text matches optText, or use optIdx
+                        let targetStepper = null;
+                        if (optText) {
+                            for (let si = 0; si < stepperCount; si++) {
+                                const btn = stepperBtns.nth(si);
+                                const container = btn.locator('..').locator('..');
+                                const spanText = await container.locator('span').first().textContent().catch(() => '');
+                                if (spanText.toLowerCase().includes(optText.toLowerCase())) {
+                                    targetStepper = btn;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!targetStepper) targetStepper = stepperBtns.nth(Math.min(optIdx, stepperCount - 1));
+                        console.log(`[DoorDash] Strategy 1b: stepper IncrementQuantity click`);
+                        await targetStepper.scrollIntoViewIfNeeded({ timeout: 3000 });
+                        await delay(300);
+                        await targetStepper.click({ timeout: 5000 });
+                        await delay(600);
+                        const afterCount = await getRequiredCount();
+                        if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                            console.log(`[DoorDash] Stepper click registered! (${beforeCount} → ${afterCount} required)`);
+                            clicked = true;
+                        } else {
+                            console.log(`[DoorDash] Stepper click did not register (still ${afterCount} required)`);
+                        }
                     }
                 }
             } catch (e) {
