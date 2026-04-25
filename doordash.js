@@ -3963,6 +3963,8 @@ async function fetchMenuFromInContextAPI(storeId) {
 async function waitForCFChallenge(timeoutMs = 60000) {
     const isCFChallenge = async () => {
         try {
+            // __cf_chl_rt_tk in URL = CF issued an inline JS challenge redirect — treat as challenge
+            if (page.url().includes('__cf_chl_rt_tk')) return true;
             // page.content() can hang if there's a pending navigation; use a 5s race to avoid blocking forever
             return await Promise.race([
                 page.evaluate(() => {
