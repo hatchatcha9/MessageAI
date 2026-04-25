@@ -5052,8 +5052,13 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             });
             console.log(`[DoorDash] No modal detected. Cart item count: ${cartCount}`);
             if (cartCount === 0) {
-                // Check if CF overlay was blocking
-                const cfOverlay = await page.$('[data-testid="turnstile/overlay"]');
+                // Check if CF overlay was blocking (must be visible, not just present in DOM)
+                const cfOverlay = await page.evaluate(() => {
+                    const el = document.querySelector('[data-testid="turnstile/overlay"]');
+                    if (!el) return false;
+                    const s = window.getComputedStyle(el);
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                }).catch(() => false);
                 if (cfOverlay) {
                     console.log('[DoorDash] CF overlay still present — hiding and retrying with CDP click...');
                     const retryCoords = await page.evaluate((name) => {
