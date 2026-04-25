@@ -464,6 +464,7 @@ async function processCommands(response, user, phoneNumber) {
 
                 if (credentials && cachedResults && cachedResults[num]) {
                     const selectedRestaurant = cachedResults[num];
+                    console.log(`[SELECT] index=${num} name=${selectedRestaurant.name} url=${selectedRestaurant.url}`);
                     additionalContext = `\n\nLoading ${selectedRestaurant.name}...`;
 
                     try {
@@ -733,12 +734,15 @@ async function processCommands(response, user, phoneNumber) {
                         const cartNow = db.getCart(user.id);
                         additionalContext = `\n\nAdded ${itemText.name}!\n\n${restaurants.formatCart(cartNow)}\n\nAnything else, or say "checkout" to order?`;
                     } else if (addResultText.needsOptions) {
+                        const prevGroupNamesText = new Set((prefsText.pendingDoordashOptions || []).map(g => g.name.toLowerCase()));
+                        const newGroupsText = addResultText.requiredOptions.filter(g => !prevGroupNamesText.has(g.name.toLowerCase()) || !g.hasSelection);
+                        const groupsToShowText = newGroupsText.length > 0 ? newGroupsText : addResultText.requiredOptions;
                         additionalContext = `\n\nPlease select more options:\n`;
-                        addResultText.requiredOptions.forEach(group => {
+                        groupsToShowText.forEach(group => {
                             additionalContext += `**${group.name}**:\n`;
                             group.options.forEach((opt, oIdx) => { additionalContext += `   ${oIdx + 1}. ${opt}\n`; });
                         });
-                        prefsText.pendingDoordashOptions = addResultText.requiredOptions;
+                        prefsText.pendingDoordashOptions = groupsToShowText;
                         db.setUserPreferences(user.id, prefsText);
                     } else if (addResultText.browserNotOpen) {
                         additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
@@ -797,12 +801,18 @@ async function processCommands(response, user, phoneNumber) {
                     const cartOpt = db.getCart(user.id);
                     additionalContext = `\n\nAdded ${itemOpt.name}!\n\n${restaurants.formatCart(cartOpt)}\n\nAnything else, or say "checkout" to order?`;
                 } else if (addResultOpt.needsOptions) {
+                    // Filter out groups already answered (by name) to prevent infinite loops
+                    const answeredNames = new Set((prefsOpt.pendingDoordashSelections || []).map(s => (s.optionText || '').toLowerCase()));
+                    const prevGroupNames = new Set((prefsOpt.pendingDoordashOptions || []).map(g => g.name.toLowerCase()));
+                    const newGroups = addResultOpt.requiredOptions.filter(g => !prevGroupNames.has(g.name.toLowerCase()) || !g.hasSelection);
+                    // If all returned groups were already in pendingDoordashOptions, show them all (avoid empty prompt)
+                    const groupsToShow = newGroups.length > 0 ? newGroups : addResultOpt.requiredOptions;
                     additionalContext = `\n\nPlease select more options:\n`;
-                    addResultOpt.requiredOptions.forEach((group, gIdx) => {
+                    groupsToShow.forEach((group, gIdx) => {
                         additionalContext += `**${group.name}**:\n`;
                         group.options.forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
                     });
-                    prefsOpt.pendingDoordashOptions = addResultOpt.requiredOptions;
+                    prefsOpt.pendingDoordashOptions = groupsToShow;
                     db.setUserPreferences(user.id, prefsOpt);
                 } else if (addResultOpt.browserNotOpen) {
                     additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
