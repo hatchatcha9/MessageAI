@@ -857,7 +857,30 @@ async function processCommands(response, user, phoneNumber) {
             // Check if using DoorDash
             if (prefs.currentRestaurantSource === 'doordash') {
                 // Real DoorDash item - get from cache and add via automation
-                const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
+                let currentRestaurant = db.getCachedCurrentRestaurant(user.id);
+
+                // Cache expired (e.g. server restart) — re-navigate and reload menu
+                if (!currentRestaurant && prefs.currentRestaurantUrl) {
+                    console.log('[ADD_ITEM_NUM] Cache empty — re-navigating to reload menu...');
+                    try {
+                        await doordash.navigateToRestaurantPage(prefs.currentRestaurantUrl);
+                        const menuItems = await doordash.extractMenuItems();
+                        if (menuItems && menuItems.length > 0) {
+                            currentRestaurant = {
+                                id: prefs.currentRestaurant,
+                                name: prefs.currentRestaurant,
+                                url: prefs.currentRestaurantUrl,
+                                source: 'doordash',
+                                menu: menuItems
+                            };
+                            db.cacheCurrentRestaurant(user.id, currentRestaurant);
+                            db.cacheRestaurantMenu(user.id, prefs.currentRestaurant, menuItems);
+                            console.log(`[ADD_ITEM_NUM] Re-cached ${menuItems.length} menu items`);
+                        }
+                    } catch (e) {
+                        console.error('[ADD_ITEM_NUM] Re-navigation failed:', e.message);
+                    }
+                }
 
                 const menuLen = currentRestaurant?.menu?.length ?? 'no menu';
                 console.log(`[ADD_ITEM_NUM] Cache check: restaurant=${!!currentRestaurant}, menuLen=${menuLen}, num=${num}`);
