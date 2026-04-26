@@ -731,6 +731,7 @@ let debugScreenshotInterval = null;
 let debugScreenshotCounter = 0;
 
 function startDebugScreenshots(intervalMs = 3000) {
+    if (!process.env.DEBUG_SCREENSHOTS) return; // disabled by default — too memory-intensive on Railway
     if (debugScreenshotInterval) return;
     debugScreenshotCounter = 0;
     console.log(`[DoorDash] Starting debug screenshots every ${intervalMs}ms`);

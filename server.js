@@ -860,7 +860,6 @@ async function processCommands(response, user, phoneNumber) {
                 let currentRestaurant = db.getCachedCurrentRestaurant(user.id);
 
                 // Cache expired (e.g. server restart) — re-navigate and reload menu
-                console.log(`[ADD_ITEM_NUM] prefs: restaurant=${prefs.currentRestaurant}, url=${prefs.currentRestaurantUrl}`);
                 if (!currentRestaurant && prefs.currentRestaurantUrl) {
                     console.log('[ADD_ITEM_NUM] Cache empty — re-navigating to reload menu...');
                     try {
