@@ -5405,7 +5405,7 @@ async function extractRequiredOptions() {
                         rg.querySelector('input:checked') !== null ||
                         rg.querySelector('[data-anchor-id="DecrementQuantity"]') !== null;
                     seen.add(groupName.toLowerCase());
-                    groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected, isStepperType: options.length > 0 && rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]').length > 0 });
+                    groups.push({ name: groupName, options: options, required: true, hasSelection: isSelected, isStepperType: options.length > 0 && rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]').length > 0 });
                 }
 
                 // Strategy B: Look for divs that contain "Required" text (looser than before)
@@ -5567,7 +5567,7 @@ async function extractRequiredOptionsOld() {
         if (options.length > 0) {
             return [{
                 name: 'Choose Your Protein',
-                options: options.slice(0, 10).map(o => o.price ? `${o.name} (${o.price})` : o.name),
+                options: options.map(o => o.price ? `${o.name} (${o.price})` : o.name),
                 required: true
             }];
         }

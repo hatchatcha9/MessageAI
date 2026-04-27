@@ -652,14 +652,20 @@ async function processCommands(response, user, phoneNumber) {
                 // Priority: exact match > opt starts with phrase > phrase is first word of opt > substring
                 function matchPhraseInGroup(group, phrase) {
                     if (!phrase) return null;
+                    // Normalize: strip trailing 's' from each word (handles "charlies" → "charlie")
+                    const norm = s => s.split(/\s+/).map(w => w.replace(/s$/, '')).join(' ');
+                    const normPhrase = norm(phrase);
                     let bestIdx = -1, bestScore = 0;
                     for (let oIdx = 0; oIdx < group.options.length; oIdx++) {
                         const opt = group.options[oIdx].toLowerCase();
+                        const normOpt = norm(opt);
                         let score = 0;
                         if (opt === phrase) {
                             score = 4; // exact match
                         } else if (new RegExp('^' + phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\s|$)').test(opt)) {
-                            score = 3; // opt starts with phrase then space or end
+                            score = 3; // opt starts with phrase
+                        } else if (normOpt === normPhrase || new RegExp('^' + normPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(\\s|$)').test(normOpt)) {
+                            score = 3; // normalized match (e.g. "charlies sauce" → "charlie sauce")
                         } else if (opt.split(' ')[0] === phrase) {
                             score = 2; // phrase is first word of opt
                         } else if (opt.includes(phrase)) {
@@ -961,11 +967,11 @@ async function processCommands(response, user, phoneNumber) {
                                 additionalContext += `**${gIdx + 1}. ${group.name}**${group.required ? ' (Required)' : ''}${group.hasSelection ? ' ✓' : ''}:\n`;
                                 if (isCurrent || !group.hasSelection) {
                                     // Show options for current group or unselected groups
-                                    group.options.slice(0, 8).forEach((opt, oIdx) => {
+                                    group.options.slice(0, 15).forEach((opt, oIdx) => {
                                         additionalContext += `   ${oIdx + 1}. ${opt}\n`;
                                     });
-                                    if (group.options.length > 8) {
-                                        additionalContext += `   ... and ${group.options.length - 8} more\n`;
+                                    if (group.options.length > 15) {
+                                        additionalContext += `   ... and ${group.options.length - 15} more\n`;
                                     }
                                 }
                                 additionalContext += '\n';
