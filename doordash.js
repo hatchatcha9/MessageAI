@@ -6614,6 +6614,76 @@ async function clearBrowserCart() {
 }
 
 /**
+ * Read current cart items directly from the DoorDash browser.
+ * Returns array of {name, quantity, price} or null if unavailable.
+ */
+async function readBrowserCart() {
+    if (!page || !context) return null;
+    try {
+        const url = page.url();
+        if (!url.includes('doordash.com')) return null;
+
+        // Try to read from the cart sidebar on the current page
+        const items = await page.evaluate(() => {
+            const results = [];
+            // Cart items are in elements with data-anchor-id containing "CartItem"
+            const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
+            for (const el of cartItemEls) {
+                // Skip buttons/controls inside cart items
+                if (el.tagName === 'BUTTON') continue;
+                const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"]')
+                    || el.querySelector('span[class*="name"], p[class*="name"]');
+                const qtyEl = el.querySelector('[data-anchor-id*="CartItemQuantity"], [data-anchor-id*="quantity"]');
+                const priceEl = el.querySelector('[data-anchor-id*="CartItemPrice"], [data-testid*="price"]');
+                const name = nameEl ? nameEl.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
+                const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
+                const priceText = priceEl ? priceEl.textContent.trim() : '';
+                const price = parseFloat((priceText.match(/\$?([\d.]+)/) || [])[1] || '0');
+                if (name && name.length > 1) results.push({ name, quantity: qty, price });
+            }
+            return results;
+        });
+
+        if (items && items.length > 0) {
+            console.log(`[DoorDash] readBrowserCart: found ${items.length} items in sidebar`);
+            return items;
+        }
+
+        // Fallback: navigate to /cart/
+        console.log('[DoorDash] readBrowserCart: no sidebar items, navigating to /cart/');
+        const prevUrl = page.url();
+        await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await new Promise(r => setTimeout(r, 2000));
+
+        const cartPageItems = await page.evaluate(() => {
+            const results = [];
+            // On the cart page, look for product names and prices
+            const rows = document.querySelectorAll('[data-anchor-id*="CartItem"]:not(button), [data-testid*="cart-item"]');
+            for (const row of rows) {
+                const texts = Array.from(row.querySelectorAll('span, p, div'))
+                    .map(e => e.childNodes.length === 1 && e.childNodes[0].nodeType === 3 ? e.textContent.trim() : '')
+                    .filter(t => t.length > 1);
+                const priceMatch = texts.find(t => /^\$[\d.]+$/.test(t));
+                const name = texts.find(t => !/^\$/.test(t) && t.length > 2 && !/^\d+$/.test(t));
+                if (name) results.push({ name, quantity: 1, price: parseFloat((priceMatch || '$0').replace('$', '')) });
+            }
+            return results;
+        });
+
+        // Navigate back to where we were
+        if (prevUrl && prevUrl !== page.url()) {
+            await page.goto(prevUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        }
+
+        console.log(`[DoorDash] readBrowserCart: found ${cartPageItems.length} items on /cart/ page`);
+        return cartPageItems.length > 0 ? cartPageItems : null;
+    } catch (e) {
+        console.log('[DoorDash] readBrowserCart error:', e.message);
+        return null;
+    }
+}
+
+/**
  * Navigate to a restaurant page (for recovery after server restart)
  */
 async function navigateToRestaurantPage(url) {
@@ -6700,6 +6770,7 @@ module.exports = {
     addItemByIndex: locked(addItemByIndex),
     navigateToRestaurantPage: locked(navigateToRestaurantPage),
     clearBrowserCart: locked(clearBrowserCart),
+    readBrowserCart: locked(readBrowserCart),
     getOrderStatus,
     exportCookies,
     importCookies

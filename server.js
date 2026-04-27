@@ -206,10 +206,10 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
    Just say "Adding [item]!" and use the command - DON'T list options yourself.
 
 4. SELECT OPTION - When user picks a required option (like protein):
-   - For a NUMBER response: [SELECT_OPTION: 1] or [SELECT_OPTION: 2] etc.
-   - For TEXT responses (e.g. "flour, black beans, ranch"): [SELECT_OPTIONS_TEXT: flour, black, ranch]
+   - For NUMBER responses: [SELECT_OPTION: 1,2,7,1] — one number per option group, comma-separated, in order shown
+   - For TEXT responses (e.g. "fried, charlie sauce, root beer, fries"): [SELECT_OPTIONS_TEXT: fried, charlie sauce, root beer, fries]
    Use this when user responds to a "choose your options" prompt.
-   For multi-option text, include key words from each selection separated by commas.
+   When user gives multiple numbers like "1,2,7,1" use [SELECT_OPTION: 1,2,7,1] with ALL numbers included.
 
 4. SHOW CART - Show current cart:
    [SHOW_CART]
@@ -764,24 +764,23 @@ async function processCommands(response, user, phoneNumber) {
     }
 
     // Handle numeric option selection — runs BEFORE ADD_ITEM_NUM so pending options resolve first
-    const optionMatch = response.match(/\[SELECT_OPTION:\s*(\d+)\]/i);
+    const optionMatch = response.match(/\[SELECT_OPTION:\s*([\d,\s]+)\]/i);
     if (optionMatch) {
-        const optNum = parseInt(optionMatch[1]) - 1;
+        // Parse comma-separated numbers, one per group
+        const optNums = optionMatch[1].split(',').map(s => parseInt(s.trim()) - 1);
         const prefsOpt = db.getUserPreferences(user.id);
         cleanResponse = cleanResponse.replace(optionMatch[0], '').trim();
         if (prefsOpt.pendingDoordashItem && prefsOpt.pendingDoordashOptions) {
-            console.log('[DoorDash] Applying user option selection:', optNum);
+            console.log('[DoorDash] Applying user option selections:', optNums);
             const selectionsOpt = [];
             for (let gIdx = 0; gIdx < prefsOpt.pendingDoordashOptions.length; gIdx++) {
                 const group = prefsOpt.pendingDoordashOptions[gIdx];
-                if (gIdx === 0) {
-                    let optionText = (group.options[optNum] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: optNum, optionText });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): User selected "${optionText}"`);
-                } else if (!group.hasSelection) {
-                    const cleanOption = (group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: 0, optionText: cleanOption });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): Auto-selecting "${cleanOption}"`);
+                const optNum = gIdx < optNums.length ? optNums[gIdx] : 0;
+                if (!group.hasSelection) {
+                    let optionText = (group.options[optNum] || group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+                    const actualIdx = optNum < group.options.length ? optNum : 0;
+                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: actualIdx, optionText });
+                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): User selected "${optionText}" (index ${actualIdx})`);
                 }
             }
             prefsOpt.pendingDoordashSelections = selectionsOpt;
@@ -1021,11 +1020,23 @@ async function processCommands(response, user, phoneNumber) {
         additionalContext = `\n\nAdded ${itemList}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
     }
 
-    // Show cart
+    // Show cart — sync from DoorDash browser first so external changes (e.g. user removed item on doordash.com) are reflected
     if (response.includes('[SHOW_CART]')) {
-        const cart = db.getCart(user.id);
         cleanResponse = cleanResponse.replace('[SHOW_CART]', '').trim();
+        const prefs = db.getUserPreferences(user.id);
 
+        // Try to read live cart from browser
+        const browserCartItems = await doordash.readBrowserCart().catch(() => null);
+        if (browserCartItems && browserCartItems.length > 0 && prefs.currentRestaurant) {
+            // Rebuild local DB cart from browser state
+            db.clearCart(user.id);
+            for (const item of browserCartItems) {
+                db.addToCart(user.id, prefs.currentRestaurant, { id: `doordash-sync-${item.name}`, name: item.name, price: item.price || 0, source: 'doordash' });
+            }
+            console.log(`[SHOW_CART] Synced ${browserCartItems.length} items from DoorDash browser`);
+        }
+
+        const cart = db.getCart(user.id);
         const restaurantIds = Object.keys(cart.items || {});
         if (restaurantIds.length > 0) {
             additionalContext = `\n\n${restaurants.formatCart(cart)}`;
