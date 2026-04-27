@@ -5858,15 +5858,18 @@ async function applyOptionSelections(selections) {
         // Helper: parse "Make N required selections" count from add button text
         // Returns 0 when button says "Add to Order" (all required filled)
         const getRequiredCount = async () => {
-            return page.evaluate(() => {
-                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-                if (!modal) return 0;
-                for (const btn of modal.querySelectorAll('button')) {
-                    const m = (btn.textContent || '').match(/make\s+(\d+)\s+required/i);
-                    if (m) return parseInt(m[1]);
-                }
-                return 0;
-            });
+            return Promise.race([
+                page.evaluate(() => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return 0;
+                    for (const btn of modal.querySelectorAll('button')) {
+                        const m = (btn.textContent || '').match(/make\s+(\d+)\s+required/i);
+                        if (m) return parseInt(m[1]);
+                    }
+                    return 0;
+                }),
+                new Promise(resolve => setTimeout(() => resolve(999), 5000))
+            ]);
         };
 
         for (const sel of selections) {
@@ -5905,9 +5908,11 @@ async function applyOptionSelections(selections) {
                 const labelCount = await label.count();
                 if (labelCount > 0) {
                     console.log(`[DoorDash] Strategy 1: Playwright locator click on label`);
-                    await label.scrollIntoViewIfNeeded({ timeout: 3000 });
+                    await label.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
                     await delay(300);
-                    await label.click({ timeout: 5000 });
+                    await label.click({ timeout: 5000, force: true }).catch(async () => {
+                        await label.click({ timeout: 3000 }).catch(() => {});
+                    });
                     await delay(600);
                     const afterCount = await getRequiredCount();
                     if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
@@ -5927,7 +5932,7 @@ async function applyOptionSelections(selections) {
                             for (let si = 0; si < stepperCount; si++) {
                                 const btn = stepperBtns.nth(si);
                                 const container = btn.locator('..').locator('..');
-                                const spanText = await container.locator('span').first().textContent().catch(() => '');
+                                const spanText = await container.locator('span').first().textContent({ timeout: 2000 }).catch(() => '');
                                 if (spanText.toLowerCase().includes(optText.toLowerCase())) {
                                     targetStepper = btn;
                                     break;
