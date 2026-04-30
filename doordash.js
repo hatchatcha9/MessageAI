@@ -71,7 +71,7 @@ const SELECTORS = {
     checkout: {
         tipButtons: '[data-anchor-id="TipButton"], button[data-testid*="tip"]',
         paymentMethod: '[data-anchor-id="PaymentMethod"]',
-        placeOrder: 'button[data-anchor-id="PlaceOrderButton"], button:has-text("Place Order")',
+        placeOrder: 'button[data-anchor-id="PlaceOrderButton"], button:has-text("Place Order"), button:has-text("place order"), button[aria-label*="Place order" i], button[aria-label*="place your order" i]',
         deliveryInstructions: 'textarea[data-anchor-id="DeliveryInstructions"]',
         // Payment method selectors
         paymentSection: '[data-anchor-id="PaymentSection"], [data-testid="payment-method"], [data-testid="payment-section"]',

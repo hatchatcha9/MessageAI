@@ -4,7 +4,13 @@ const path = require('path');
 
 // Initialize database — use DB_PATH env var for production (persistent volume)
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'messageai.db');
-const db = new Database(DB_PATH);
+let db;
+try {
+    db = new Database(DB_PATH);
+} catch (err) {
+    console.error('[DB] Failed to open database:', err.message);
+    process.exit(1);
+}
 
 // Encryption key - in production, use a key management service
 // For now, we'll generate one and store it in .env
@@ -273,15 +279,13 @@ function clearCart(userId) {
     db.prepare('UPDATE carts SET restaurant_id = NULL, items = \'{}\', updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(userId);
 }
 
-function addToCart(userId, restaurantId, item) {
+const _addToCartTx = db.transaction((userId, restaurantId, item) => {
     const cart = getCart(userId);
 
-    // Initialize restaurant array if needed
     if (!cart.items[restaurantId]) {
         cart.items[restaurantId] = [];
     }
 
-    // Check if item already in cart for this restaurant
     const itemKey = item.name + (item.selectedOptions ? JSON.stringify(item.selectedOptions) : '');
     const existingIndex = cart.items[restaurantId].findIndex(i => {
         const existingKey = i.name + (i.selectedOptions ? JSON.stringify(i.selectedOptions) : '');
@@ -296,6 +300,10 @@ function addToCart(userId, restaurantId, item) {
 
     setCart(userId, cart.items);
     return cart.items;
+});
+
+function addToCart(userId, restaurantId, item) {
+    return _addToCartTx(userId, restaurantId, item);
 }
 
 function removeFromCart(userId, restaurantId, itemId) {

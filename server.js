@@ -52,8 +52,9 @@ if (TWILIO_ACCOUNT_SID && TWILIO_PHONE) {
 const SMS_MAX_CHARS = 1550; // Twilio API limit is 1600; stay under to be safe
 
 function truncateSMS(text) {
-    if (text.length <= SMS_MAX_CHARS) return text;
-    return text.substring(0, SMS_MAX_CHARS - 30).trimEnd() + '\n\n...(reply "more" for rest)';
+    const chars = [...text]; // split by Unicode codepoints, not UTF-16 units
+    if (chars.length <= SMS_MAX_CHARS) return text;
+    return chars.slice(0, SMS_MAX_CHARS - 30).join('').trimEnd() + '\n\n...(reply "more" for rest)';
 }
 
 // Send SMS via Twilio
@@ -372,7 +373,7 @@ async function processCommands(response, user, phoneNumber) {
     // Clear cart — must run BEFORE search so prefs are cleared and don't overwrite search results
     if (response.includes('[CLEAR_CART]')) {
         db.clearCart(user.id);
-        doordash.clearBrowserCart().catch(() => {}); // sync DoorDash browser cart (non-blocking)
+        doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message)); // sync DoorDash browser cart (non-blocking)
         const prefsForClear = db.getUserPreferences(user.id);
         prefsForClear.currentRestaurant = null;
         prefsForClear.currentRestaurantSource = null;
@@ -483,7 +484,7 @@ async function processCommands(response, user, phoneNumber) {
 
                             // Clear cart and menu page when switching restaurants
                             db.clearCart(user.id);
-                            doordash.clearBrowserCart().catch(() => {});
+                            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
                             prefs.menuPage = 0;
 
                             const restaurantName = menuResult.restaurantName || selectedRestaurant.name;
@@ -994,6 +995,11 @@ async function processCommands(response, user, phoneNumber) {
 
                             actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
                         } else if (addResult.browserNotOpen) {
+                            // Clear stale pending state so it doesn't bleed into the next session
+                            prefs.pendingDoordashItem = null;
+                            prefs.pendingDoordashOptions = null;
+                            prefs.pendingDoordashSelections = null;
+                            db.setUserPreferences(user.id, prefs);
                             additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
                         } else if (addResult.error === 'RESTAURANT_CLOSED') {
                             additionalContext = `\n\n⚠️ ${addResult.message} You can search for another restaurant that's open now.`;
@@ -1226,7 +1232,7 @@ async function processCommands(response, user, phoneNumber) {
         if (orders.length > 0) {
             const lastOrder = orders[0];
             db.clearCart(user.id);
-            doordash.clearBrowserCart().catch(() => {});
+            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
 
             const restaurantUrl = lastOrder.restaurant_url;
             if (restaurantUrl) {
@@ -1444,20 +1450,26 @@ async function handleMessage(phoneNumber, message) {
         return { response: menuText, actions: [] };
     }
 
-    const history = db.getConversationHistory(user.id, 20);
+    const history = db.getConversationHistory(user.id, 40);
     const messages = [...history, { role: 'user', content: message }];
 
     db.saveMessage(user.id, 'user', message);
 
+    let claudeResponse;
     try {
-        const response = await anthropic.messages.create({
+        claudeResponse = await anthropic.messages.create({
             model: 'claude-sonnet-4-20250514',
             max_tokens: 500,
             system: buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu),
             messages: messages
         });
+    } catch (error) {
+        console.error('Error calling Claude API:', error);
+        return { response: 'Sorry, I had trouble connecting. Try again?', actions: [] };
+    }
 
-        let assistantMessage = response.content[0].text;
+    try {
+        let assistantMessage = claudeResponse.content[0].text;
         const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber);
         assistantMessage = cleanedResponse;
 
@@ -1465,7 +1477,7 @@ async function handleMessage(phoneNumber, message) {
 
         return { response: assistantMessage, actions };
     } catch (error) {
-        console.error('Error calling Claude:', error);
+        console.error('Error processing commands:', error);
         return { response: 'Sorry, I had trouble processing that. Try again?', actions: [] };
     }
 }
@@ -1573,7 +1585,7 @@ app.post('/api/clear', (req, res) => {
             // Also clear cached restaurant data
             db.clearDoorDashCache(user.id);
             // Clear the DoorDash browser cart to stay in sync
-            doordash.clearBrowserCart().catch(() => {});
+            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
             console.log(`[Clear] Cleared all data for user ${user.id}`);
         }
     }
