@@ -81,6 +81,7 @@ db.exec(`
 
     CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
     CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_user_created ON conversations(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 
     CREATE TABLE IF NOT EXISTS carts (
@@ -209,6 +210,20 @@ function getConversationHistory(userId, limit = 20) {
 
 function clearConversationHistory(userId) {
     db.prepare('DELETE FROM conversations WHERE user_id = ?').run(userId);
+}
+
+// Prune oldest messages when history exceeds 200 — keeps the table lean
+const _pruneHistory = db.transaction((userId) => {
+    const count = db.prepare('SELECT COUNT(*) AS n FROM conversations WHERE user_id = ?').get(userId).n;
+    if (count > 200) {
+        const oldest = db.prepare('SELECT id FROM conversations WHERE user_id = ? ORDER BY created_at ASC LIMIT ?').all(userId, count - 200);
+        const ids = oldest.map(r => r.id);
+        db.prepare(`DELETE FROM conversations WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+    }
+});
+
+function pruneConversationHistory(userId) {
+    _pruneHistory(userId);
 }
 
 // Session functions
@@ -500,6 +515,7 @@ module.exports = {
     saveMessage,
     getConversationHistory,
     clearConversationHistory,
+    pruneConversationHistory,
     createSession,
     getSession,
     authenticateSession,

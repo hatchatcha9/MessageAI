@@ -475,7 +475,7 @@ async function processCommands(response, user, phoneNumber) {
                         if (menuResult.success) {
                             prefs.currentRestaurant = restaurantId;
                             prefs.currentRestaurantSource = 'doordash';
-                            prefs.currentRestaurantUrl = menuResult.url;
+                            prefs.currentRestaurantUrl = menuResult.url || null;
                             // Clear pending option state when switching restaurants
                             delete prefs.pendingDoordashItem;
                             delete prefs.pendingDoordashOptions;
@@ -540,6 +540,10 @@ async function processCommands(response, user, phoneNumber) {
                                 cleanResponse = menuText;
                                 additionalContext = '';
                             } else {
+                                // Don't leave a dead restaurant selected — clear it so ADD_ITEM_NUM fails cleanly
+                                prefs.currentRestaurant = null;
+                                prefs.currentRestaurantUrl = null;
+                                db.setUserPreferences(user.id, prefs);
                                 additionalContext = `\n\nReached ${restaurantName} but couldn't load menu items. Try selecting again?`;
                             }
                             actions.push({ type: 'select_restaurant_doordash', restaurant: restaurantName, menuItemCount: menuItems.length });
@@ -646,6 +650,11 @@ async function processCommands(response, user, phoneNumber) {
                 // e.g. "Teri Chicken, Kalua Pig, White Rice, Teri Sauce" → phrase[0] → group[0], phrase[1] → group[1], etc.
                 const userPhrases = textSelectMatch[1].split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0);
                 console.log('[DoorDash] Text-based option selection (phrases):', userPhrases);
+                if (userPhrases.length === 0) {
+                    const firstGroup = prefsText.pendingDoordashOptions[0];
+                    additionalContext = `\n\nNo options provided. Please say the option names, e.g.: "${firstGroup?.options?.slice(0, 2).join(', ')}"`;
+                    return { response: cleanResponse, actions };
+                }
                 const numGroups = prefsText.pendingDoordashOptions.length;
                 const selectionsText = [];
 
@@ -686,6 +695,10 @@ async function processCommands(response, user, phoneNumber) {
                 // Phase 1: positional matching — phrase[N] → group[N]
                 for (let gIdx = 0; gIdx < numGroups; gIdx++) {
                     const group = prefsText.pendingDoordashOptions[gIdx];
+                    if (!group.options || group.options.length === 0) {
+                        console.warn(`[DoorDash] Group ${gIdx} (${group.name}) has no options, skipping`);
+                        continue;
+                    }
                     const phrase = userPhrases[gIdx];
                     const match = matchPhraseInGroup(group, phrase);
                     let matchedOption, matchedIndex;
@@ -1061,10 +1074,18 @@ async function processCommands(response, user, phoneNumber) {
         let removed = false;
         for (const restaurantId of Object.keys(cart.items || {})) {
             const items = cart.items[restaurantId];
-            const match = items.find(i =>
-                i.name.toLowerCase().includes(itemName) ||
-                itemName.includes(i.name.toLowerCase().split(' ')[0])
+            // Prefer exact match, then startsWith, then includes — never silent ambiguity
+            const exact = items.filter(i => i.name.toLowerCase() === itemName);
+            const fuzzy = exact.length > 0 ? exact : items.filter(i =>
+                i.name.toLowerCase().startsWith(itemName) ||
+                i.name.toLowerCase().includes(itemName)
             );
+            if (fuzzy.length > 1) {
+                additionalContext = `\n\nMultiple items match "${removeItemMatch[1].trim()}": ${fuzzy.map(i => i.name).join(', ')}. Please be more specific.`;
+                removed = true; // suppress "not found" message
+                break;
+            }
+            const match = fuzzy[0];
             if (match) {
                 db.removeFromCart(user.id, restaurantId, match.id);
                 const updatedCart = db.getCart(user.id);
@@ -1204,7 +1225,8 @@ async function processCommands(response, user, phoneNumber) {
         const address = addressMatch[1].trim();
         db.setUserAddress(user.id, address);
         cleanResponse = cleanResponse.replace(addressMatch[0], '').trim();
-        additionalContext = `\n\nAddress saved! I'll deliver to: ${address}`;
+        const displayAddr = address.replace(/\n+/g, ' ').substring(0, 120);
+        additionalContext = `\n\nAddress saved! I'll deliver to: ${displayAddr}`;
         actions.push({ type: 'address_saved', address });
     }
 
@@ -1232,7 +1254,7 @@ async function processCommands(response, user, phoneNumber) {
         if (orders.length > 0) {
             const lastOrder = orders[0];
             db.clearCart(user.id);
-            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
+            await doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
 
             const restaurantUrl = lastOrder.restaurant_url;
             if (restaurantUrl) {
@@ -1252,10 +1274,14 @@ async function processCommands(response, user, phoneNumber) {
                             db.cacheRestaurantMenu(user.id, lastOrder.restaurant_id, menuItems);
 
                         for (const item of lastOrder.items) {
-                            const menuIdx = menuItems.findIndex(m =>
-                                m.name.toLowerCase().includes(item.name.toLowerCase()) ||
-                                item.name.toLowerCase().includes(m.name.toLowerCase())
-                            );
+                            const lowerItem = item.name.toLowerCase();
+                            // Prefer exact match to avoid "Coke" matching "Coke Zero" before "Coke Bottle"
+                            const menuIdx = menuItems.findIndex(m => m.name.toLowerCase() === lowerItem) !== -1
+                                ? menuItems.findIndex(m => m.name.toLowerCase() === lowerItem)
+                                : menuItems.findIndex(m =>
+                                    m.name.toLowerCase().startsWith(lowerItem) ||
+                                    lowerItem.startsWith(m.name.toLowerCase())
+                                );
                             if (menuIdx >= 0) {
                                 const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
                                 if (addResult.success) {
@@ -1385,12 +1411,15 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'history_cleared' });
     }
 
-    // Strip cart/order display blocks Claude may have generated in its text
-    // Cart blocks contain "YOUR CART" or "YOUR ORDER" surrounded by ══ borders
-    cleanResponse = cleanResponse.replace(/══+[^═]*(?:YOUR CART|YOUR ORDER|🛒)[\s\S]*?══+[^\n]*/gi, '').trim();
-    // Also strip ── sub-blocks (line items + totals) that Claude generated
-    cleanResponse = cleanResponse.replace(/══+[\s\S]*?Anything else[^\n]*/gi, '').trim();
-    cleanResponse = cleanResponse.replace(/──+[\s\S]*?TOTAL:[^\n]*\n?/gi, '').trim();
+    // Strip ══ bordered blocks Claude may have generated — only if they contain cart keywords.
+    // Use a replace function so each match is inspected individually, preventing cross-block greediness.
+    cleanResponse = cleanResponse.replace(/══+[\s\S]*?══+[^\n]*/g, (match) =>
+        /YOUR CART|YOUR ORDER|🛒|Anything else/i.test(match) ? '' : match
+    ).trim();
+    // Strip ── bordered blocks that contain TOTAL (line-item sub-blocks)
+    cleanResponse = cleanResponse.replace(/──+[\s\S]*?──+[^\n]*/g, (match) =>
+        /TOTAL:/i.test(match) ? '' : match
+    ).trim();
     // Strip bullet-point item lines like "• Coke Bottle - $4.20" (price formatting)
     cleanResponse = cleanResponse.replace(/^[•\-]\s+.+\s+-\s+\$[\d.]+\s*$/gm, '').trim();
     // Strip Claude-generated fee rows (restaurant name then delivery/service/tax lines)
@@ -1454,6 +1483,7 @@ async function handleMessage(phoneNumber, message) {
     const messages = [...history, { role: 'user', content: message }];
 
     db.saveMessage(user.id, 'user', message);
+    db.pruneConversationHistory(user.id);
 
     let claudeResponse;
     try {
@@ -1464,8 +1494,11 @@ async function handleMessage(phoneNumber, message) {
             messages: messages
         });
     } catch (error) {
-        console.error('Error calling Claude API:', error);
-        return { response: 'Sorry, I had trouble connecting. Try again?', actions: [] };
+        console.error('Error calling Claude API:', error.message, error.status);
+        const msg = error.status === 429 ? "I'm rate limited — try again in a moment." :
+                    error.status === 401 ? 'API auth failed. Check ANTHROPIC_API_KEY.' :
+                    'Sorry, I had trouble connecting. Try again?';
+        return { response: msg, actions: [] };
     }
 
     try {
@@ -1736,14 +1769,18 @@ async function checkScheduledOrders() {
                 // Fire if within a 1-minute window (handles server timing drift)
                 if (Math.abs(schedMinutes - currentMinutes) > 1) continue;
 
+                // Dedup: skip if already fired this session (covers ±1 min overlap)
+                const execKey = `${userRow.id}:${time}`;
+                if (_scheduledOrdersFired.has(execKey)) continue;
+                _scheduledOrdersFired.add(execKey);
+
                 console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
 
-                // Clear scheduled order first to prevent double-execution
+                // Clear scheduled order atomically — only proceed if we own the clear
                 prefs.scheduledOrder = null;
                 db.db.prepare('UPDATE users SET preferences = ? WHERE id = ?').run(JSON.stringify(prefs), userRow.id);
 
                 const phone = userPhone || userRow.phone_number;
-                await sendSMS(phone, `Placing your scheduled order now!`);
 
                 // Create order record from snapshot
                 const restaurantIds = Object.keys(cart || {});
@@ -1783,6 +1820,10 @@ async function checkScheduledOrders() {
         console.error('[Scheduler] Error:', err.message);
     }
 }
+
+// In-memory dedup: tracks (userId:time) pairs already fired this process lifetime
+// Prevents double-fire when the ±1 minute window spans two consecutive poll cycles
+const _scheduledOrdersFired = new Set();
 
 setInterval(checkScheduledOrders, 60 * 1000);
 

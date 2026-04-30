@@ -2889,7 +2889,8 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             return { success: false, error: `0 restaurants found at ${currentUrl}`, restaurants: [] };
         }
 
-        // Stop intercepting responses
+        // Stop intercepting responses and requests
+        page.off('request', _reqInterceptor);
         page.off('response', _apiInterceptor);
         const capturedCount = Object.keys(_capturedStoreMenus).length;
         if (capturedCount > 0) {
