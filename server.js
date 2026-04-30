@@ -274,7 +274,7 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
 
 CRITICAL RULES:
 - NEVER describe what a command does in your text. The system handles ALL confirmations automatically. Do NOT say "Address saved!", "Setting up your DoorDash account", "Budget set", "Cart cleared", etc. — just use the command. One brief sentence max (e.g. "On it!" or "Got it!").
-- NEVER describe cart contents, list items, or calculate totals yourself. The system appends the real cart automatically.
+- NEVER describe cart contents, list items, or calculate totals yourself. The system appends the real cart automatically. Do NOT use box-drawing characters (══, ──), markdown (**bold**), or bullet symbols (•) — plain text only.
 - NEVER list restaurant search results or menu items in your text. The system appends results after [SEARCH:] and [SELECT:] automatically. Just say one short sentence like "Looking for pizza!" and use the command.
 - When user says a NUMBER after seeing restaurants, use [SELECT: number]
 - When user says a NUMBER after seeing a menu, use [ADD_ITEM_NUM: number] — BUT if ⚠️ AWAITING OPTION SELECTION appears above in this prompt, use [SELECT_OPTION: number] instead
@@ -528,10 +528,9 @@ async function processCommands(response, user, phoneNumber) {
                                     ? menuItems.filter(item => (parseFloat(item.price) || 0) <= budget)
                                     : menuItems;
 
-                                let menuText = `══════════════════\n`;
-                                menuText += `  ${restaurantName.toUpperCase()}\n`;
-                                if (budget) menuText += `  Under $${budget.toFixed(2)}\n`;
-                                menuText += `══════════════════\n\n`;
+                                let menuText = `${restaurantName.toUpperCase()}\n`;
+                                if (budget) menuText += `Under $${budget.toFixed(2)}\n`;
+                                menuText += `\n`;
 
                                 if (displayItems.length === 0) {
                                     menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
@@ -541,10 +540,10 @@ async function processCommands(response, user, phoneNumber) {
                                     const pageItems = displayItems.slice(0, PAGE_SIZE);
                                     // Use original index so ADD_ITEM_NUM still maps correctly
                                     menuText += pageItems.map(item =>
-                                        `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
+                                        `${menuItems.indexOf(item) + 1}. ${item.name}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' - ' + item.description : ''}`
                                     ).join('\n\n');
                                     if (displayItems.length > PAGE_SIZE) {
-                                        menuText += `\n\n(+${displayItems.length - PAGE_SIZE} more items — say "more menu" to see them)`;
+                                        menuText += `\n\n(+${displayItems.length - PAGE_SIZE} more - say "more menu")`;
                                     }
                                 }
                                 menuText += `\n\nWhat would you like? (Reply with item number)`;
@@ -592,10 +591,9 @@ async function processCommands(response, user, phoneNumber) {
                 const displayItems = budget
                     ? menuItems.filter(item => (parseFloat(item.price) || 0) <= budget)
                     : menuItems;
-                let menuText = `══════════════════\n`;
-                menuText += `  ${cachedRestaurant.name.toUpperCase()}\n`;
-                if (budget) menuText += `  Under $${budget.toFixed(2)}\n`;
-                menuText += `══════════════════\n\n`;
+                let menuText = `${cachedRestaurant.name.toUpperCase()}\n`;
+                if (budget) menuText += `Under $${budget.toFixed(2)}\n`;
+                menuText += `\n`;
                 if (displayItems.length === 0) {
                     menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
                 } else {
@@ -603,10 +601,10 @@ async function processCommands(response, user, phoneNumber) {
                     const pageStart = prefs.menuPage ? prefs.menuPage * PAGE_SIZE : 0;
                     const pageItems = displayItems.slice(pageStart, pageStart + PAGE_SIZE);
                     menuText += pageItems.map(item =>
-                        `${menuItems.indexOf(item) + 1}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`
+                        `${menuItems.indexOf(item) + 1}. ${item.name}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' - ' + item.description : ''}`
                     ).join('\n\n');
                     if (displayItems.length > pageStart + PAGE_SIZE) {
-                        menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more — say "more menu")`;
+                        menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more - say "more menu")`;
                     }
                 }
                 additionalContext = `\n\n${menuText}`;
@@ -770,7 +768,7 @@ async function processCommands(response, user, phoneNumber) {
                         const groupsToShowText = newGroupsText.length > 0 ? newGroupsText : addResultText.requiredOptions;
                         additionalContext = `\n\nPlease select more options:\n`;
                         groupsToShowText.forEach(group => {
-                            additionalContext += `**${group.name}**:\n`;
+                            additionalContext += `${group.name.toUpperCase()}:\n`;
                             group.options.forEach((opt, oIdx) => { additionalContext += `   ${oIdx + 1}. ${opt}\n`; });
                         });
                         prefsText.pendingDoordashOptions = groupsToShowText;
@@ -839,7 +837,7 @@ async function processCommands(response, user, phoneNumber) {
                     const groupsToShow = newGroups.length > 0 ? newGroups : addResultOpt.requiredOptions;
                     additionalContext = `\n\nPlease select more options:\n`;
                     groupsToShow.forEach((group, gIdx) => {
-                        additionalContext += `**${group.name}**:\n`;
+                        additionalContext += `${group.name.toUpperCase()}:\n`;
                         group.options.forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
                     });
                     prefsOpt.pendingDoordashOptions = groupsToShow;
@@ -989,23 +987,21 @@ async function processCommands(response, user, phoneNumber) {
 
                             addResult.requiredOptions.forEach((group, gIdx) => {
                                 const isCurrent = gIdx === 0;
-                                additionalContext += `**${gIdx + 1}. ${group.name}**${group.required ? ' (Required)' : ''}${group.hasSelection ? ' ✓' : ''}:\n`;
+                                additionalContext += `${gIdx + 1}. ${group.name.toUpperCase()}${group.required ? ' (required)' : ''}${group.hasSelection ? ' - done' : ''}:\n`;
                                 if (isCurrent || !group.hasSelection) {
-                                    // Show options for current group or unselected groups
                                     group.options.slice(0, 15).forEach((opt, oIdx) => {
                                         additionalContext += `   ${oIdx + 1}. ${opt}\n`;
                                     });
                                     if (group.options.length > 15) {
-                                        additionalContext += `   ... and ${group.options.length - 15} more\n`;
+                                        additionalContext += `   ...and ${group.options.length - 15} more\n`;
                                     }
                                 }
                                 additionalContext += '\n';
                             });
 
-                            // Ask for the first group's choice
                             const firstGroup = addResult.requiredOptions[0];
-                            additionalContext += `**Please choose for "${firstGroup.name}"** - Reply with a number (1-${Math.min(8, firstGroup.options.length)})`;
-                            additionalContext += `\n(Other options will use defaults, or you can specify: "2, Flour, Black Beans")`;
+                            additionalContext += `Choose for "${firstGroup.name}" - reply with a number (1-${Math.min(8, firstGroup.options.length)})`;
+                            additionalContext += `\n(Or specify all at once: "2, Flour, Black Beans")`;
 
                             // If there were more items queued, mention them
                             const remaining = addNumMatches.slice(matchIdx + 1);
@@ -1423,19 +1419,20 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'history_cleared' });
     }
 
-    // Strip ══ bordered blocks Claude may have generated — only if they contain cart keywords.
-    // Use a replace function so each match is inspected individually, preventing cross-block greediness.
+    // Strip ══ bordered blocks Claude may have generated (old format) — only if they contain cart keywords
     cleanResponse = cleanResponse.replace(/══+[\s\S]*?══+[^\n]*/g, (match) =>
         /YOUR CART|YOUR ORDER|🛒|Anything else/i.test(match) ? '' : match
     ).trim();
-    // Strip ── bordered blocks that contain TOTAL (line-item sub-blocks)
+    // Strip ── bordered blocks with TOTAL (old format)
     cleanResponse = cleanResponse.replace(/──+[\s\S]*?──+[^\n]*/g, (match) =>
         /TOTAL:/i.test(match) ? '' : match
     ).trim();
-    // Strip bullet-point item lines like "• Coke Bottle - $4.20" (price formatting)
-    cleanResponse = cleanResponse.replace(/^[•\-]\s+.+\s+-\s+\$[\d.]+\s*$/gm, '').trim();
-    // Strip Claude-generated fee rows (restaurant name then delivery/service/tax lines)
-    cleanResponse = cleanResponse.replace(/^.*\n(?:Delivery|Service Fee|Tax):\s+\$[\d.]+.*$/gm, '').trim();
+    // Strip Claude-generated cart blocks in new plain-text format: "YOUR ORDER\n...\nTotal: $X"
+    cleanResponse = cleanResponse.replace(/YOUR ORDER\n[\s\S]*?Total:\s*\$[\d.]+/gi, '').trim();
+    // Strip individual price lines Claude may write: "1x Item - $4.20" or "• Item - $4.20"
+    cleanResponse = cleanResponse.replace(/^(?:\d+x\s+|[•\-]\s+).+\s+-\s+\$[\d.]+\s*$/gm, '').trim();
+    // Strip standalone fee/total lines
+    cleanResponse = cleanResponse.replace(/^(?:Subtotal|Delivery|Service Fee|Tax|Total):\s+\$[\d.]+.*$/gm, '').trim();
     cleanResponse = cleanResponse.replace(/\n{3,}/g, '\n\n').trim();
 
     // Clean up response
@@ -1496,10 +1493,10 @@ async function _handleMessage(phoneNumber, message) {
         }
         let menuText = pageItems.map(item => {
             const originalIndex = doordashMenu.indexOf(item) + 1;
-            return `${originalIndex}. ${item.name.toUpperCase()}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' · ' + item.description : ''}`;
+            return `${originalIndex}. ${item.name}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' - ' + item.description : ''}`;
         }).join('\n\n');
         if (displayItems.length > pageStart + PAGE_SIZE) {
-            menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more — say "more menu")`;
+            menuText += `\n\n(+${displayItems.length - pageStart - PAGE_SIZE} more - say "more menu")`;
         }
         db.saveMessage(user.id, 'assistant', menuText);
         return { response: menuText, actions: [] };
