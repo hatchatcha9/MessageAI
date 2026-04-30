@@ -393,7 +393,9 @@ async function processCommands(response, user, phoneNumber) {
         prefsForClear.pendingDoordashItem = null;
         prefsForClear.pendingDoordashOptions = null;
         prefsForClear.pendingDoordashSelections = null;
+        prefsForClear.menuPage = 0;
         db.setUserPreferences(user.id, prefsForClear);
+        db.clearDoorDashCache(user.id); // wipe cached restaurant/menu so old data doesn't pollute next search
         cleanResponse = cleanResponse.replace('[CLEAR_CART]', '').trim();
         // Only show "cart cleared" message if no search is following (search results make it obvious)
         if (!response.match(/\[SEARCH:/i)) {
