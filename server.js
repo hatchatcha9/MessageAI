@@ -15,7 +15,7 @@ const _origErr = console.error.bind(console);
 console.log = (...args) => { const line = args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origLog(...args); };
 console.error = (...args) => { const line = '[ERR] ' + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origErr(...args); };
 
-const CRASH_LOG = 'C:/Users/hatch/Projects/MessageAI/crash.log';
+const CRASH_LOG = path.join(__dirname, 'crash.log');
 process.on('uncaughtException', (err) => {
     fs.appendFileSync(CRASH_LOG, `\n[${new Date().toISOString()}] UncaughtException:\n${err?.stack || err}\n`);
     process.exit(1);
@@ -345,6 +345,17 @@ async function processCommands(response, user, phoneNumber) {
     let actions = [];
     let additionalContext = '';
     let textResolvedMenuIndex = -1; // tracks which menu index SELECT_OPTIONS_TEXT already added this turn
+
+    // Expire stale pending options (user walked away mid-flow)
+    const _prefs0 = db.getUserPreferences(user.id);
+    if (_prefs0.pendingOptionsExpiry && Date.now() > _prefs0.pendingOptionsExpiry) {
+        console.log('[processCommands] Pending options expired, clearing stale state');
+        _prefs0.pendingDoordashItem = null;
+        _prefs0.pendingDoordashOptions = null;
+        _prefs0.pendingDoordashSelections = null;
+        _prefs0.pendingOptionsExpiry = null;
+        db.setUserPreferences(user.id, _prefs0);
+    }
 
     // Budget — must run BEFORE search so the saved budget is visible to the search handler
     const budgetMatch = response.match(/\[SAVE_BUDGET:\s*(\d+(?:\.\d+)?)\]/i);
@@ -969,7 +980,8 @@ async function processCommands(response, user, phoneNumber) {
                             needsOptionsBreak = true;
                             prefs.pendingDoordashItem = { ...item, menuIndex: num };
                             prefs.pendingDoordashOptions = addResult.requiredOptions;
-                            prefs.pendingDoordashGroupIndex = 0; // Track which group we're asking about
+                            prefs.pendingDoordashGroupIndex = 0;
+                            prefs.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000; // 30-min TTL
                             db.setUserPreferences(user.id, prefs);
 
                             // Show ALL option groups so user understands what they need to select
@@ -1433,8 +1445,22 @@ async function processCommands(response, user, phoneNumber) {
     return { response: cleanResponse, actions };
 }
 
+// Per-user message lock — serializes concurrent messages from the same user to prevent
+// simultaneous prefs reads/writes from racing each other (same pattern as doordash.js withOpLock)
+const _userMessageLocks = new Map();
+function withUserLock(phoneNumber, fn) {
+    const prev = _userMessageLocks.get(phoneNumber) || Promise.resolve();
+    const next = prev.then(() => fn()).catch(e => { throw e; });
+    _userMessageLocks.set(phoneNumber, next.catch(() => {}));
+    return next;
+}
+
 // Handle incoming message
 async function handleMessage(phoneNumber, message) {
+    return withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message));
+}
+
+async function _handleMessage(phoneNumber, message) {
     const user = db.getOrCreateUser(phoneNumber);
     const userAddress = db.getUserAddress(user.id);
     const preferences = db.getUserPreferences(user.id);
@@ -1489,7 +1515,7 @@ async function handleMessage(phoneNumber, message) {
     try {
         claudeResponse = await anthropic.messages.create({
             model: 'claude-sonnet-4-20250514',
-            max_tokens: 500,
+            max_tokens: 800,
             system: buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu),
             messages: messages
         });
@@ -1544,6 +1570,16 @@ app.post('/api/twilio/webhook', async (req, res) => {
     if (!message || !from) {
         console.log('[Twilio Webhook] Missing Body or From');
         return res.sendStatus(200);
+    }
+
+    // Validate Twilio signature to reject spoofed webhook calls
+    if (TWILIO_AUTH_TOKEN) {
+        const sig = req.headers['x-twilio-signature'] || '';
+        const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+        if (!twilio.validateRequest(TWILIO_AUTH_TOKEN, sig, url, req.body || {})) {
+            console.warn('[Twilio Webhook] Invalid signature — rejecting request');
+            return res.status(403).send('Forbidden');
+        }
     }
 
     console.log(`[Twilio] Incoming SMS from ${from}: ${message}`);
@@ -1742,7 +1778,7 @@ async function pollOrderStatuses() {
     }
 }
 
-setInterval(pollOrderStatuses, 2 * 60 * 1000);
+setInterval(() => pollOrderStatuses().catch(err => console.error('[StatusPoll] Unhandled error:', err.message)), 2 * 60 * 1000);
 
 // Scheduled order execution (every minute)
 async function checkScheduledOrders() {
@@ -1799,6 +1835,9 @@ async function checkScheduledOrders() {
                     });
                 });
 
+                // Clear browser cart so stale items from previous sessions don't get mixed in
+                await doordash.clearBrowserCart().catch(e => console.warn('[Scheduler] clearBrowserCart failed:', e.message));
+
                 const result = await doordash.placeFullOrder(creds, {
                     restaurantName: restaurantIds[0],
                     items: orderItems,
@@ -1825,7 +1864,7 @@ async function checkScheduledOrders() {
 // Prevents double-fire when the ±1 minute window spans two consecutive poll cycles
 const _scheduledOrdersFired = new Set();
 
-setInterval(checkScheduledOrders, 60 * 1000);
+setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err.message)), 60 * 1000);
 
 // Start server
 app.listen(PORT, async () => {
