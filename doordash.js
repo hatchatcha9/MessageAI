@@ -1707,6 +1707,12 @@ async function placeOrder() {
     try {
         console.log('[DoorDash] Placing order...');
 
+        const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
+        if (DRY_RUN) {
+            console.log('[DoorDash] DRY RUN — skipping Place Order click (placeOrder)');
+            return { success: true, dryRun: true, message: 'Dry run — place order skipped.' };
+        }
+
         // Check for any errors before attempting to place order
         const preOrderErrors = await detectPageErrors();
         if (preOrderErrors.hasError) {
@@ -2359,6 +2365,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
     console.log(`[DoorDash] Query: ${query || 'all'}`);
     console.log(`[DoorDash] Address: ${address}`);
     let _browserRestartedThisSearch = false;
+    let _reqInterceptor = null;
+    let _apiInterceptor = null;
+    const _cleanupInterceptors = () => {
+        if (_reqInterceptor) { try { page.off('request', _reqInterceptor); } catch(e) {} _reqInterceptor = null; }
+        if (_apiInterceptor) { try { page.off('response', _apiInterceptor); } catch(e) {} _apiInterceptor = null; }
+    };
 
     // API search is blocked by DoorDash WAF (GraphQL 403, REST 404) and launches extra
     // browser instances that consume memory on Railway — skip it, go straight to browser.
@@ -2391,7 +2403,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         // Capture DoorDash's own GraphQL request headers so we can reuse them.
         // Their requests pass CF because they include auth tokens (x-chk-token etc.).
-        const _reqInterceptor = (request) => {
+        _reqInterceptor = (request) => {
             try {
                 const url = request.url();
                 if (!url.includes('doordash.com/graphql') || request.method() !== 'POST') return;
@@ -2404,7 +2416,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
         page.on('request', _reqInterceptor);
 
-        const _apiInterceptor = async (response) => {
+        _apiInterceptor = async (response) => {
             const url = response.url();
             if (!url.includes('doordash.com')) return;
             const status = response.status();
@@ -2567,6 +2579,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // If we got restaurants from the API, skip loading the heavy search page
         if (_capturedRestaurants.length > 0) {
             console.log('[DoorDash] Skipping search page navigation — using API results');
+            _cleanupInterceptors();
             const restaurants = await extractRestaurantList();
             const sorted = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
             return { success: true, restaurants: sorted };
@@ -2878,6 +2891,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     const retryRestaurants = await extractRestaurantList();
                     console.log(`[DoorDash] After retry: extracted ${retryRestaurants.length} restaurants`);
                     if (retryRestaurants.length > 0) {
+                        _cleanupInterceptors();
                         const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
                         return { success: true, restaurants: sorted };
                     }
@@ -2886,12 +2900,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 }
             }
 
+            _cleanupInterceptors();
             return { success: false, error: `0 restaurants found at ${currentUrl}`, restaurants: [] };
         }
 
         // Stop intercepting responses and requests
-        page.off('request', _reqInterceptor);
-        page.off('response', _apiInterceptor);
+        _cleanupInterceptors();
         const capturedCount = Object.keys(_capturedStoreMenus).length;
         if (capturedCount > 0) {
             console.log(`[DoorDash] Intercepted menu data for ${capturedCount} stores during search`);
@@ -2912,6 +2926,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         };
 
     } catch (error) {
+        _cleanupInterceptors();
         console.error('[DoorDash] Browser search error:', error.message);
         console.error('[DoorDash] Stack:', error.stack);
         try { await takeScreenshot('error-' + Date.now()); } catch (e) {}
@@ -6498,13 +6513,13 @@ async function getOrderStatus(credentials, trackingUrl = null) {
         let status = 'unknown';
         let statusText = '';
 
-        if (lower.includes('delivered') || lower.includes('enjoy your')) {
+        if (lower.includes('has been delivered') || lower.includes('order delivered') || lower.includes('enjoy your meal') || lower.includes('enjoy your food') || lower.includes('enjoy your order')) {
             status = 'delivered';
             statusText = 'Your order has been delivered!';
         } else if (lower.includes('on the way') || lower.includes('heading to you') || lower.includes('almost there')) {
             status = 'on_the_way';
             statusText = 'Your Dasher is on the way!';
-        } else if (lower.includes('picked up') || lower.includes('dasher picked') || lower.includes('heading to the restaurant') === false && lower.includes('picked')) {
+        } else if (lower.includes('picked up') || lower.includes('dasher picked') || (!lower.includes('heading to the restaurant') && lower.includes('picked'))) {
             status = 'picked_up';
             statusText = 'Dasher picked up your order!';
         } else if (lower.includes('dasher') && (lower.includes('assigned') || lower.includes('picking up'))) {
@@ -6772,7 +6787,7 @@ module.exports = {
     navigateToRestaurantPage: locked(navigateToRestaurantPage),
     clearBrowserCart: locked(clearBrowserCart),
     readBrowserCart: locked(readBrowserCart),
-    getOrderStatus,
+    getOrderStatus: locked(getOrderStatus),
     exportCookies,
     importCookies
 };

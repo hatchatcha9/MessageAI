@@ -22,9 +22,11 @@ process.on('uncaughtException', (err) => {
 });
 process.on('unhandledRejection', (reason) => {
     fs.appendFileSync(CRASH_LOG, `\n[${new Date().toISOString()}] UnhandledRejection:\n${reason?.stack || reason}\n`);
+    process.exit(1);
 });
 
 const app = express();
+app.set('trust proxy', 1); // Railway sits behind a load balancer; trust X-Forwarded-Proto so req.protocol = 'https'
 const PORT = process.env.PORT || 3000;
 
 // Initialize Anthropic client
@@ -324,7 +326,6 @@ function getOrderStatusText(order) {
     } else if (minutesAgo < 50) {
         return `Almost there! Your ${name} order is close.\nPlaced ${minutesAgo} min ago.`;
     } else {
-        db.updateOrderStatus(order.id, 'delivered');
         return `Your ${name} order should have arrived by now. If something went wrong, reply "help" and we'll sort it out.`;
     }
 }
@@ -489,6 +490,7 @@ async function processCommands(response, user, phoneNumber) {
                             prefs.currentRestaurant = restaurantId;
                             prefs.currentRestaurantSource = 'doordash';
                             prefs.currentRestaurantUrl = menuResult.url || null;
+                            prefs.menuPage = 0;
                             // Clear pending option state when switching restaurants
                             delete prefs.pendingDoordashItem;
                             delete prefs.pendingDoordashOptions;
@@ -498,7 +500,6 @@ async function processCommands(response, user, phoneNumber) {
                             // Clear cart and menu page when switching restaurants
                             db.clearCart(user.id);
                             doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
-                            prefs.menuPage = 0;
 
                             const restaurantName = menuResult.restaurantName || selectedRestaurant.name;
 
@@ -1236,7 +1237,10 @@ async function processCommands(response, user, phoneNumber) {
         db.setUserAddress(user.id, address);
         cleanResponse = cleanResponse.replace(addressMatch[0], '').trim();
         const displayAddr = address.replace(/\n+/g, ' ').substring(0, 120);
-        additionalContext = `\n\nAddress saved! I'll deliver to: ${displayAddr}`;
+        // Only show confirmation when no search is also happening (search results make it obvious)
+        if (!response.match(/\[SEARCH:/i)) {
+            additionalContext = `\n\nAddress saved! I'll deliver to: ${displayAddr}`;
+        }
         actions.push({ type: 'address_saved', address });
     }
 
@@ -1278,7 +1282,8 @@ async function processCommands(response, user, phoneNumber) {
                         prefs.currentRestaurantUrl = restaurantUrl;
                         db.setUserPreferences(user.id, prefs);
 
-                        const cachedMenu = db.getCachedRestaurantMenu(user.id, lastOrder.restaurant_id);
+                        const cachedMenuRaw = db.getCachedRestaurantMenu(user.id, lastOrder.restaurant_id);
+                        const cachedMenu = cachedMenuRaw?.length > 0 ? cachedMenuRaw : null;
                         const menuItems = cachedMenu || await doordash.extractMenuItems();
                         if (!cachedMenu && menuItems.length > 0)
                             db.cacheRestaurantMenu(user.id, lastOrder.restaurant_id, menuItems);
@@ -1316,6 +1321,7 @@ async function processCommands(response, user, phoneNumber) {
                 lastOrder.items.forEach(item => db.addToCart(user.id, lastOrder.restaurant_id, item));
                 const prefs = db.getUserPreferences(user.id);
                 prefs.currentRestaurant = lastOrder.restaurant_id;
+                prefs.currentRestaurantSource = 'doordash';
                 db.setUserPreferences(user.id, prefs);
                 const cart = db.getCart(user.id);
                 additionalContext = `\n\nLoaded your last order from ${lastOrder.restaurant_name}!\n\n${restaurants.formatCart(cart)}\n\nNote: any customizations (e.g. protein choice) may be reset to defaults. Reply "show cart" to verify before checking out.`;
@@ -1449,8 +1455,13 @@ async function processCommands(response, user, phoneNumber) {
 const _userMessageLocks = new Map();
 function withUserLock(phoneNumber, fn) {
     const prev = _userMessageLocks.get(phoneNumber) || Promise.resolve();
-    const next = prev.then(() => fn()).catch(e => { throw e; });
-    _userMessageLocks.set(phoneNumber, next.catch(() => {}));
+    const next = prev.then(() => fn());
+    const guard = next.catch(() => {});
+    _userMessageLocks.set(phoneNumber, guard);
+    // Remove entry once the chain settles so the Map doesn't grow unbounded
+    guard.then(() => {
+        if (_userMessageLocks.get(phoneNumber) === guard) _userMessageLocks.delete(phoneNumber);
+    });
     return next;
 }
 
@@ -1527,7 +1538,12 @@ async function _handleMessage(phoneNumber, message) {
     }
 
     try {
-        let assistantMessage = claudeResponse.content[0].text;
+        const textBlock = claudeResponse.content?.find(c => c.type === 'text');
+        if (!textBlock?.text) {
+            console.error('[Claude] Response had no text block:', JSON.stringify(claudeResponse.content?.map(c => c.type)));
+            return { response: "Sorry, I got an unexpected response. Please try again.", actions: [] };
+        }
+        let assistantMessage = textBlock.text;
         const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber);
         assistantMessage = cleanedResponse;
 
@@ -1779,6 +1795,10 @@ async function pollOrderStatuses() {
 
 setInterval(() => pollOrderStatuses().catch(err => console.error('[StatusPoll] Unhandled error:', err.message)), 2 * 60 * 1000);
 
+// In-memory dedup: tracks { key → firedAt } for scheduled orders
+// Entries older than 10 minutes are pruned each cycle to prevent unbounded growth
+const _scheduledOrdersFired = new Map();
+
 // Scheduled order execution (every minute)
 async function checkScheduledOrders() {
     try {
@@ -1804,10 +1824,15 @@ async function checkScheduledOrders() {
                 // Fire if within a 1-minute window (handles server timing drift)
                 if (Math.abs(schedMinutes - currentMinutes) > 1) continue;
 
-                // Dedup: skip if already fired this session (covers ±1 min overlap)
+                // Dedup: skip if already fired recently (covers ±1 min overlap)
                 const execKey = `${userRow.id}:${time}`;
-                if (_scheduledOrdersFired.has(execKey)) continue;
-                _scheduledOrdersFired.add(execKey);
+                const firedAt = _scheduledOrdersFired.get(execKey);
+                if (firedAt && Date.now() - firedAt < 10 * 60 * 1000) continue;
+                _scheduledOrdersFired.set(execKey, Date.now());
+                // Prune entries older than 10 minutes
+                for (const [k, t] of _scheduledOrdersFired) {
+                    if (Date.now() - t > 10 * 60 * 1000) _scheduledOrdersFired.delete(k);
+                }
 
                 console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
 
@@ -1858,10 +1883,6 @@ async function checkScheduledOrders() {
         console.error('[Scheduler] Error:', err.message);
     }
 }
-
-// In-memory dedup: tracks (userId:time) pairs already fired this process lifetime
-// Prevents double-fire when the ±1 minute window spans two consecutive poll cycles
-const _scheduledOrdersFired = new Set();
 
 setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err.message)), 60 * 1000);
 

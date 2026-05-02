@@ -12,9 +12,11 @@ try {
     process.exit(1);
 }
 
-// Encryption key - in production, use a key management service
-// For now, we'll generate one and store it in .env
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+if (!process.env.ENCRYPTION_KEY) {
+    console.error('[db] ENCRYPTION_KEY env var is not set — refusing to start to avoid silent data loss');
+    process.exit(1);
+}
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 const ALGORITHM = 'aes-256-gcm';
 
 // Encryption helpers
