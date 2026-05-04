@@ -1292,12 +1292,11 @@ async function processCommands(response, user, phoneNumber) {
                         for (const item of lastOrder.items) {
                             const lowerItem = item.name.toLowerCase();
                             // Prefer exact match to avoid "Coke" matching "Coke Zero" before "Coke Bottle"
-                            const menuIdx = menuItems.findIndex(m => m.name.toLowerCase() === lowerItem) !== -1
-                                ? menuItems.findIndex(m => m.name.toLowerCase() === lowerItem)
-                                : menuItems.findIndex(m =>
-                                    m.name.toLowerCase().startsWith(lowerItem) ||
-                                    lowerItem.startsWith(m.name.toLowerCase())
-                                );
+                            const exactIdx = menuItems.findIndex(m => m.name.toLowerCase() === lowerItem);
+                            const menuIdx = exactIdx !== -1 ? exactIdx : menuItems.findIndex(m =>
+                                m.name.toLowerCase().startsWith(lowerItem) ||
+                                lowerItem.startsWith(m.name.toLowerCase())
+                            );
                             if (menuIdx >= 0) {
                                 const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
                                 if (addResult.success) {

@@ -3324,7 +3324,6 @@ async function extractMenuItems() {
         console.log(`[DoorDash] Page height: ${pageHeight}px — scroll-extracting...`);
 
         let emptyStreak = 0;
-        const prevSize = 0;
         for (let pos = 0; pos <= pageHeight; pos += 400) {
             try {
                 await evaluateWithTimeout((y) => window.scrollTo(0, y), pos);
@@ -4626,7 +4625,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     let node;
                     let bestExact = null, bestPrefix = null;
                     while ((node = walker.nextNode())) {
-                        const t = node.textContent.trim().toLowerCase();
+                        const t = node.textContent.trim().replace(/\s+/g, ' ').toLowerCase();
                         if (!t) continue;
                         const isExact = (t === lowerName);
                         const isPrefix = !isExact && t.startsWith(lowerName) && t.length < lowerName.length + 30;
