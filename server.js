@@ -223,6 +223,10 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
 
 6. PLACE ORDER - When user confirms order:
    [PLACE_ORDER]
+   For scheduled delivery through DoorDash (pick a future time slot at checkout):
+   [PLACE_ORDER_SCHEDULED: HH:MM]
+   Triggers: "place it for 6pm", "schedule the delivery for 7:30", "order now but deliver at 5pm", "schedule through doordash"
+   IMPORTANT: Convert to 24-hour format (6pm → 18:00). Use this INSTEAD of [PLACE_ORDER] when user wants a scheduled delivery time.
 
 7. SAVE ADDRESS - When user provides their address:
    [SAVE_ADDRESS: full address here]
@@ -1228,6 +1232,51 @@ async function processCommands(response, user, phoneNumber) {
                     additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
                 }
             }
+        }
+    }
+
+    // Place order with DoorDash-native scheduled delivery time
+    const placeScheduledMatch = response.match(/\[PLACE_ORDER_SCHEDULED:\s*(\d{1,2}:\d{2}(?:\s*[ap]m)?)\]/i);
+    if (placeScheduledMatch) {
+        const scheduledTime = placeScheduledMatch[1].trim();
+        const cart = db.getCart(user.id);
+        const prefs = db.getUserPreferences(user.id);
+        const address = db.getUserAddress(user.id);
+        cleanResponse = cleanResponse.replace(placeScheduledMatch[0], '').trim();
+
+        const restaurantIds = Object.keys(cart.items || {});
+        if (!address) {
+            additionalContext = `\n\nI need your delivery address first.`;
+        } else if (restaurantIds.length === 0) {
+            additionalContext = `\n\nYour cart is empty! Add some items first.`;
+        } else if (prefs.currentRestaurantSource === 'doordash') {
+            try {
+                const result = await doordash.checkoutCurrentCart({ scheduledTime });
+                if (result.dryRun) {
+                    additionalContext = `\n\nDry run complete! Scheduled delivery for ${result.scheduledSlot || scheduledTime} ready.`;
+                } else if (result.success) {
+                    const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
+                    const restaurantName = currentRestaurant?.name || 'DoorDash Order';
+                    const slotLabel = result.scheduledSlot || scheduledTime;
+                    db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
+                        cart.items[prefs.currentRestaurant] || [], address, '0', '0',
+                        prefs.currentRestaurantUrl || null, result.orderUrl || null);
+                    db.clearCart(user.id);
+                    prefs.currentRestaurant = null;
+                    prefs.currentRestaurantSource = null;
+                    prefs.currentRestaurantUrl = null;
+                    db.setUserPreferences(user.id, prefs);
+                    additionalContext = `\n\nOrder placed! Scheduled delivery: ${slotLabel}. Reply "order status" to check on it.`;
+                    actions.push({ type: 'order_placed_doordash_scheduled', restaurant: restaurantName, slot: slotLabel });
+                } else {
+                    additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
+                }
+            } catch (error) {
+                console.error('[Checkout] Scheduled DoorDash error:', error);
+                additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
+            }
+        } else {
+            additionalContext = `\n\nScheduled checkout requires an active DoorDash restaurant. Try searching and selecting a restaurant first.`;
         }
     }
 

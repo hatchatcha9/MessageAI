@@ -2104,7 +2104,118 @@ async function placeAdditionalOrder(credentials, orderDetails) {
  * Checkout with items already in the DoorDash cart
  * This is simpler than placeFullOrder - it assumes items are already added
  */
-async function checkoutCurrentCart() {
+// Select a scheduled delivery time in DoorDash checkout.
+// targetTime: "HH:MM" 24-hour or "H:MM PM" string.
+// Returns { success, selectedSlot } — success=false means couldn't pick a slot (caller falls back to ASAP).
+async function selectScheduledDeliveryTime(targetTime) {
+    console.log(`[DoorDash] Selecting scheduled delivery time: ${targetTime}`);
+    try {
+        // Parse target into minutes-since-midnight for comparison
+        const parseMinutes = (str) => {
+            const m = str.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+            if (!m) return null;
+            let h = parseInt(m[1]), min = parseInt(m[2]);
+            const period = (m[3] || '').toLowerCase();
+            if (period === 'pm' && h < 12) h += 12;
+            if (period === 'am' && h === 12) h = 0;
+            return h * 60 + min;
+        };
+        const targetMins = parseMinutes(targetTime);
+
+        // Step 1: find and click the delivery time picker (looks like "ASAP" or a time display)
+        const timePickerSelectors = [
+            '[data-anchor-id*="DeliveryTime"]',
+            '[data-testid*="delivery-time"]',
+            '[data-testid*="DeliveryTime"]',
+        ];
+        let opened = false;
+        for (const sel of timePickerSelectors) {
+            const loc = page.locator(sel).first();
+            if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
+                await loc.click();
+                await delay(1500);
+                opened = true;
+                console.log(`[DoorDash] Opened time picker via ${sel}`);
+                break;
+            }
+        }
+        if (!opened) {
+            // Try text-based: button/div showing "ASAP" or "Schedule for later"
+            const asapLoc = page.locator('button, [role="button"], div[tabindex]')
+                .filter({ hasText: /^asap$|schedule.*later|delivery time/i }).first();
+            if (await asapLoc.count() > 0) {
+                await asapLoc.click();
+                await delay(1500);
+                opened = true;
+                console.log('[DoorDash] Opened time picker via ASAP text');
+            }
+        }
+        if (!opened) {
+            console.log('[DoorDash] Could not find delivery time picker');
+            return { success: false };
+        }
+
+        // Step 2: switch from ASAP to "Schedule" tab if present
+        const scheduleTab = page.locator('button, [role="tab"], [role="button"]')
+            .filter({ hasText: /schedule|later|pick a time/i }).first();
+        if (await scheduleTab.count() > 0 && await scheduleTab.isVisible().catch(() => false)) {
+            await scheduleTab.click();
+            await delay(1500);
+            console.log('[DoorDash] Switched to Schedule tab');
+        }
+
+        // Step 3: pick the time slot closest to the target
+        const slots = await page.locator('[role="option"], [role="radio"], label').all();
+        console.log(`[DoorDash] Found ${slots.length} time slots`);
+
+        let bestSlot = null, bestDiff = Infinity, bestText = '';
+        for (const slot of slots) {
+            const text = (await slot.textContent().catch(() => '')).trim();
+            if (!text) continue;
+            const slotMins = parseMinutes(text);
+            if (slotMins === null) continue;
+            const diff = targetMins !== null ? Math.abs(slotMins - targetMins) : slotMins; // if no target, pick first
+            if (diff < bestDiff) { bestDiff = diff; bestSlot = slot; bestText = text; }
+        }
+
+        if (!bestSlot) {
+            // Fallback: just click the first available option that isn't "ASAP"
+            const firstNonAsap = page.locator('[role="option"], [role="radio"], label')
+                .filter({ hasNotText: /asap/i }).first();
+            if (await firstNonAsap.count() > 0) {
+                bestSlot = firstNonAsap;
+                bestText = (await firstNonAsap.textContent().catch(() => '')).trim();
+            }
+        }
+
+        if (!bestSlot) {
+            console.log('[DoorDash] No selectable time slots found');
+            return { success: false };
+        }
+
+        await bestSlot.scrollIntoViewIfNeeded().catch(() => {});
+        await bestSlot.click();
+        await delay(1000);
+
+        // Step 4: confirm selection (some DoorDash modals have a "Save" or "Confirm" button)
+        const confirmBtn = page.locator('button, [role="button"]')
+            .filter({ hasText: /save|confirm|done|apply/i }).first();
+        if (await confirmBtn.count() > 0 && await confirmBtn.isVisible().catch(() => false)) {
+            await confirmBtn.click();
+            await delay(1500);
+            console.log('[DoorDash] Confirmed time slot selection');
+        }
+
+        console.log(`[DoorDash] Selected delivery slot: "${bestText}"`);
+        return { success: true, selectedSlot: bestText };
+    } catch (e) {
+        console.log('[DoorDash] selectScheduledDeliveryTime error:', e.message);
+        return { success: false };
+    }
+}
+
+async function checkoutCurrentCart(options = {}) {
+    const { scheduledTime = null } = options;
     console.log('[DoorDash] === CHECKING OUT CURRENT CART ===');
 
     try {
@@ -2227,6 +2338,19 @@ async function checkoutCurrentCart() {
             return { success: false, error: 'Could not reach checkout page' };
         }
 
+        // If a scheduled delivery time was requested, interact with DoorDash's time picker now
+        let selectedSlot = null;
+        if (scheduledTime) {
+            await delay(2000); // let checkout fully render before touching the time picker
+            const slotResult = await selectScheduledDeliveryTime(scheduledTime);
+            if (slotResult.success) {
+                selectedSlot = slotResult.selectedSlot;
+                console.log(`[DoorDash] Scheduled delivery slot set: ${selectedSlot}`);
+            } else {
+                console.log('[DoorDash] Could not select scheduled time — proceeding ASAP');
+            }
+        }
+
         // Wait up to 12s for the Place Order button to appear (vogue=t1 checkout renders slowly)
         let orderBtn = null;
         for (let attempt = 0; attempt < 4 && !orderBtn; attempt++) {
@@ -2341,7 +2465,7 @@ async function checkoutCurrentCart() {
 
         if (isConfirmed) {
             console.log('[DoorDash] Order confirmed! URL:', currentUrl);
-            return { success: true, message: 'Order placed!', orderUrl: currentUrl };
+            return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot };
         }
         // Order was clicked — if no error thrown, assume it went through
         console.log('[DoorDash] Place Order clicked, assuming success');
