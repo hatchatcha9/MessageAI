@@ -77,7 +77,8 @@ async function sendSMS(to, message) {
         console.log(`[Twilio] Sent to ${to} (${body.length} chars), sid: ${result.sid}`);
         return true;
     } catch (error) {
-        console.error('[Twilio] Send failed:', error.message);
+        const code = error.code || error.status || 'unknown';
+        console.error(`[Twilio] Send failed (code=${code}):`, error.message || String(error));
         return false;
     }
 }
@@ -454,7 +455,7 @@ async function processCommands(response, user, phoneNumber) {
                 prefs.lastSearchQuery = query;
                 prefs.lastSearchResults = null;
                 db.setUserPreferences(user.id, prefs);
-                additionalContext = `\n\nSearch for "${query}" crashed: ${error.message}. Use [SEARCH: ${query}] to try again.`;
+                additionalContext = `\n\nSearch for "${query}" crashed: ${error?.message || String(error)}. Use [SEARCH: ${query}] to try again.`;
             }
         }
     }
@@ -1224,7 +1225,7 @@ async function processCommands(response, user, phoneNumber) {
                     }
                 } catch (error) {
                     console.error('[Checkout] DoorDash error:', error);
-                    additionalContext = `\n\n${formatCheckoutError(error.message)}\n\nYour cart is saved.`;
+                    additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
                 }
             }
         }
@@ -1382,10 +1383,12 @@ async function processCommands(response, user, phoneNumber) {
         } else if (!address) {
             additionalContext = `\n\nI need your delivery address before scheduling. What's your address?`;
         } else {
+            const cachedForSchedule = db.getCachedCurrentRestaurant(user.id);
             const scheduledOrder = {
                 time: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
                 cart: cart.items,
                 restaurantId: prefs.currentRestaurant,
+                restaurantName: cachedForSchedule?.name || null,
                 restaurantSource: prefs.currentRestaurantSource,
                 address,
                 phoneNumber
@@ -1530,7 +1533,7 @@ async function _handleMessage(phoneNumber, message) {
             messages: messages
         });
     } catch (error) {
-        console.error('Error calling Claude API:', error.message, error.status);
+        console.error('Error calling Claude API:', error?.message || String(error), error?.status);
         const msg = error.status === 429 ? "I'm rate limited — try again in a moment." :
                     error.status === 401 ? 'API auth failed. Check ANTHROPIC_API_KEY.' :
                     'Sorry, I had trouble connecting. Try again?';
@@ -1789,11 +1792,11 @@ async function pollOrderStatuses() {
             }
         }
     } catch (err) {
-        console.error('[StatusPoll] Error:', err.message);
+        console.error('[StatusPoll] Error:', err?.message || String(err));
     }
 }
 
-setInterval(() => pollOrderStatuses().catch(err => console.error('[StatusPoll] Unhandled error:', err.message)), 2 * 60 * 1000);
+setInterval(() => pollOrderStatuses().catch(err => console.error('[StatusPoll] Unhandled error:', err?.message || String(err))), 2 * 60 * 1000);
 
 // In-memory dedup: tracks { key → firedAt } for scheduled orders
 // Entries older than 10 minutes are pruned each cycle to prevent unbounded growth
@@ -1813,10 +1816,11 @@ async function checkScheduledOrders() {
 
         for (const userRow of usersWithScheduled) {
             try {
-                const prefs = JSON.parse(userRow.preferences || '{}');
+                let prefs;
+                try { prefs = JSON.parse(userRow.preferences || '{}'); } catch { continue; }
                 if (!prefs.scheduledOrder) continue;
 
-                const { time, cart, restaurantId, restaurantSource, address, phoneNumber: userPhone } = prefs.scheduledOrder;
+                const { time, cart, restaurantId, restaurantName: scheduledRestaurantName, restaurantSource, address, phoneNumber: userPhone } = prefs.scheduledOrder;
                 if (!time || !time.includes(':')) continue;
 
                 const [schedH, schedM] = time.split(':').map(Number);
@@ -1863,7 +1867,7 @@ async function checkScheduledOrders() {
                 await doordash.clearBrowserCart().catch(e => console.warn('[Scheduler] clearBrowserCart failed:', e.message));
 
                 const result = await doordash.placeFullOrder(creds, {
-                    restaurantName: restaurantIds[0],
+                    restaurantName: scheduledRestaurantName || restaurantIds[0],
                     items: orderItems,
                     address,
                     tipPercent: 15
@@ -1876,15 +1880,15 @@ async function checkScheduledOrders() {
                     await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
                 }
             } catch (err) {
-                console.error(`[Scheduler] Error for user ${userRow.id}:`, err.message);
+                console.error(`[Scheduler] Error for user ${userRow.id}:`, err?.message || String(err));
             }
         }
     } catch (err) {
-        console.error('[Scheduler] Error:', err.message);
+        console.error('[Scheduler] Error:', err?.message || String(err));
     }
 }
 
-setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err.message)), 60 * 1000);
+setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err?.message || String(err))), 60 * 1000);
 
 // Start server
 app.listen(PORT, async () => {

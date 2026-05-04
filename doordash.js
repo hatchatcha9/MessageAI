@@ -2447,7 +2447,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     // Log a sample store object from externalStores to see available URL fields
                     if (opName === 'externalStores') {
                         try {
-                            const stores = data?.data?.externalStores || data?.data?.searchWithFilterFacetFeed?.storeSearchResults || [];
+                            const stores = data?.data?.externalStores || [];
                             const sample = Array.isArray(stores) ? stores[0] : (typeof stores === 'object' ? Object.values(stores)[0] : null);
                             if (sample) {
                                 const sampleStore = sample?.store || sample;
@@ -2492,100 +2492,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             }
         }
 
-        // Step 3: Try API search from inside Chrome's browser context (on the lightweight homepage).
-        // Chrome's TLS fingerprint + session cookies bypass CF without loading the heavy search page.
-        // DoorDash search page OOMs Chrome on Railway — this avoids that entirely.
-        console.log('[DoorDash] Trying in-browser API search (REST + GraphQL)...');
-        const _lat = 40.5247, _lng = -111.8638; // Draper UT hardcoded for now
-        const apiSearchResult = await Promise.race([
-            page.evaluate(async ({ query, lat, lng }) => {
-                const logs = [];
-
-                // Helper: try a relative-URL fetch (same origin = no CORS)
-                const tryFetch = async (url, opts) => {
-                    try {
-                        const resp = await fetch(url, { credentials: 'include', ...opts });
-                        const text = await resp.text();
-                        logs.push(`${opts.method || 'GET'} ${url.split('?')[0]}: ${resp.status} — ${text.substring(0, 120)}`);
-                        if (resp.ok) return JSON.parse(text);
-                    } catch (e) { logs.push(`${url.split('?')[0]} err: ${e.message}`); }
-                    return null;
-                };
-
-                // Try searchWithFilterFacetFeed with different coordinate argument shapes.
-                // Error confirmed field exists — "lat" is not a direct argument, likely nested.
-                // Also try with no coordinates (uses DoorDash account's saved address).
-                const gqlBase = (args, fields) =>
-                    `query searchWithFilterFacetFeed(${args.decl}){searchWithFilterFacetFeed(query:$query${args.call}){${fields}}}`;
-                const fields = 'storeSearchResults{store{id name averageRating deliveryTime}} stores{id name averageRating}';
-                for (const [variables, gqlQuery] of [
-                    // No coords — use account's saved address
-                    [{ query },
-                        gqlBase({ decl: '$query:String!', call: '' }, fields)],
-                    // consumerAddress object
-                    [{ query, consumerAddress: { lat: parseFloat(lat), lng: parseFloat(lng) } },
-                        gqlBase({ decl: '$query:String!,$consumerAddress:ConsumerAddressInput', call: ',consumerAddress:$consumerAddress' }, fields)],
-                    // coordinates object
-                    [{ query, coordinates: { lat: parseFloat(lat), lng: parseFloat(lng) } },
-                        gqlBase({ decl: '$query:String!,$coordinates:CoordinatesInput', call: ',coordinates:$coordinates' }, fields)],
-                    // lat/lng as separate top-level args (different names)
-                    [{ query, latitude: parseFloat(lat), longitude: parseFloat(lng) },
-                        gqlBase({ decl: '$query:String!,$latitude:Float,$longitude:Float', call: ',latitude:$latitude,longitude:$longitude' }, fields)],
-                ]) {
-                    const data = await tryFetch('/graphql', {
-                        method: 'POST',
-                        headers: { 'content-type': 'application/json', accept: 'application/json' },
-                        body: JSON.stringify({ operationName: 'searchWithFilterFacetFeed', variables, query: gqlQuery })
-                    });
-                    if (data && !data.errors) return { source: 'graphql', op: 'searchWithFilterFacetFeed', data, logs };
-                }
-
-                // Try REST endpoints (same origin relative URLs)
-                for (const restPath of [
-                    `/v2/store/search/?query=${encodeURIComponent(query)}&lat=${lat}&lng=${lng}&limit=10`,
-                    `/api/v1/consumer/consumer_store_search/?query=${encodeURIComponent(query)}&lat=${lat}&lng=${lng}&limit=10`,
-                ]) {
-                    const data = await tryFetch(restPath, { headers: { accept: 'application/json' } });
-                    if (data) return { source: 'rest', data, logs };
-                }
-
-                return { source: null, logs };
-            }, { query, lat: _lat, lng: _lng }),
-            new Promise(r => setTimeout(() => r({ source: 'timeout', logs: [] }), 20000))
-        ]).catch(e => ({ source: 'error', logs: [e.message] }));
-
-        console.log(`[DoorDash] In-browser API: source=${apiSearchResult.source}, logs=${JSON.stringify(apiSearchResult.logs)}`);
-
-        if (apiSearchResult.source === 'rest' || apiSearchResult.source === 'graphql') {
-            const stores = apiSearchResult.data?.stores ||
-                apiSearchResult.data?.data?.searchStores?.stores || [];
-            console.log(`[DoorDash] API returned ${stores.length} stores`);
-            const seenNames = new Set();
-            for (const store of stores.slice(0, 10)) {
-                const id = String(store.id || '');
-                const name = (store.name || '').trim();
-                if (!id || !name || seenNames.has(name.toLowerCase())) continue;
-                seenNames.add(name.toLowerCase());
-                _capturedRestaurants.push({
-                    id, name,
-                    rating: String(store.averageRating || ''),
-                    deliveryTime: store.deliveryMinutes ? `${store.deliveryMinutes} min` : '',
-                    url: `${DOORDASH_URL}/store/${id}/`
-                });
-            }
-            console.log(`[DoorDash] Populated ${_capturedRestaurants.length} restaurants from in-browser API`);
-        }
-
-        // If we got restaurants from the API, skip loading the heavy search page
-        if (_capturedRestaurants.length > 0) {
-            console.log('[DoorDash] Skipping search page navigation — using API results');
-            _cleanupInterceptors();
-            const restaurants = await extractRestaurantList();
-            const sorted = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
-            return { success: true, restaurants: sorted };
-        }
-
-        // Step 4: Set up raw HTML capture BEFORE navigating, so we get the server's initial
+        // Step 3: Set up raw HTML capture BEFORE navigating, so we get the server's initial
         // HTML response. Regex-parsed in Node.js — avoids page.evaluate() OOM.
         let _searchPageHtml = '';
         const _htmlCapture = async (resp) => {
@@ -6735,6 +6642,7 @@ async function exportCookies() {
 async function importCookies(cookies) {
     if (!context) {
         await launchBrowser();
+        if (!context) throw new Error('Browser failed to launch for importCookies');
     }
     await context.addCookies(cookies);
     console.log(`[DoorDash] Imported ${cookies.length} cookies`);
