@@ -2445,31 +2445,42 @@ async function checkoutCurrentCart(options = {}) {
         console.log('[DoorDash] Clicking Place Order...');
         await orderBtn.click();
 
-        // Wait for navigation to settle — DoorDash navigates to confirmation page after order
-        await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-        await delay(2000);
-
-        const currentUrl = page.url();
-        console.log('[DoorDash] Post-order URL:', currentUrl);
-
-        let pageContent = '';
-        try { pageContent = await page.content(); } catch(e) {
-            console.log('[DoorDash] page.content() error (still navigating):', e.message);
+        // Wait up to 20s for DoorDash to navigate away from checkout to confirmation
+        let currentUrl = page.url();
+        for (let i = 0; i < 10; i++) {
+            await delay(2000);
+            currentUrl = page.url();
+            console.log(`[DoorDash] Post-order URL (${i + 1}): ${currentUrl}`);
+            if (!currentUrl.includes('/consumer/checkout/') && !currentUrl.includes('/cart/')) break;
         }
 
-        const isConfirmed = currentUrl.includes('confirmation') ||
-                           pageContent.includes('Order confirmed') ||
-                           pageContent.includes('Order placed') ||
-                           pageContent.includes('Your order is on') ||
-                           pageContent.includes('Thanks for your order');
+        let pageText = '';
+        try { pageText = await page.evaluate(() => document.body.innerText); } catch(e) {
+            console.log('[DoorDash] page.evaluate error:', e.message);
+        }
 
-        if (isConfirmed) {
-            console.log('[DoorDash] Order confirmed! URL:', currentUrl);
+        const isConfirmedUrl = currentUrl.includes('confirmation') || currentUrl.includes('order-status') || currentUrl.includes('/order/');
+        const isConfirmedText = pageText.includes('Order confirmed') || pageText.includes('Order placed') ||
+                                pageText.includes('Your order is on') || pageText.includes('Thanks for your order') ||
+                                pageText.includes('Track your order') || pageText.includes('order has been placed');
+
+        console.log(`[DoorDash] Confirmation: url=${isConfirmedUrl} text=${isConfirmedText} url="${currentUrl.substring(0, 80)}"`);
+
+        if (isConfirmedUrl || isConfirmedText) {
+            console.log('[DoorDash] Order confirmed!');
             return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot };
         }
-        // Order was clicked — if no error thrown, assume it went through
-        console.log('[DoorDash] Place Order clicked, assuming success');
-        return { success: true, message: 'Order submitted - check DoorDash app for confirmation' };
+
+        // Still on checkout page — check for error messages
+        const errorText = pageText.match(/(payment.*failed|card.*declined|error placing|couldn.t place|order failed)/i)?.[0];
+        if (errorText) {
+            console.log('[DoorDash] Order error detected:', errorText);
+            return { success: false, error: errorText };
+        }
+
+        // Clicked Place Order but no confirmation — assume it went through (DoorDash sometimes stays on checkout briefly)
+        console.log('[DoorDash] Place Order clicked — no clear confirmation page, assuming success');
+        return { success: true, message: 'Order submitted - check DoorDash app to confirm', orderUrl: currentUrl, scheduledSlot: selectedSlot };
 
     } catch (error) {
         console.error('[DoorDash] Checkout error:', error.message);
@@ -5154,6 +5165,28 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         stopDebugScreenshots();
                         return { success: false, error: 'CF overlay blocked item add — try again' };
                     }
+                } else {
+                    // No CF overlay and cart still empty — click didn't register or item needs a modal
+                    // we didn't detect. Try one more wait + check before giving up.
+                    await delay(1500);
+                    const cartCountRetry = await page.evaluate(() => {
+                        const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
+                        const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
+                        return match ? parseInt(match[1]) : 0;
+                    });
+                    if (cartCountRetry === 0) {
+                        // Check if a modal appeared late
+                        const lateModal = await page.$('[role="dialog"], [aria-modal="true"]');
+                        if (lateModal) {
+                            console.log('[DoorDash] Late modal detected — needs options');
+                            const requiredOpts = await extractRequiredOptions();
+                            stopDebugScreenshots();
+                            return { success: false, needsOptions: true, requiredOptions: requiredOpts, message: 'This item has required options' };
+                        }
+                        console.log('[DoorDash] Cart still empty after retry — item was not added');
+                        stopDebugScreenshots();
+                        return { success: false, error: 'ITEM_NOT_ADDED', message: 'Item was not added to cart. It may require options or the click did not register.' };
+                    }
                 }
             }
             console.log('[DoorDash] No modal detected - item added directly to cart');
@@ -5404,7 +5437,7 @@ async function extractRequiredOptions() {
                     if (seen.has(groupName.toLowerCase())) continue;
 
                     // Extract options: radios, checkboxes, list items inside this group
-                    const optEls = rg.querySelectorAll('[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"], li, label');
+                    const optEls = rg.querySelectorAll('[role="radio"], [role="checkbox"], [role="button"], input[type="radio"], input[type="checkbox"], li, label');
                     const options = [];
                     const optSeen = new Set();
                     for (const opt of optEls) {
@@ -5800,16 +5833,18 @@ async function autoSelectAllRequiredOptions() {
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 const grp = groups[idx];
                 if (!grp) return null;
-                // Try label, then [role="radio"], then input, then stepper IncrementQuantity button
+                // Try label, then [role="radio"], then [role="button"], then input, then stepper
                 const label = grp.querySelector('label');
                 const radio = grp.querySelector('[role="radio"]');
+                const roleBtn = grp.querySelector('[role="button"]');
                 const input = grp.querySelector('input[type="radio"],input[type="checkbox"]');
                 const stepper = grp.querySelector('[data-anchor-id="IncrementQuantity"]');
-                const target = label || radio || input || stepper;
+                // Only use stepper as last resort — it increments quantity rather than selecting
+                const target = label || radio || roleBtn || input || stepper;
                 if (!target) return null;
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 const rect = target.getBoundingClientRect();
-                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim().substring(0, 40), isStepper: !!stepper && !label && !radio && !input };
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim().substring(0, 40), isStepper: !!stepper && !label && !radio && !roleBtn && !input };
             }, gIdx);
 
             if (!targetInfo) continue;
@@ -5825,8 +5860,10 @@ async function autoSelectAllRequiredOptions() {
                 const inputLoc = group.locator('input[type="radio"],input[type="checkbox"]').first();
                 const stepperLoc = group.locator('[data-anchor-id="IncrementQuantity"]').first();
                 let target = null;
+                const roleBtnLoc = group.locator('[role="button"]').first();
                 if (await labelLoc.count() > 0) target = labelLoc;
                 else if (await radioLoc.count() > 0) target = radioLoc;
+                else if (await roleBtnLoc.count() > 0) target = roleBtnLoc;
                 else if (await inputLoc.count() > 0) target = inputLoc;
                 else if (await stepperLoc.count() > 0) target = stepperLoc;
                 if (target) {
