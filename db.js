@@ -478,7 +478,7 @@ function cleanExpiredDoorDashCache() {
 
 // Helper functions for specific cache types
 function cacheSearchResults(userId, query, restaurants) {
-    setDoorDashCache(userId, 'search', query || 'nearby', restaurants, 15); // 15 min TTL
+    setDoorDashCache(userId, 'search', query || 'nearby', restaurants, 1440); // 24 hour TTL
 }
 
 function getCachedSearchResults(userId, query) {
@@ -486,7 +486,7 @@ function getCachedSearchResults(userId, query) {
 }
 
 function cacheRestaurantMenu(userId, restaurantId, menuData) {
-    setDoorDashCache(userId, 'menu', restaurantId, menuData, 30); // 30 min TTL
+    setDoorDashCache(userId, 'menu', restaurantId, menuData, 1440); // 24 hour TTL
 }
 
 function getCachedRestaurantMenu(userId, restaurantId) {
@@ -494,7 +494,7 @@ function getCachedRestaurantMenu(userId, restaurantId) {
 }
 
 function cacheCurrentRestaurant(userId, restaurantData) {
-    setDoorDashCache(userId, 'current_restaurant', 'active', restaurantData, 60); // 1 hour TTL
+    setDoorDashCache(userId, 'current_restaurant', 'active', restaurantData, 2880); // 48 hour TTL
 }
 
 function getCachedCurrentRestaurant(userId) {

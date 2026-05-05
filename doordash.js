@@ -120,6 +120,8 @@ let _capturedRestaurants = [];
 // Reused for our own in-browser menu fetch (same headers = passes CF).
 let _capturedDoorDashHeaders = null;
 let _capturedSearchQueryFired = false; // true when searchWithFilterFacetFeed is intercepted
+let _preWarmPromise = null;
+let _preWarmUrl = null;
 
 /**
  * Parse a DoorDash API response and cache any menu items found for each store ID.
@@ -4668,6 +4670,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         // Navigate via the DoorDash homepage first to warm up the CF session context —
         // cold-navigating directly from about:blank to a store page triggers CF challenges.
         const storeNavUrl = options.restaurantUrl || sessionState.currentRestaurantUrl;
+
+        // Wait for background pre-warm if it's for this restaurant (started after cache-hit SELECT)
+        if (_preWarmPromise && _preWarmUrl) {
+            const storeBase = storeNavUrl ? storeNavUrl.split('?')[0] : '';
+            const preWarmBase = _preWarmUrl.split('?')[0];
+            if (storeBase && (storeBase === preWarmBase || preWarmBase.includes(storeBase.split('/store/')[1] || 'NOMATCH'))) {
+                console.log('[DoorDash] Waiting for background pre-warm to complete...');
+                await Promise.race([_preWarmPromise, new Promise(r => setTimeout(r, 25000))]);
+                _preWarmPromise = null;
+                _preWarmUrl = null;
+                console.log('[DoorDash] Pre-warm wait done, current URL:', page.url().substring(0, 80));
+            }
+        }
+
         if (!page.url().includes('doordash.com/store/') && storeNavUrl) {
             const isOnDoorDash = page.url().includes('doordash.com');
             if (!isOnDoorDash) {
@@ -6882,6 +6898,63 @@ function locked(fn) {
     return function(...args) { return withOpLock(() => fn(...args)); };
 }
 
+async function prewarmRestaurantPage(restaurantUrl) {
+    _preWarmUrl = restaurantUrl;
+    _preWarmPromise = (async () => {
+        try {
+            if (!page || !context) await launchBrowser();
+            // Quick health check
+            const alive = await Promise.race([
+                page.evaluate(() => true).then(() => true).catch(() => false),
+                new Promise(r => setTimeout(() => r(false), 2000))
+            ]);
+            if (!alive) {
+                await closeBrowser().catch(() => {});
+                await launchBrowser();
+            }
+            const currentUrl = page.url();
+            const storeBase = restaurantUrl.split('?')[0];
+            if (currentUrl.startsWith(storeBase)) {
+                console.log('[DoorDash] Pre-warm: already on store page');
+                return;
+            }
+            console.log('[DoorDash] Pre-warming store page in background:', storeBase.substring(0, 80));
+            if (!currentUrl.startsWith('https://www.doordash.com') || currentUrl.includes('/login')) {
+                await page.goto(`${DOORDASH_URL}/home`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await waitForCFChallenge(20000);
+                await delay(500);
+            }
+            await page.goto(restaurantUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            await waitForCFChallenge(30000);
+            await handlePopups();
+            console.log('[DoorDash] Pre-warm complete:', page.url().substring(0, 80));
+        } catch (e) {
+            console.log('[DoorDash] Pre-warm error:', e.message);
+        }
+    })();
+    return _preWarmPromise;
+}
+
+async function prewarmBrowser() {
+    _preWarmPromise = (async () => {
+        try {
+            if (!page || !context) await launchBrowser();
+            const currentUrl = page.url();
+            if (currentUrl.startsWith('https://www.doordash.com') && !currentUrl.includes('/login')) {
+                console.log('[DoorDash] Browser already warm');
+                return;
+            }
+            console.log('[DoorDash] Pre-warming browser (homepage)...');
+            await page.goto(`${DOORDASH_URL}/home`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            await waitForCFChallenge(20000);
+            console.log('[DoorDash] Browser pre-warm complete');
+        } catch (e) {
+            console.log('[DoorDash] Browser pre-warm error:', e.message);
+        }
+    })();
+    return _preWarmPromise;
+}
+
 module.exports = {
     launchBrowser,
     closeBrowser,
@@ -6924,5 +6997,7 @@ module.exports = {
     readBrowserCart: locked(readBrowserCart),
     getOrderStatus: locked(getOrderStatus),
     exportCookies,
-    importCookies
+    importCookies,
+    prewarmRestaurantPage,
+    prewarmBrowser,
 };

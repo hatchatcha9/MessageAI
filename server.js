@@ -415,7 +415,7 @@ async function processCommands(response, user, phoneNumber) {
         prefsForClear.pendingDoordashSelections = null;
         prefsForClear.menuPage = 0;
         db.setUserPreferences(user.id, prefsForClear);
-        db.clearDoorDashCache(user.id); // wipe cached restaurant/menu so old data doesn't pollute next search
+        db.clearDoorDashCache(user.id, 'current_restaurant'); // only clear active selection, preserve search+menu caches
         cleanResponse = cleanResponse.replace('[CLEAR_CART]', '').trim();
         // Only show "cart cleared" message if no search is following (search results make it obvious)
         if (!response.match(/\[SEARCH:/i)) {
@@ -441,6 +441,28 @@ async function processCommands(response, user, phoneNumber) {
         if (!address) {
             additionalContext = `\n\nI need your delivery address first. What's your address?`;
         } else {
+            // Fast path: return cached results instantly (24h TTL), warm browser in background
+            const cachedSearchHit = db.getCachedSearchResults(user.id, query);
+            if (cachedSearchHit && cachedSearchHit.length > 0) {
+                console.log(`[SEARCH] Cache hit: ${cachedSearchHit.length} results for "${query}"`);
+                prefs.lastSearchResults = cachedSearchHit.map(r => r.id);
+                prefs.lastSearchSource = 'doordash';
+                prefs.lastSearchQuery = query;
+                db.setUserPreferences(user.id, prefs);
+                additionalContext = `\n\nTop ${cachedSearchHit.length} results on DoorDash near you:\n\n`;
+                additionalContext += cachedSearchHit.map((r, i) => {
+                    let line = `${i + 1}. ${r.name.toUpperCase()}`;
+                    let details = [];
+                    if (r.rating) details.push(`★ ${r.rating}`);
+                    if (r.deliveryTime) details.push(r.deliveryTime);
+                    if (r.deliveryFee) details.push(r.deliveryFee);
+                    if (details.length > 0) line += `\n   ${details.join(' · ')}`;
+                    return line;
+                }).join('\n\n');
+                additionalContext += `\n\nWhich one? (Reply with the number)`;
+                actions.push({ type: 'search_doordash', query, count: cachedSearchHit.length, cached: true });
+                doordash.prewarmBrowser().catch(() => {});
+            } else {
             try {
                 const searchResult = await doordash.searchRestaurantsNearAddress(credentials, address, query);
                 if (searchResult.success && searchResult.restaurants.length > 0) {
@@ -475,6 +497,7 @@ async function processCommands(response, user, phoneNumber) {
                 db.setUserPreferences(user.id, prefs);
                 additionalContext = `\n\nSearch for "${query}" crashed: ${error?.message || String(error)}. Use [SEARCH: ${query}] to try again.`;
             }
+            } // end else (cache miss)
         }
     }
 
@@ -501,6 +524,57 @@ async function processCommands(response, user, phoneNumber) {
                     console.log(`[SELECT] index=${num} name=${selectedRestaurant.name} url=${selectedRestaurant.url}`);
                     additionalContext = `\n\nLoading ${selectedRestaurant.name}...`;
 
+                    // Fast path: cached menu — return instantly + pre-warm browser in background
+                    const cachedMenuFast = db.getCachedRestaurantMenu(user.id, restaurantId);
+                    if (cachedMenuFast && cachedMenuFast.length > 0) {
+                        console.log(`[SELECT] Fast cache hit: ${selectedRestaurant.name} (${cachedMenuFast.length} items)`);
+                        prefs.currentRestaurant = restaurantId;
+                        prefs.currentRestaurantSource = 'doordash';
+                        prefs.currentRestaurantUrl = selectedRestaurant.url;
+                        prefs.menuPage = 0;
+                        delete prefs.pendingDoordashItem;
+                        delete prefs.pendingDoordashOptions;
+                        delete prefs.pendingDoordashSelections;
+                        db.setUserPreferences(user.id, prefs);
+                        db.clearCart(user.id);
+                        doordash.clearBrowserCart().catch(() => {});
+                        db.cacheCurrentRestaurant(user.id, {
+                            id: restaurantId,
+                            name: selectedRestaurant.name,
+                            categories: [],
+                            url: selectedRestaurant.url,
+                            source: 'doordash',
+                            menu: cachedMenuFast
+                        });
+                        // Pre-warm browser to store page while user reads menu
+                        doordash.prewarmRestaurantPage(selectedRestaurant.url).catch(() => {});
+                        // Format menu
+                        const userPrefs = db.getUserPreferences(user.id);
+                        const budget = userPrefs.budget || null;
+                        const displayItems = budget
+                            ? cachedMenuFast.filter(item => (parseFloat(item.price) || 0) <= budget)
+                            : cachedMenuFast;
+                        let menuText = `${selectedRestaurant.name.toUpperCase()}\n`;
+                        if (budget) menuText += `Under $${budget.toFixed(2)}\n`;
+                        menuText += `\n`;
+                        if (displayItems.length === 0) {
+                            menuText += `No items available under $${budget.toFixed(2)} at this restaurant.`;
+                        } else {
+                            const PAGE_SIZE = 15;
+                            const pageItems = displayItems.slice(0, PAGE_SIZE);
+                            menuText += pageItems.map(item =>
+                                `${cachedMenuFast.indexOf(item) + 1}. ${item.name}\n   $${parseFloat(item.price || 0).toFixed(2)}${item.description ? ' - ' + item.description : ''}`
+                            ).join('\n\n');
+                            if (displayItems.length > PAGE_SIZE) {
+                                menuText += `\n\n(+${displayItems.length - PAGE_SIZE} more - say "more menu")`;
+                            }
+                        }
+                        menuText += `\n\nWhat would you like? (Reply with item number)`;
+                        cleanResponse = menuText;
+                        additionalContext = '';
+                        console.log(`[DoorDash] Selected restaurant (cached): ${selectedRestaurant.name}`);
+                        actions.push({ type: 'select_restaurant_doordash', restaurant: selectedRestaurant.name, menuItemCount: cachedMenuFast.length, cached: true });
+                    } else {
                     try {
                         // Navigate to the restaurant page using the stored URL
                         const menuResult = await doordash.selectRestaurantFromSearch(selectedRestaurant.url || num);
@@ -589,6 +663,7 @@ async function processCommands(response, user, phoneNumber) {
                         console.error('[Select] DoorDash menu error:', error);
                         additionalContext = `\n\nError loading menu. Please try again.`;
                     }
+                    } // end else (menu cache miss)
                 } else {
                     additionalContext = `\n\nSorry, that restaurant is no longer available. Try searching again?`;
                 }
