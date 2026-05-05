@@ -12,8 +12,9 @@ const doordash = require('./doordash');
 const logBuffer = [];
 const _origLog = console.log.bind(console);
 const _origErr = console.error.bind(console);
-console.log = (...args) => { const line = args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origLog(...args); };
-console.error = (...args) => { const line = '[ERR] ' + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origErr(...args); };
+const _ts = () => new Date().toISOString().replace('T', ' ').substring(0, 23);
+console.log = (...args) => { const line = `[${_ts()}] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origLog(...args); };
+console.error = (...args) => { const line = `[${_ts()}] [ERR] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origErr(...args); };
 
 const CRASH_LOG = path.join(__dirname, 'crash.log');
 process.on('uncaughtException', (err) => {
