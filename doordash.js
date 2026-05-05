@@ -2605,12 +2605,22 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         const hasCookieEnv = !!process.env.DOORDASH_COOKIES;
         const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
 
-        // Skip homepage warmup if already on DoorDash (saves ~20s per search after first)
+        // Skip homepage warmup if already on DoorDash (saves ~20s per search after first).
+        // But still do warmup if Chrome seems unresponsive (e.g. after heavy add-item flow).
         const _preSearchUrl = page.url();
         const _alreadyOnDD = _preSearchUrl.startsWith('https://www.doordash.com') && !_preSearchUrl.includes('/login');
-        if (_alreadyOnDD) {
-            console.log('[DoorDash] Already on DoorDash, skipping homepage warmup');
+        const _quickPing = _alreadyOnDD ? await Promise.race([
+            page.evaluate(() => true).then(() => true).catch(() => false),
+            new Promise(r => setTimeout(() => r(false), 2000))
+        ]) : true;
+        if (_alreadyOnDD && _quickPing) {
+            console.log('[DoorDash] Already on DoorDash and responsive, skipping homepage warmup');
         } else {
+            if (_alreadyOnDD && !_quickPing) {
+                console.log('[DoorDash] On DoorDash but unresponsive — restarting browser for fresh warmup...');
+                await closeBrowser().catch(() => {});
+                await launchBrowser();
+            }
             console.log('[DoorDash] Navigating to DoorDash homepage (CF warmup)...');
             await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
             await delay(1000);
@@ -2891,6 +2901,20 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                 try {
                     _capturedRestaurants = [];
                     _capturedSearchQueryFired = false;
+
+                    // Check if browser is responsive. If evaluates timed out above, Chrome is likely
+                    // frozen (CF challenge JS, OOM, stuck navigation). Restart before retrying.
+                    const isResponsive = await Promise.race([
+                        page.evaluate(() => true).then(() => true).catch(() => false),
+                        new Promise(r => setTimeout(() => r(false), 3000))
+                    ]);
+                    if (!isResponsive) {
+                        console.log('[DoorDash] Browser unresponsive — restarting before retry...');
+                        await closeBrowser().catch(() => {});
+                        await launchBrowser();
+                        console.log('[DoorDash] Browser restarted for search retry');
+                    }
+
                     // Re-warmup homepage first to clear any CF challenge before searching again
                     console.log('[DoorDash] Retry: re-warming up homepage...');
                     await page.goto(`${DOORDASH_URL}/home`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
