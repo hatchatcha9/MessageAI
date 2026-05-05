@@ -1666,6 +1666,32 @@ app.post('/api/message', async (req, res) => {
     res.json({ response, actions });
 });
 
+// Returns a short instant acknowledgement for operations that take >3s, or null.
+// Sent BEFORE handleMessage so the user gets immediate feedback on slow operations.
+function getInstantAck(msg, from) {
+    const lower = msg.toLowerCase();
+    const trimmed = msg.trim();
+    if (/\[?search:/i.test(msg) || /^(search|find|look for|show me|i want|get me|order from)\b/i.test(msg)) {
+        return 'Searching...';
+    }
+    if (/^\d+$/.test(trimmed)) {
+        // Number after search results = restaurant selection (slow: DoorDash navigation)
+        try {
+            const user = db.getUserByPhone(from);
+            if (user) {
+                const prefs = db.getUserPreferences(user.id);
+                if (!prefs.currentRestaurant && prefs.lastSearchResults?.length > 0) {
+                    return 'Loading menu...';
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+    if (/add item\s+\d+/i.test(msg) || /\badd\s+\d+\b/i.test(msg)) return 'Adding...';
+    if (/checkout|place order|order now/i.test(lower)) return 'Processing order...';
+    return null;
+}
+
 // Twilio Webhook - receives inbound SMS
 // Twilio sends form-encoded: From, To, Body
 app.post('/api/twilio/webhook', async (req, res) => {
@@ -1692,9 +1718,13 @@ app.post('/api/twilio/webhook', async (req, res) => {
     // Respond to Twilio immediately — DoorDash can take >15s and Twilio would time out
     res.set('Content-Type', 'text/xml').send('<Response></Response>');
 
+    // Two-phase response: send instant feedback for slow operations, then final results.
+    const _ack = getInstantAck(message.trim(), from);
+
     // Process and reply asynchronously
     (async () => {
         try {
+            if (_ack) await sendSMS(from, _ack);
             const { response } = await handleMessage(from, message);
             console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 100)}...`);
             await sendSMS(from, response);

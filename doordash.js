@@ -866,7 +866,8 @@ async function isLoggedIn() {
         if (!currentUrl.includes('doordash.com')) {
             await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded' });
         }
-        await delay(2000);
+        // Already on DoorDash — only need a short settle; skip the long navigation wait
+        await delay(currentUrl.includes('doordash.com') ? 300 : 1000);
         await handlePopups();
 
         // Use evaluate to check multiple signals at once, with a timeout.
@@ -2604,11 +2605,18 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         const hasCookieEnv = !!process.env.DOORDASH_COOKIES;
         const searchUrl = `${DOORDASH_URL}/search/store/${encodeURIComponent(query)}/`;
 
-        console.log('[DoorDash] Navigating to DoorDash homepage (CF warmup)...');
-        await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await delay(2000);
-        await waitForCFChallenge(20000);
-        console.log('[DoorDash] Homepage loaded, URL:', page.url());
+        // Skip homepage warmup if already on DoorDash (saves ~20s per search after first)
+        const _preSearchUrl = page.url();
+        const _alreadyOnDD = _preSearchUrl.startsWith('https://www.doordash.com') && !_preSearchUrl.includes('/login');
+        if (_alreadyOnDD) {
+            console.log('[DoorDash] Already on DoorDash, skipping homepage warmup');
+        } else {
+            console.log('[DoorDash] Navigating to DoorDash homepage (CF warmup)...');
+            await page.goto(DOORDASH_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await delay(1000);
+            await waitForCFChallenge(20000);
+            console.log('[DoorDash] Homepage loaded, URL:', page.url());
+        }
 
         // Always check login state — even with DOORDASH_COOKIES set, they can expire.
         // Expired cookies allow page loads but DoorDash API calls return 4xx (no results).
@@ -3466,7 +3474,7 @@ async function extractMenuItems() {
                 console.log(`[DoorDash] Scroll evaluate timeout at pos ${pos} — stopping scroll`);
                 break;
             }
-            await delay(350);
+            await delay(150);
             let batch;
             try {
                 // Timeout the extract to avoid hanging on large DOM pages
@@ -4060,13 +4068,15 @@ async function waitForCFChallenge(timeoutMs = 60000) {
 
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-        await delay(3000);
+        await delay(500);
         if (!(await isCFChallenge())) {
             console.log(`[DoorDash] CF challenge resolved after ${Date.now() - start}ms`);
-            await delay(1000);
+            await delay(500);
             return true;
         }
-        console.log(`[DoorDash] Still seeing CF challenge (${Math.round((Date.now() - start) / 1000)}s)...`);
+        if ((Date.now() - start) % 3000 < 600) {
+            console.log(`[DoorDash] Still seeing CF challenge (${Math.round((Date.now() - start) / 1000)}s)...`);
+        }
     }
 
     console.log('[DoorDash] CF challenge timed out');
@@ -4377,8 +4387,8 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                         if (solved) { console.log('[DoorDash] Turnstile solved via captcha service'); break; }
                     }
                 }
-                await delay(1000);
-                if (t === 29) console.log('[DoorDash] Turnstile overlay still present after 30s — proceeding anyway');
+                await delay(300);
+                if (t === 29) console.log('[DoorDash] Turnstile overlay still present after 10s — proceeding anyway');
             }
 
             // If CF challenge did NOT resolve, soft retry keeping the same proxy IP.
@@ -4739,19 +4749,30 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 const result = await page.evaluate((name) => {
                     const lowerName = name.toLowerCase().trim();
 
-                    // Helper: walk up from a text node to find a clickable card element
+                    // Helper: walk up from a text node to find a clickable card element.
+                    // Prefers actual interactive elements (button/a/[role=button]) over
+                    // generic containers — React requires the real interactive element
+                    // to fire synthetic events properly.
                     function findCard(startEl) {
                         let el = startEl;
                         let bestCard = null;
-                        for (let i = 0; i < 8 && el; i++) {
+                        let bestClickable = null;
+                        for (let i = 0; i < 10 && el; i++) {
                             const r = el.getBoundingClientRect();
+                            if (r.width > 600 || r.height > 500) break;
                             if (r.width > 100 && r.width < 520 && r.height > 50 && r.height < 400 && r.left > 50) {
                                 bestCard = el;
+                                const tag = el.tagName?.toLowerCase();
+                                const role = el.getAttribute?.('role');
+                                const isClickable = tag === 'button' || tag === 'a' ||
+                                    role === 'button' || role === 'link' ||
+                                    el.getAttribute?.('tabindex') === '0' ||
+                                    el.hasAttribute?.('onclick');
+                                if (isClickable) bestClickable = el;
                             }
-                            if (r.width > 600 || r.height > 500) break;
                             el = el.parentElement;
                         }
-                        return bestCard;
+                        return bestClickable || bestCard;
                     }
 
                     // STRATEGY 1 (fast): TreeWalker over text nodes — O(n text nodes), early exit
@@ -4959,7 +4980,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             return { success: false, error: 'Could not open item. Please try selecting again.' };
         }
 
-        await delay(2500);
+        await delay(800);
         await takeScreenshot('after-item-click');
 
         // Check if a modal/dialog opened
@@ -4968,7 +4989,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         // If no modal yet, wait a bit longer and check again
         if (!modalOpened) {
             console.log('[DoorDash] No modal yet, waiting longer...');
-            await delay(2000);
+            await delay(600);
             await takeScreenshot('after-item-click-retry');
             modalOpened = await page.$('[role="dialog"], [data-testid*="modal"], [class*="Modal"], [class*="modal"], [aria-modal="true"]');
         }
