@@ -125,7 +125,11 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
 
     // Warn Claude when no restaurant is selected — must search before adding items
     if (!currentRestaurant) {
-        context += `\n\n⚠️ NO RESTAURANT SELECTED. Do NOT use [ADD_ITEM_NUM:] — there is no active menu. If user wants food, ALWAYS use [SEARCH: food_type] first, then let them pick a restaurant.`;
+        if (preferences.lastSearchResults?.length > 0) {
+            context += `\n\n⚠️ RESTAURANT SELECTION PENDING. Search results are shown in the conversation above. The user must pick a number to select a restaurant. Use [SELECT: number] when they reply with a number. Do NOT use [ADD_ITEM_NUM:].`;
+        } else {
+            context += `\n\n⚠️ NO RESTAURANT SELECTED. Do NOT use [ADD_ITEM_NUM:] — there is no active menu. If user wants food, ALWAYS use [SEARCH: food_type] first, then let them pick a restaurant.`;
+        }
     }
 
     // DoorDash menu - include actual menu items from the restaurant
@@ -217,16 +221,21 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
 
 4. SHOW CART - Show current cart:
    [SHOW_CART]
+   Triggers: "show cart", "view cart", "what's in my cart", "my cart", "cart", "what do I have", "show order"
+   ALWAYS use this when user asks to see cart. NEVER respond with just "---" or skip this command.
 
 5. CLEAR CART - Empty the cart:
    [CLEAR_CART]
 
-6. PLACE ORDER - When user confirms order:
+6. PLACE ORDER - When user confirms order right now:
    [PLACE_ORDER]
-   For scheduled delivery through DoorDash (pick a future time slot at checkout):
+   Triggers: "checkout", "place order", "order it", "confirm order", "buy it"
+
+   For checkout NOW with a scheduled delivery time picked in DoorDash:
    [PLACE_ORDER_SCHEDULED: HH:MM]
-   Triggers: "place it for 6pm", "schedule the delivery for 7:30", "order now but deliver at 5pm", "schedule through doordash"
-   IMPORTANT: Convert to 24-hour format (6pm → 18:00). Use this INSTEAD of [PLACE_ORDER] when user wants a scheduled delivery time.
+   Triggers: "place it for 6pm", "checkout but deliver at 7", "order now deliver at 5pm", "schedule delivery for X", "place it now schedule for X"
+   IMPORTANT: Convert to 24-hour format (6pm → 18:00). Use when user wants to CHECK OUT NOW but have it DELIVERED at a specific future time.
+   CRITICAL: This is NOT [SCHEDULE_ORDER:]. [SCHEDULE_ORDER:] fires the whole order later. [PLACE_ORDER_SCHEDULED:] places it NOW through DoorDash checkout with a delivery time.
 
 7. SAVE ADDRESS - When user provides their address:
    [SAVE_ADDRESS: full address here]
@@ -251,11 +260,11 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
     [ORDER_STATUS]
     Triggers: "where's my food", "where's my order", "order status", "how long until", "is my food here yet"
 
-13. SCHEDULE ORDER - Schedule an order for later:
+13. SCHEDULE ORDER - Save cart and fire automatically at a future time (no checkout now):
     [SCHEDULE_ORDER: HH:MM]
-    Triggers: "order at 6pm", "schedule for 7:30", "set order for 8pm tonight"
-    IMPORTANT: Convert to 24-hour format (6pm → 18:00, 7:30pm → 19:30, 12pm → 12:00, midnight → 00:00)
-    Only use after user has items in cart.
+    Triggers: "remind me at 6pm", "set a timer to order at 7pm", "order automatically at 8"
+    IMPORTANT: Convert to 24-hour format. ONLY use this when user wants to ORDER LATER without going through checkout now.
+    DO NOT use this when user wants to place the order NOW with a scheduled delivery time — use [PLACE_ORDER_SCHEDULED:] for that.
 
 14. CANCEL SCHEDULE - Cancel a scheduled order:
     [CANCEL_SCHEDULE]
@@ -298,7 +307,11 @@ NATURAL LANGUAGE - Understand these phrases:
 - "something quick" / "fast food" → Search for fastest delivery options
 - "something cheap" / "under $X" / "budget mode" → Use [SAVE_BUDGET: X] then [SEARCH: ...]
 - "where's my food" / "order status" → Use [ORDER_STATUS]
-- "order at Xpm" / "schedule for X" → Use [SCHEDULE_ORDER: HH:MM]
+- ANY phrase combining "place"/"order"/"checkout"/"buy"/"deliver" with a time → Use [PLACE_ORDER_SCHEDULED: HH:MM]
+  Examples: "place it for 6pm", "order now deliver at 7", "checkout but schedule for 5:30", "place the order at 6:30", "deliver at 6pm", "schedule delivery for X", "place it now, deliver at 6:30 PM", "deliver at 6:30", "place now for 7pm"
+  CRITICAL: "place it now, deliver at X" → ALWAYS [PLACE_ORDER_SCHEDULED: X] — NOT [SCHEDULE_ORDER:]
+- "remind me to order at X" / "set a timer for later" / "order automatically later without going through checkout" → Use [SCHEDULE_ORDER: HH:MM]
+  CRITICAL: [SCHEDULE_ORDER:] means ORDER LATER (no checkout now). [PLACE_ORDER_SCHEDULED:] means CHECKOUT NOW with future delivery time. When in doubt, use [PLACE_ORDER_SCHEDULED:].
 - "surprise me" → Pick something from their order history or a popular option
 - "my usual" / "same as last time" / "reorder" → Use [REORDER]
 - "what's good?" / "any recommendations?" → Suggest based on their history
@@ -889,7 +902,14 @@ async function processCommands(response, user, phoneNumber) {
             console.log(`[ADD_ITEM_NUM] Menu has ${currentRestaurant.menu.length} items`);
         }
 
-        if (prefs.currentRestaurant) {
+        if (!prefs.currentRestaurant) {
+            // No restaurant selected at all
+            if (prefs.lastSearchResults?.length > 0) {
+                additionalContext = `\n\nNo restaurant selected — please reply with a number to pick one from your search results first.`;
+            } else {
+                additionalContext = `\n\nNo restaurant selected. Say what food you're craving and I'll search for you!`;
+            }
+        } else if (prefs.currentRestaurant) {
             // Check if using DoorDash
             if (prefs.currentRestaurantSource === 'doordash') {
                 // Real DoorDash item - get from cache and add via automation
@@ -1413,9 +1433,9 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'order_status' });
     }
 
-    // Schedule order
+    // Schedule order (internal timer — fires whole order later; skip if PLACE_ORDER_SCHEDULED is also present)
     const scheduleMatch = response.match(/\[SCHEDULE_ORDER:\s*(\d{1,2}):(\d{2})\]/i);
-    if (scheduleMatch) {
+    if (scheduleMatch && !placeScheduledMatch) {
         const hours = parseInt(scheduleMatch[1]);
         const minutes = parseInt(scheduleMatch[2]);
         const cart = db.getCart(user.id);
@@ -1539,6 +1559,22 @@ async function _handleMessage(phoneNumber, message) {
         }
     }
 
+    // Intercept plain number when search results are pending and no restaurant is selected.
+    // Claude sometimes hallucinates the menu instead of emitting [SELECT: N]; this bypasses that.
+    const plainNumMatch = message.trim().match(/^(\d+)$/);
+    if (plainNumMatch && !preferences.currentRestaurant && preferences.lastSearchResults?.length > 0) {
+        const num = parseInt(plainNumMatch[1]);
+        const cachedResults = db.getCachedSearchResults(user.id, preferences.lastSearchQuery);
+        if (cachedResults && cachedResults[num - 1]) {
+            console.log(`[Intercept] Plain number ${num} with pending search → auto-SELECT`);
+            db.saveMessage(user.id, 'user', message);
+            db.pruneConversationHistory(user.id);
+            const { response: cleanedResponse, actions } = await processCommands(`[SELECT: ${num}]`, user, phoneNumber);
+            db.saveMessage(user.id, 'assistant', cleanedResponse);
+            return { response: cleanedResponse, actions };
+        }
+    }
+
     // Intercept "more menu" directly — show next page of cached menu without going to Claude
     if (/^more menu$/i.test(message.trim()) && doordashMenu && doordashMenu.length > 0) {
         const PAGE_SIZE = 15;
@@ -1595,6 +1631,9 @@ async function _handleMessage(phoneNumber, message) {
             return { response: "Sorry, I got an unexpected response. Please try again.", actions: [] };
         }
         let assistantMessage = textBlock.text;
+        // Log commands Claude chose (helps debug wrong command selection)
+        const cmdMatches = assistantMessage.match(/\[[A-Z_]+(?::[^\]]+)?\]/g);
+        if (cmdMatches) console.log(`[Claude] Commands: ${cmdMatches.join(' | ')}`);
         const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber);
         assistantMessage = cleanedResponse;
 
