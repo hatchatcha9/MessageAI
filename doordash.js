@@ -4724,6 +4724,27 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         if (searchName) {
             console.log(`[DoorDash] Searching for item by name: "${searchName}"`);
 
+            // Strategy 0: Playwright locator — most reliable for React apps.
+            // Uses actionability checks and proper CDP event sequences.
+            // Escaping ® / ™ since regex doesn't need them literally.
+            try {
+                const safePattern = searchName.replace(/[®™©]/g, '.').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\./g, '.');
+                const loc = page.locator('[data-anchor-id="MenuItem"], article, [role="button"]')
+                    .filter({ hasText: new RegExp(safePattern, 'i') })
+                    .first();
+                await loc.scrollIntoViewIfNeeded({ timeout: 4000 });
+                await delay(200);
+                await loc.click({ timeout: 5000 });
+                clicked = true;
+                console.log(`[DoorDash] Playwright locator click succeeded for "${searchName}"`);
+            } catch (locErr) {
+                console.log(`[DoorDash] Playwright locator click failed: ${locErr.message.split('\n')[0]}`);
+            }
+
+            if (clicked) {
+                // Skip treewalker / position-based search below
+            } else {
+
             // First scroll to top
             await page.evaluate(() => window.scrollTo(0, 0));
             await delay(300);
@@ -4974,7 +4995,8 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             } else {
                 return { success: false, error: `Item ${index + 1} not found on page. Only found ${allItems.length} items.` };
             }
-        }
+        } // end else (Playwright locator failed, fell through to position-based)
+        } // end if (searchName)
 
         if (!clicked) {
             return { success: false, error: 'Could not open item. Please try selecting again.' };
