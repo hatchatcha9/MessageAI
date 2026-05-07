@@ -157,8 +157,9 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n- ONLY suggest items listed above (all ${menuToShow.length} items). These are the ACTUAL items from DoorDash.`;
         context += `\n- DO NOT invent, fabricate, or add any menu items that are not in the list above.`;
         context += `\n- When user asks for a TYPE of food (entree, side, drink, dessert, appetizer, etc.), scan ALL ${menuToShow.length} items above — not just the first few — and recommend the best matches by name and number. The user's SMS display only shows 15 at a time, but YOU can see everything.`;
-        context += `\n- When user says a NUMBER, use [ADD_ITEM_NUM: that exact number].`;
+        context += `\n- When user says a NUMBER, use [ADD_ITEM_NUM: that exact number]. ONLY that number — do NOT add related or component items.`;
         context += `\n- When user says an ITEM NAME (like "tres leches"), find the EXACT matching item in the menu above and use its number.`;
+        context += `\n- CRITICAL: Add ONLY the item(s) the user explicitly requested. Never add extra items even if they seem related (e.g. if user wants "Nuggets Meal", only add the Meal — never also add plain "Nuggets").`;
         context += `\n- DOUBLE CHECK: Before using [ADD_ITEM_NUM: X], verify that item X in the menu above matches what the user asked for.`;
         context += `\n- Example: If user says "tres leches" and menu shows "13. Tres Leches - $4.99", use [ADD_ITEM_NUM: 13]`;
     }
