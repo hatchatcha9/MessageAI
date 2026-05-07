@@ -34,3 +34,12 @@ screenshots/
 
 # OS files
 Thumbs.db
+run_sms_test.js
+timing_test.js
+timing_test2.js
+timing_test3.js
+export-cookies.js
+export_cookies.js
+dd_cookies_raw.json
+dd_cookies_railway.json
+RAILWAY_COOKIES_VALUE.txt

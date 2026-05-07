@@ -863,11 +863,13 @@ async function processCommands(response, user, phoneNumber) {
                         const prevGroupNamesText = new Set((prefsText.pendingDoordashOptions || []).map(g => g.name.toLowerCase()));
                         const newGroupsText = addResultText.requiredOptions.filter(g => !prevGroupNamesText.has(g.name.toLowerCase()) || !g.hasSelection);
                         const groupsToShowText = newGroupsText.length > 0 ? newGroupsText : addResultText.requiredOptions;
-                        additionalContext = `\n\nPlease select more options:\n`;
+                        additionalContext = `\n\n`;
                         groupsToShowText.forEach(group => {
-                            additionalContext += `${group.name.toUpperCase()}:\n`;
-                            group.options.forEach((opt, oIdx) => { additionalContext += `   ${oIdx + 1}. ${opt}\n`; });
+                            additionalContext += `Pick ${group.name}:\n`;
+                            group.options.slice(0, 12).forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
                         });
+                        if (groupsToShowText.length > 1) additionalContext += `\nReply with one number per group, e.g. "1, 2"`;
+                        else additionalContext += `\nReply with a number`;
                         prefsText.pendingDoordashOptions = groupsToShowText;
                         db.setUserPreferences(user.id, prefsText);
                     } else if (addResultText.browserNotOpen) {
@@ -892,15 +894,18 @@ async function processCommands(response, user, phoneNumber) {
         cleanResponse = cleanResponse.replace(optionMatch[0], '').trim();
         if (prefsOpt.pendingDoordashItem && prefsOpt.pendingDoordashOptions) {
             console.log('[DoorDash] Applying user option selections:', optNums);
-            const selectionsOpt = [];
+            // Start with any auto-selections from single-option groups
+            const selectionsOpt = [...(prefsOpt.pendingDoordashSelections || [])];
             for (let gIdx = 0; gIdx < prefsOpt.pendingDoordashOptions.length; gIdx++) {
                 const group = prefsOpt.pendingDoordashOptions[gIdx];
                 const optNum = gIdx < optNums.length ? optNums[gIdx] : 0;
                 if (!group.hasSelection) {
                     let optionText = (group.options[optNum] || group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
                     const actualIdx = optNum < group.options.length ? optNum : 0;
-                    selectionsOpt.push({ groupIndex: gIdx, optionIndex: actualIdx, optionText });
-                    console.log(`[DoorDash] Group ${gIdx} (${group.name}): User selected "${optionText}" (index ${actualIdx})`);
+                    // Use _origIdx if present (group was filtered from full list)
+                    const origIdx = group._origIdx !== undefined ? group._origIdx : gIdx;
+                    selectionsOpt.push({ groupIndex: origIdx, optionIndex: actualIdx, optionText });
+                    console.log(`[DoorDash] Group ${origIdx} (${group.name}): User selected "${optionText}" (index ${actualIdx})`);
                 }
             }
             prefsOpt.pendingDoordashSelections = selectionsOpt;
@@ -932,11 +937,13 @@ async function processCommands(response, user, phoneNumber) {
                     const newGroups = addResultOpt.requiredOptions.filter(g => !prevGroupNames.has(g.name.toLowerCase()) || !g.hasSelection);
                     // If all returned groups were already in pendingDoordashOptions, show them all (avoid empty prompt)
                     const groupsToShow = newGroups.length > 0 ? newGroups : addResultOpt.requiredOptions;
-                    additionalContext = `\n\nPlease select more options:\n`;
-                    groupsToShow.forEach((group, gIdx) => {
-                        additionalContext += `${group.name.toUpperCase()}:\n`;
-                        group.options.forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
+                    additionalContext = `\n\n`;
+                    groupsToShow.forEach(group => {
+                        additionalContext += `Pick ${group.name}:\n`;
+                        group.options.slice(0, 12).forEach((opt, oIdx) => { additionalContext += `${oIdx + 1}. ${opt}\n`; });
                     });
+                    if (groupsToShow.length > 1) additionalContext += `\nReply with one number per group, e.g. "1, 2"`;
+                    else additionalContext += `\nReply with a number`;
                     prefsOpt.pendingDoordashOptions = groupsToShow;
                     db.setUserPreferences(user.id, prefsOpt);
                 } else if (addResultOpt.browserNotOpen) {
@@ -1077,48 +1084,87 @@ async function processCommands(response, user, phoneNumber) {
                             itemsAdded.push(item.name);
                             actions.push({ type: 'add_item_doordash', item: item.name });
                         } else if (addResult.needsOptions) {
-                            // Item has required options - ask user to choose
-                            // Stop processing further ADD_ITEM_NUM commands until options are resolved
                             needsOptionsBreak = true;
                             prefs.pendingDoordashItem = { ...item, menuIndex: num };
-                            prefs.pendingDoordashOptions = addResult.requiredOptions;
-                            prefs.pendingDoordashGroupIndex = 0;
-                            prefs.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000; // 30-min TTL
-                            db.setUserPreferences(user.id, prefs);
+                            prefs.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000;
 
-                            // Show ALL option groups so user understands what they need to select
-                            additionalContext = `\n\n${item.name} has ${addResult.requiredOptions.length} required option(s):\n\n`;
-
-                            addResult.requiredOptions.forEach((group, gIdx) => {
-                                const isCurrent = gIdx === 0;
-                                additionalContext += `${gIdx + 1}. ${group.name.toUpperCase()}${group.required ? ' (required)' : ''}${group.hasSelection ? ' - done' : ''}:\n`;
-                                if (isCurrent || !group.hasSelection) {
-                                    group.options.slice(0, 15).forEach((opt, oIdx) => {
-                                        additionalContext += `   ${oIdx + 1}. ${opt}\n`;
-                                    });
-                                    if (group.options.length > 15) {
-                                        additionalContext += `   ...and ${group.options.length - 15} more\n`;
-                                    }
+                            // Auto-select any groups with only 1 option
+                            const autoSelections = [];
+                            const groupsNeedingInput = [];
+                            for (let gIdx = 0; gIdx < addResult.requiredOptions.length; gIdx++) {
+                                const g = addResult.requiredOptions[gIdx];
+                                if (g.options.length === 1) {
+                                    autoSelections.push({ groupIndex: gIdx, optionIndex: 0, optionText: g.options[0] });
+                                    console.log(`[DoorDash] Auto-selecting single option for "${g.name}": "${g.options[0]}"`);
+                                } else {
+                                    groupsNeedingInput.push({ ...g, _origIdx: gIdx });
                                 }
-                                additionalContext += '\n';
-                            });
-
-                            const firstGroup = addResult.requiredOptions[0];
-                            additionalContext += `Choose for "${firstGroup.name}" - reply with a number (1-${Math.min(8, firstGroup.options.length)})`;
-                            additionalContext += `\n(Or specify all at once: "2, Flour, Black Beans")`;
-
-                            // If there were more items queued, mention them
-                            const remaining = addNumMatches.slice(matchIdx + 1);
-                            if (remaining.length > 0) {
-                                const currentMenu = db.getCachedCurrentRestaurant(user.id);
-                                const remainingNames = remaining.map(m => {
-                                    const idx = parseInt(m[1]) - 1;
-                                    return currentMenu?.menu?.[idx]?.name || `item #${m[1]}`;
-                                });
-                                additionalContext += `\n\n(I'll add ${remainingNames.join(' and ')} after you pick.)`;
                             }
 
-                            actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
+                            if (groupsNeedingInput.length === 0) {
+                                // All groups have exactly 1 option — add item directly with auto selections
+                                console.log('[DoorDash] All option groups single-choice, auto-adding item');
+                                prefs.pendingDoordashOptions = addResult.requiredOptions;
+                                prefs.pendingDoordashSelections = autoSelections;
+                                db.setUserPreferences(user.id, prefs);
+                                try {
+                                    const autoResult = await doordash.addItemByIndex(num, { selectFirst: false, selections: autoSelections, skipOptionsCheck: true, restaurantUrl: prefs.currentRestaurantUrl }, item);
+                                    if (autoResult.success) {
+                                        prefs.pendingDoordashItem = null;
+                                        prefs.pendingDoordashOptions = null;
+                                        prefs.pendingDoordashSelections = null;
+                                        db.setUserPreferences(user.id, prefs);
+                                        db.addToCart(user.id, prefs.currentRestaurant, { id: item.id || `doordash-${num}`, name: item.name, price: item.price || 0, source: 'doordash' });
+                                        itemsAdded.push(item.name);
+                                        actions.push({ type: 'add_item_doordash', item: item.name });
+                                        needsOptionsBreak = false;
+                                    } else {
+                                        prefs.pendingDoordashOptions = addResult.requiredOptions;
+                                        db.setUserPreferences(user.id, prefs);
+                                        additionalContext = `\n\nCouldn't add ${item.name}. Please try again.`;
+                                        actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
+                                    }
+                                } catch (e) {
+                                    console.error('[AddItem] Auto-select error:', e);
+                                    prefs.pendingDoordashOptions = addResult.requiredOptions;
+                                    db.setUserPreferences(user.id, prefs);
+                                    additionalContext = `\n\nError adding item. Please try again.`;
+                                    actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
+                                }
+                            } else {
+                                // Store only the groups that need input; remember auto-selections
+                                prefs.pendingDoordashOptions = groupsNeedingInput;
+                                prefs.pendingDoordashSelections = autoSelections.length > 0 ? autoSelections : null;
+                                prefs.pendingDoordashGroupIndex = 0;
+                                db.setUserPreferences(user.id, prefs);
+
+                                additionalContext = `\n\n*${item.name}*\n`;
+                                groupsNeedingInput.forEach((group, gIdx) => {
+                                    additionalContext += `\nPick ${group.name}:\n`;
+                                    group.options.slice(0, 12).forEach((opt, oIdx) => {
+                                        additionalContext += `${oIdx + 1}. ${opt}\n`;
+                                    });
+                                    if (group.options.length > 12) additionalContext += `...and ${group.options.length - 12} more\n`;
+                                });
+
+                                if (groupsNeedingInput.length > 1) {
+                                    additionalContext += `\nReply with one number per group, e.g. "1, 2"`;
+                                } else {
+                                    additionalContext += `\nReply with a number`;
+                                }
+
+                                const remaining = addNumMatches.slice(matchIdx + 1);
+                                if (remaining.length > 0) {
+                                    const currentMenu = db.getCachedCurrentRestaurant(user.id);
+                                    const remainingNames = remaining.map(m => {
+                                        const idx = parseInt(m[1]) - 1;
+                                        return currentMenu?.menu?.[idx]?.name || `item #${m[1]}`;
+                                    });
+                                    additionalContext += `\n\n(I'll add ${remainingNames.join(' and ')} after.)`;
+                                }
+
+                                actions.push({ type: 'needs_options', item: item.name, options: addResult.requiredOptions });
+                            }
                         } else if (addResult.browserNotOpen) {
                             // Clear stale pending state so it doesn't bleed into the next session
                             prefs.pendingDoordashItem = null;
