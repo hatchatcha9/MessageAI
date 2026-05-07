@@ -4700,6 +4700,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log(`[DoorDash] Now at: ${page.url()}`);
         }
 
+        // If page is mid-render (raw Next.js SSR streaming), wait for React to hydrate
+        const rawContent = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+        if (rawContent.includes('self.__next_f') || (rawContent.length < 150 && page.url().includes('doordash.com'))) {
+            console.log('[DoorDash] Page is mid-render, waiting for hydration...');
+            await page.waitForFunction(
+                () => { const t = document.body?.innerText || ''; return t.length > 200 && !t.includes('self.__next_f'); },
+                { timeout: 10000 }
+            ).catch(async () => {
+                console.log('[DoorDash] Hydration timeout — reloading page...');
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+                await delay(2000);
+            });
+        }
+
         await takeScreenshot(`add-item-start-${index}`);
 
         // Check if modal is already open (from previous interaction)
