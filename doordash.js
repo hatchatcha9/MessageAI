@@ -5406,8 +5406,9 @@ async function extractRequiredOptions() {
                     }
 
                     // Clean up option text
-                    optText = optText.split(/\d+\s*cal/i)[0].trim();
-                    optText = optText.replace(/\+?\$[\d.]+/g, '').trim();
+                    optText = optText.split(/\d+\s*cal/i)[0].trim();  // strip calories and after
+                    optText = optText.split(/\$\d/)[0].trim();         // strip price and after
+                    optText = optText.replace(/\+\s*$/, '').trim();    // strip trailing + (price prefix)
                     optText = optText.replace(/Includes customization/gi, '').trim();
                     optText = optText.replace(/\bEdit selection\b/gi, '').trim();
                     optText = optText.replace(/\s*•\s*.+$/, '').trim(); // strip " • Medium Dr Pepper®" etc.
