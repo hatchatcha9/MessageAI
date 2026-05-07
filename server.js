@@ -894,15 +894,18 @@ async function processCommands(response, user, phoneNumber) {
         cleanResponse = cleanResponse.replace(optionMatch[0], '').trim();
         if (prefsOpt.pendingDoordashItem && prefsOpt.pendingDoordashOptions) {
             console.log('[DoorDash] Applying user option selections:', optNums);
-            // Start with any auto-selections from single-option groups
-            const selectionsOpt = [...(prefsOpt.pendingDoordashSelections || [])];
+            // Build selections from current pending options only (don't accumulate stale state)
+            // Auto-selections from single-option groups use _origIdx; user selections use loop index
+            const autoSels = (prefsOpt.pendingDoordashSelections || []).filter(s =>
+                !prefsOpt.pendingDoordashOptions.some((g, gi) => (g._origIdx !== undefined ? g._origIdx : gi) === s.groupIndex)
+            );
+            const selectionsOpt = [...autoSels];
             for (let gIdx = 0; gIdx < prefsOpt.pendingDoordashOptions.length; gIdx++) {
                 const group = prefsOpt.pendingDoordashOptions[gIdx];
                 const optNum = gIdx < optNums.length ? optNums[gIdx] : 0;
                 if (!group.hasSelection) {
                     let optionText = (group.options[optNum] || group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
                     const actualIdx = optNum < group.options.length ? optNum : 0;
-                    // Use _origIdx if present (group was filtered from full list)
                     const origIdx = group._origIdx !== undefined ? group._origIdx : gIdx;
                     selectionsOpt.push({ groupIndex: origIdx, optionIndex: actualIdx, optionText });
                     console.log(`[DoorDash] Group ${origIdx} (${group.name}): User selected "${optionText}" (index ${actualIdx})`);
@@ -945,6 +948,7 @@ async function processCommands(response, user, phoneNumber) {
                     if (groupsToShow.length > 1) additionalContext += `\nReply with one number per group, e.g. "1, 2"`;
                     else additionalContext += `\nReply with a number`;
                     prefsOpt.pendingDoordashOptions = groupsToShow;
+                    prefsOpt.pendingDoordashSelections = null; // reset; rebuilt fresh next round
                     db.setUserPreferences(user.id, prefsOpt);
                 } else if (addResultOpt.browserNotOpen) {
                     additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;

@@ -4718,6 +4718,12 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
         // Check if modal is already open (from previous interaction)
         const existingModal = await page.$('[role="dialog"], [aria-modal="true"]');
+        if (existingModal && (!options.selections || options.selections.length === 0)) {
+            // Modal open from a different item — close it before adding this one
+            console.log('[DoorDash] Modal open but no selections — closing before fresh item add');
+            await page.keyboard.press('Escape').catch(() => {});
+            await delay(600);
+        }
         if (existingModal && options.selections && options.selections.length > 0) {
             console.log('[DoorDash] Modal already open - applying selections directly');
             // Modal is already open, skip clicking item and go straight to applying selections
