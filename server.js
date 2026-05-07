@@ -1802,7 +1802,7 @@ app.post('/api/twilio/webhook', async (req, res) => {
         try {
             if (_ack) await sendSMS(from, _ack);
             const { response } = await handleMessage(from, message);
-            console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 100)}...`);
+            console.log(`[Twilio] Reply to ${from}: ${response.substring(0, 300)}...`);
             await sendSMS(from, response);
         } catch (error) {
             console.error('[Twilio Webhook] Error:', error);
