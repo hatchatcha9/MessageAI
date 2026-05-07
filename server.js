@@ -1841,32 +1841,47 @@ app.get('/api/user/:phoneNumber', (req, res) => {
 });
 
 // Clear conversation endpoint
+function _resetUser(user, keepCaches = false) {
+    db.clearConversationHistory(user.id);
+    db.clearCart(user.id);
+    const prefs = db.getUserPreferences(user.id);
+    prefs.currentRestaurant = null;
+    prefs.currentRestaurantSource = null;
+    prefs.currentRestaurantUrl = null;
+    prefs.lastSearchResults = null;
+    prefs.lastSearchSource = null;
+    prefs.lastSearchQuery = null;
+    prefs.pendingItem = null;
+    prefs.pendingDoordashItem = null;
+    prefs.pendingDoordashOptions = null;
+    prefs.pendingDoordashSelections = null;
+    prefs.pendingDoordashGroupIndex = null;
+    db.setUserPreferences(user.id, prefs);
+    if (!keepCaches) db.clearDoorDashCache(user.id);
+    else db.clearDoorDashCache(user.id, 'current_restaurant');
+    doordash.clearBrowserCart().catch(() => {});
+}
+
 app.post('/api/clear', (req, res) => {
-    const { phoneNumber } = req.body;
-    if (phoneNumber) {
-        const user = db.getUserByPhone(phoneNumber);
+    const phone = req.body.phone || req.body.phoneNumber;
+    if (phone) {
+        const user = db.getUserByPhone(phone);
         if (user) {
-            db.clearConversationHistory(user.id);
-            db.clearCart(user.id);
-            // Clear all cached restaurant/search data
-            const prefs = db.getUserPreferences(user.id);
-            prefs.currentRestaurant = null;
-            prefs.currentRestaurantSource = null;
-            prefs.currentRestaurantUrl = null;
-            prefs.lastSearchResults = null;
-            prefs.lastSearchSource = null;
-            prefs.lastSearchQuery = null;
-            prefs.pendingItem = null;
-            prefs.pendingDoordashItem = null;
-            prefs.pendingDoordashOptions = null;
-            prefs.pendingDoordashSelections = null;
-            prefs.pendingDoordashGroupIndex = null;
-            db.setUserPreferences(user.id, prefs);
-            // Also clear cached restaurant data
-            db.clearDoorDashCache(user.id);
-            // Clear the DoorDash browser cart to stay in sync
-            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
+            _resetUser(user, false);
             console.log(`[Clear] Cleared all data for user ${user.id}`);
+        }
+    }
+    res.json({ success: true });
+});
+
+// Reset session state without wiping search/menu caches — use this for testing
+app.post('/api/reset-session', (req, res) => {
+    const phone = req.body.phone || req.body.phoneNumber;
+    if (phone) {
+        const user = db.getUserByPhone(phone);
+        if (user) {
+            _resetUser(user, true);
+            console.log(`[Clear] Reset session (kept caches) for user ${user.id}`);
         }
     }
     res.json({ success: true });
