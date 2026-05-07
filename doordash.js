@@ -6263,12 +6263,19 @@ async function clickAddToOrderButton() {
             if (text.length < 3) continue;
 
             const hasAddWord = lowerText.includes('add to') || lowerText.includes('add for') || lowerText.includes('add (') || lowerText.includes('add -');
+            const isSaveButton = lowerText === 'save' || lowerText.startsWith('save ');
             const hasMakeOrSelect = lowerText.includes('make') || lowerText.includes('select') || lowerText.includes('required');
             const hasPrice = /\$\d+/.test(text);
             const rect = btn.getBoundingClientRect();
             const isWideButton = rect.width > 150;
 
-            console.log('[AddButton] Checking:', text.substring(0, 50), 'hasAdd:', hasAddWord, 'hasPrice:', hasPrice);
+            console.log('[AddButton] Checking:', text.substring(0, 50), 'hasAdd:', hasAddWord, 'isSave:', isSaveButton, 'hasPrice:', hasPrice);
+
+            // "Save" button appears after selecting a sub-item within a nested picker
+            if (isSaveButton && isWideButton) {
+                console.log('[AddButton] Found Save button:', text.substring(0, 50));
+                return { found: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.substring(0, 50) };
+            }
 
             // "Add to Order - $X" / "Add for $X" / "Add - $X" → ready to add
             if (hasAddWord && !hasMakeOrSelect && hasPrice && isWideButton) {
