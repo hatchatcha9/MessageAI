@@ -77,4 +77,17 @@ async function getForecast(location) {
     return `I couldn't find a forecast for "${location}".`;
 }
 
-module.exports = { getWeather, getForecast };
+async function getRaw(location) {
+    if (!WEATHER_API_KEY) return null;
+    const queries = [location.trim(), normalizeLocation(location)];
+    for (const query of queries) {
+        try {
+            const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(query)}&appid=${WEATHER_API_KEY}&units=imperial`;
+            const json = await fetchUrl(url);
+            if (json.cod === 200) return json;
+        } catch (e) { continue; }
+    }
+    return null;
+}
+
+module.exports = { getWeather, getForecast, getRaw };

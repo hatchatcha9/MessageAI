@@ -103,6 +103,48 @@
       letter-spacing: 1px;
     }
 
+    /* ── Weather widget (idle) ── */
+    #weather-widget {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      padding: 6px 14px;
+      background: #111118;
+      border: 1px solid #1e1e2e;
+      border-radius: 12px;
+      min-width: 180px;
+      justify-content: center;
+    }
+
+    #weather-temp {
+      font-size: 22px;
+      font-weight: 300;
+      color: #e8e8e8;
+    }
+
+    #weather-icon {
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    #weather-detail {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    #weather-desc {
+      font-size: 11px;
+      color: #666;
+      text-transform: capitalize;
+    }
+
+    #weather-city {
+      font-size: 10px;
+      color: #444;
+    }
+
     /* ── Listening state ── */
     #listen-view {
       display: none;
@@ -281,6 +323,14 @@
     <div id="idle-view">
       <div id="clock">00:00</div>
       <div id="date">Loading...</div>
+      <div id="weather-widget" style="display:none">
+        <div id="weather-icon">🌡</div>
+        <div id="weather-temp">--°</div>
+        <div id="weather-detail">
+          <div id="weather-desc">--</div>
+          <div id="weather-city">--</div>
+        </div>
+      </div>
       <div id="wake-hint">Say "Hey Pi" to start</div>
     </div>
 
@@ -406,6 +456,42 @@
   }
 
   connectSSE();
+
+  // ── Weather widget ──
+  const WEATHER_ICONS = {
+    'clear sky': '☀️', 'few clouds': '🌤', 'scattered clouds': '⛅',
+    'broken clouds': '☁️', 'overcast clouds': '☁️',
+    'light rain': '🌦', 'moderate rain': '🌧', 'heavy intensity rain': '🌧',
+    'light snow': '🌨', 'snow': '❄️', 'thunderstorm': '⛈',
+    'mist': '🌫', 'fog': '🌫', 'haze': '🌫',
+  };
+
+  function weatherIcon(desc) {
+    const lower = (desc || '').toLowerCase();
+    for (const [key, icon] of Object.entries(WEATHER_ICONS)) {
+      if (lower.includes(key)) return icon;
+    }
+    return '🌡';
+  }
+
+  async function fetchWeather() {
+    try {
+      const res = await fetch('/api/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.weather) return;
+
+      const w = data.weather;
+      document.getElementById('weather-temp').textContent = `${w.temp}°`;
+      document.getElementById('weather-desc').textContent = w.description;
+      document.getElementById('weather-city').textContent = w.city;
+      document.getElementById('weather-icon').textContent = weatherIcon(w.description);
+      document.getElementById('weather-widget').style.display = 'flex';
+    } catch (e) {}
+  }
+
+  fetchWeather();
+  setInterval(fetchWeather, 5 * 60 * 1000); // refresh every 5 min
 </script>
 </body>
 </html>

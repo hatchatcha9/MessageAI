@@ -11,6 +11,7 @@ const weather = require('./modules/weather');
 const reminders = require('./modules/reminders');
 const news = require('./modules/news');
 const gps = require('./modules/gps');
+const camera = require('./modules/camera');
 
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
@@ -369,6 +370,16 @@ REMINDER - When user wants a reminder:
 NEWS - When user wants headlines:
     [NEWS]
     [NEWS: technology] or [NEWS: sports] or [NEWS: business] for category news
+
+CAMERA - When user asks what the camera sees, to take a photo, or describe surroundings:
+    [CAMERA]
+    Examples: "what do you see", "look around", "what's in front of you", "take a picture"
+
+MATH - When user asks you to calculate something or convert units:
+    [MATH: expression]
+    Examples: "what's 15 percent of 80" → [MATH: 15% of 80]
+    "how many feet in 2 miles" → [MATH: 2 miles to feet]
+    "what's 847 divided by 13" → [MATH: 847 / 13]
 
 PERSONALITY:
 - Be casual and conversational, like a helpful friend
@@ -1737,6 +1748,24 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'news', category });
     }
 
+    // Math / unit conversion
+    const mathMatch = response.match(/\[MATH:\s*(.+?)\]/i);
+    if (mathMatch) {
+        const expr = mathMatch[1].trim();
+        cleanResponse = cleanResponse.replace(mathMatch[0], '').trim();
+        const mathResult = evalMath(expr);
+        additionalContext = `\n\n${mathResult}`;
+        actions.push({ type: 'math', expr });
+    }
+
+    // Camera
+    if (response.includes('[CAMERA]')) {
+        cleanResponse = cleanResponse.replace('[CAMERA]', '').trim();
+        const cameraResult = await camera.describe(anthropic);
+        additionalContext = `\n\n${cameraResult}`;
+        actions.push({ type: 'camera' });
+    }
+
     // Clear history
     if (response.includes('[CLEAR_HISTORY]')) {
         db.clearConversationHistory(user.id);
@@ -1765,6 +1794,50 @@ async function processCommands(response, user, phoneNumber) {
     cleanResponse = (cleanResponse + additionalContext).trim();
 
     return { response: cleanResponse, actions };
+}
+
+// Safe math evaluator — handles arithmetic + common unit conversions
+function evalMath(expr) {
+    try {
+        const e = expr.toLowerCase().trim();
+
+        // Unit conversions
+        const conversions = [
+            [/(\d+\.?\d*)\s*miles?\s+to\s+feet/,     n => `${n} miles = ${(n * 5280).toLocaleString()} feet`],
+            [/(\d+\.?\d*)\s*miles?\s+to\s+km/,       n => `${n} miles = ${(n * 1.60934).toFixed(2)} kilometers`],
+            [/(\d+\.?\d*)\s*km\s+to\s+miles/,        n => `${n} km = ${(n / 1.60934).toFixed(2)} miles`],
+            [/(\d+\.?\d*)\s*kg\s+to\s+(lbs?|pounds)/, n => `${n} kg = ${(n * 2.20462).toFixed(1)} pounds`],
+            [/(\d+\.?\d*)\s*(lbs?|pounds)\s+to\s+kg/, n => `${n} lbs = ${(n / 2.20462).toFixed(1)} kg`],
+            [/(\d+\.?\d*)\s*°?f\s+to\s+c/,           n => `${n}°F = ${((n - 32) * 5/9).toFixed(1)}°C`],
+            [/(\d+\.?\d*)\s*°?c\s+to\s+f/,           n => `${n}°C = ${(n * 9/5 + 32).toFixed(1)}°F`],
+            [/(\d+\.?\d*)\s*feet?\s+to\s+(meters?|m)/, n => `${n} feet = ${(n * 0.3048).toFixed(2)} meters`],
+            [/(\d+\.?\d*)\s*(meters?|m)\s+to\s+feet/, n => `${n} meters = ${(n / 0.3048).toFixed(2)} feet`],
+            [/(\d+\.?\d*)\s*oz\s+to\s+ml/,           n => `${n} oz = ${(n * 29.5735).toFixed(0)} ml`],
+            [/(\d+\.?\d*)\s*gallons?\s+to\s+liters?/, n => `${n} gallons = ${(n * 3.78541).toFixed(2)} liters`],
+        ];
+        for (const [pattern, fn] of conversions) {
+            const m = e.match(pattern);
+            if (m) return fn(parseFloat(m[1]));
+        }
+
+        // Percentage: "X% of Y" or "X percent of Y"
+        const pctOf = e.match(/(\d+\.?\d*)\s*(%|percent)\s+of\s+(\d+\.?\d*)/);
+        if (pctOf) {
+            const result = (parseFloat(pctOf[1]) / 100) * parseFloat(pctOf[3]);
+            return `${pctOf[1]}% of ${pctOf[3]} = ${result % 1 === 0 ? result : result.toFixed(2)}`;
+        }
+
+        // Arithmetic — only allow safe characters
+        const sanitized = expr.replace(/[^0-9+\-*/().% ]/g, '');
+        if (!sanitized) return `I couldn't calculate that.`;
+        // eslint-disable-next-line no-new-func
+        const result = Function(`"use strict"; return (${sanitized})`)();
+        if (typeof result !== 'number' || !isFinite(result)) return `I couldn't calculate that.`;
+        const rounded = Math.round(result * 10000) / 10000;
+        return `${expr} = ${rounded.toLocaleString()}`;
+    } catch (e) {
+        return `I couldn't calculate that.`;
+    }
 }
 
 // Per-user message lock — serializes concurrent messages from the same user to prevent
@@ -2069,6 +2142,38 @@ app.post('/api/reset-session', (req, res) => {
 });
 
 // Health check — shows env var status without exposing values
+// Status endpoint — used by screen.html to populate idle weather widget
+let _weatherCache = null;
+let _weatherCacheTs = 0;
+
+app.get('/api/status', async (req, res) => {
+    const now = Date.now();
+    // Refresh weather cache every 10 minutes
+    if (!_weatherCache || now - _weatherCacheTs > 10 * 60 * 1000) {
+        try {
+            const loc = gps.getLocationString() || 'Draper,US';
+            const raw = await weather.getRaw(loc);
+            if (raw) {
+                _weatherCache = {
+                    temp: Math.round(raw.main.temp),
+                    feels: Math.round(raw.main.feels_like),
+                    description: raw.weather[0].description,
+                    city: raw.name,
+                    humidity: raw.main.humidity,
+                };
+                _weatherCacheTs = now;
+            }
+        } catch (e) {
+            console.error('[Status] Weather fetch error:', e.message);
+        }
+    }
+    res.json({
+        weather: _weatherCache || null,
+        gps: gps.getLocation(),
+        uptime: Math.floor(process.uptime()),
+    });
+});
+
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
