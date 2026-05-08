@@ -966,7 +966,23 @@ async function processCommands(response, user, phoneNumber) {
     // [ADD_ITEM:] is deprecated — items are added via [ADD_ITEM_NUM:] using DoorDash menu indices
 
     // Add by number - handle multiple items (DoorDash)
-    const addNumMatches = [...response.matchAll(/\[ADD_ITEM_NUM:\s*(\d+)\]/gi)];
+    let addNumMatches = [...response.matchAll(/\[ADD_ITEM_NUM:\s*(\d+)\]/gi)];
+
+    // Dedup: if item A's name is a substring of item B's name, drop A (keep more specific).
+    // Prevents Claude from adding "Nuggets" alongside "Nuggets Meal" when user only asked for one.
+    if (addNumMatches.length > 1) {
+        const _dedupeMenu = db.getCachedCurrentRestaurant(user.id);
+        if (_dedupeMenu?.menu) {
+            const _names = addNumMatches.map(m => (_dedupeMenu.menu[parseInt(m[1]) - 1]?.name || '').toLowerCase());
+            addNumMatches = addNumMatches.filter((m, i) =>
+                !_names.some((other, j) => j !== i && other.includes(_names[i]) && other.length > _names[i].length)
+            );
+            if (addNumMatches.length < _names.length) {
+                console.log(`[ADD_ITEM_NUM] Deduped ${_names.length} → ${addNumMatches.length} items (removed substring-matched items)`);
+            }
+        }
+    }
+
     const itemsAdded = [];
     let needsOptionsBreak = false;
 
