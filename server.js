@@ -10,6 +10,7 @@ const doordash = require('./doordash');
 const weather = require('./modules/weather');
 const reminders = require('./modules/reminders');
 const news = require('./modules/news');
+const gps = require('./modules/gps');
 
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
@@ -335,7 +336,9 @@ PERSONALITY:
 - Acknowledge their choice briefly, then use the command`;
 
     if (voiceMode) {
-        return `You are PiAI, a voice assistant running on a Raspberry Pi. You help with food ordering, weather, reminders, news, and general questions. You speak to the user — they hear your responses out loud.
+        const gpsLoc = gps.getLocationString();
+        const locationNote = gpsLoc ? `\nCurrent GPS location: ${gpsLoc} — use this when user asks about weather without specifying a city.` : '';
+        return `You are PiAI, a voice assistant running on a Raspberry Pi. You help with food ordering, weather, reminders, news, and general questions. You speak to the user — they hear your responses out loud.${locationNote}
 
 VOICE RULES (CRITICAL):
 - Respond in natural spoken English only. No markdown, no asterisks, no bullet points, no numbered lists, no headers, no box-drawing characters (═ ─ •), no emojis, no dollar signs, no special symbols of any kind.
@@ -1682,8 +1685,12 @@ async function processCommands(response, user, phoneNumber) {
     // Weather
     const weatherMatch = response.match(/\[WEATHER:\s*(.+?)\]/i);
     if (weatherMatch) {
-        const location = weatherMatch[1].trim();
+        let location = weatherMatch[1].trim();
         cleanResponse = cleanResponse.replace(weatherMatch[0], '').trim();
+        // Fall back to GPS location if Claude couldn't determine a city
+        if (/^(unknown|here|my location|current location)$/i.test(location)) {
+            location = gps.getLocationString() || location;
+        }
         const weatherResult = await weather.getWeather(location);
         additionalContext = `\n\n${weatherResult}`;
         actions.push({ type: 'weather', location });
@@ -1692,8 +1699,11 @@ async function processCommands(response, user, phoneNumber) {
     // Forecast
     const forecastMatch = response.match(/\[FORECAST:\s*(.+?)\]/i);
     if (forecastMatch) {
-        const location = forecastMatch[1].trim();
+        let location = forecastMatch[1].trim();
         cleanResponse = cleanResponse.replace(forecastMatch[0], '').trim();
+        if (/^(unknown|here|my location|current location)$/i.test(location)) {
+            location = gps.getLocationString() || location;
+        }
         const forecastResult = await weather.getForecast(location);
         additionalContext = `\n\n${forecastResult}`;
         actions.push({ type: 'forecast', location });
@@ -1707,6 +1717,7 @@ async function processCommands(response, user, phoneNumber) {
         cleanResponse = cleanResponse.replace(reminderMatch[0], '').trim();
         const result = reminders.setReminder(user.id, timeStr, message, (uid, msg) => {
             console.log(`[Reminder] Fired for user ${uid}: ${msg}`);
+            pushPendingSpeech(msg);
         });
         if (result.success) {
             additionalContext = `\n\nReminder set for ${result.readableTime} from now.`;
@@ -2268,6 +2279,19 @@ async function checkScheduledOrders() {
 
 setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err?.message || String(err))), 60 * 1000);
 
+// ── Pending speech queue (for server-initiated speech: reminders, etc.) ──────
+const pendingSpeechQueue = [];
+
+function pushPendingSpeech(text) {
+    pendingSpeechQueue.push({ text, ts: Date.now() });
+    broadcastScreenState('speaking', { aiText: text });
+}
+
+app.get('/api/pending', (req, res) => {
+    const item = pendingSpeechQueue.shift();
+    res.json(item || null);
+});
+
 // ── Screen UI (SSE) ──────────────────────────────────────────────────────────
 const screenClients = new Set();
 let screenState = { state: 'idle' };
@@ -2330,6 +2354,9 @@ app.listen(PORT, async () => {
     if (!process.env.ANTHROPIC_API_KEY) {
         console.log('Warning: ANTHROPIC_API_KEY not set in .env file\n');
     }
+
+    // Start GPS background reader (no-ops gracefully if hardware not present)
+    gps.start().catch(err => console.error('[GPS] Start error:', err.message));
 
     // Auto-import DoorDash cookies from env var (set on Railway to skip login)
     if (process.env.DOORDASH_COOKIES) {

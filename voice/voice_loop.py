@@ -23,6 +23,24 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
+# Non-blocking Enter key detection (works on Windows + Linux)
+_enter_flag = threading.Event()
+def _stdin_reader():
+    while True:
+        try:
+            sys.stdin.readline()
+            _enter_flag.set()
+        except Exception:
+            break
+_stdin_thread = threading.Thread(target=_stdin_reader, daemon=True)
+_stdin_thread.start()
+
+def _enter_pressed():
+    if _enter_flag.is_set():
+        _enter_flag.clear()
+        return True
+    return False
+
 # ---------- Config ----------
 SERVER_URL = os.getenv("PIAI_SERVER_URL", "http://localhost:3000")
 VOICE_ENDPOINT = f"{SERVER_URL}/api/voice"
@@ -151,6 +169,18 @@ def set_screen_state(state, user_text=None, ai_text=None):
     except Exception:
         pass  # Screen updates are best-effort
 
+def check_pending_speech():
+    """Poll server for any server-initiated speech (fired reminders, etc.)."""
+    try:
+        res = requests.get(f"{SERVER_URL}/api/pending", timeout=2)
+        if res.status_code == 200:
+            data = res.json()
+            if data and data.get("text"):
+                return data["text"]
+    except Exception:
+        pass
+    return None
+
 # ---------- Wake Word ----------
 def wait_for_wake_word():
     """
@@ -158,13 +188,22 @@ def wait_for_wake_word():
     On Pi: uses openwakeword to detect 'hey pi'.
     """
     if DEV_MODE:
-        input("\n[PiAI] Press Enter to speak (or Ctrl+C to quit)...")
-        return
+        # Poll for pending speech every 2s while waiting for Enter
+        import select, sys
+        print("\n[PiAI] Press Enter to speak (or Ctrl+C to quit)...", end='', flush=True)
+        while True:
+            pending = check_pending_speech()
+            if pending:
+                print()  # newline after the prompt
+                return ("pending", pending)
+            # Non-blocking check for Enter key (Windows-compatible via threading)
+            if _enter_pressed():
+                return ("user", None)
+            time.sleep(0.5)
 
     try:
         from openwakeword.model import Model
         oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
-        # hey_jarvis is the closest available model; swap for custom "hey_pi" model later
         print("[PiAI] Waiting for wake word 'Hey Pi'...")
         chunk_size = 1280
         with sd.InputStream(samplerate=16000, channels=1, dtype='int16', blocksize=chunk_size) as stream:
@@ -174,10 +213,15 @@ def wait_for_wake_word():
                 scores = oww.prediction_buffer.get("hey_jarvis", [0])
                 if scores and scores[-1] > 0.5:
                     print("[PiAI] Wake word detected!")
-                    return
+                    return ("user", None)
+                # Also poll for reminders while waiting for wake word
+                pending = check_pending_speech()
+                if pending:
+                    return ("pending", pending)
     except ImportError:
         print("[PiAI] openwakeword not installed, falling back to Enter key.")
         input("[PiAI] Press Enter to speak...")
+        return ("user", None)
 
 # ---------- Main Loop ----------
 def main():
@@ -196,7 +240,17 @@ def main():
     while True:
         try:
             set_screen_state('idle')
-            wait_for_wake_word()
+            trigger = wait_for_wake_word()  # ("user", None) or ("pending", text)
+
+            if isinstance(trigger, tuple) and trigger[0] == "pending":
+                # Server-initiated speech (fired reminder, etc.)
+                pending_text = trigger[1]
+                print(f"[PiAI] Reminder: {pending_text}")
+                set_screen_state('speaking', ai_text=pending_text)
+                speak(pending_text)
+                set_screen_state('idle')
+                continue
+
             set_screen_state('listening')
             audio = record_until_silence()
 
@@ -214,7 +268,6 @@ def main():
                 continue
 
             print(f"[PiAI] You said: {text}")
-            # thinking + speaking states are set by the server via /api/voice
             response = send_to_server(text)
             print(f"[PiAI] Response: {response[:100]}...")
             speak(response)
