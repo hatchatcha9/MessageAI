@@ -7,6 +7,12 @@ const fs = require('fs');
 const db = require('./db');
 const restaurants = require('./restaurants');
 const doordash = require('./doordash');
+const weather = require('./modules/weather');
+const reminders = require('./modules/reminders');
+const news = require('./modules/news');
+
+// Fixed user identifier for the Pi hardware device
+const PI_DEVICE_ID = '+1PIDEVICE000';
 
 // In-memory log buffer for remote debugging
 const logBuffer = [];
@@ -85,7 +91,7 @@ async function sendSMS(to, message) {
 }
 
 // Build system prompt with user context
-function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu = null) {
+function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu = null, voiceMode = false) {
     let context = '';
 
     if (userAddress) {
@@ -327,6 +333,45 @@ PERSONALITY:
 - Use their order history to make smart suggestions
 - If they seem indecisive, make a recommendation
 - Acknowledge their choice briefly, then use the command`;
+
+    if (voiceMode) {
+        return `You are PiAI, a voice assistant running on a Raspberry Pi. You help with food ordering, weather, reminders, news, and general questions. You speak to the user — they hear your responses out loud.
+
+VOICE RULES (CRITICAL):
+- Respond in natural spoken English only. No markdown, no asterisks, no bullet points, no numbered lists, no headers, no box-drawing characters (═ ─ •), no emojis, no dollar signs, no special symbols of any kind.
+- Keep responses concise — 1 to 3 sentences unless detail is genuinely needed.
+- Spell out numbers and symbols: say "fifty dollars" not "$50", "three PM" not "3pm", "number 1" not "1.".
+- When listing items, use natural speech: "Your options are Dominos, Papa Johns, and Pizza Hut" not a numbered list.
+- Never say "I'll do X" without immediately doing it via a command.
+
+USER INFO:${context || '\nNew user - no saved info yet'}
+
+FOOD ORDERING COMMANDS (same as SMS version):
+[SEARCH: cuisine] [SELECT: N] [ADD_ITEM_NUM: N] [SELECT_OPTION: N] [SELECT_OPTIONS_TEXT: text]
+[SHOW_CART] [CLEAR_CART] [PLACE_ORDER] [SAVE_ADDRESS: address] [MY_ORDERS] [REORDER]
+
+NEW SKILL COMMANDS:
+WEATHER - When user asks about weather:
+    [WEATHER: city name]
+    Examples: "what's the weather like" → [WEATHER: Draper Utah]
+    Use their saved address city if no location given.
+
+FORECAST - When user wants a weather forecast:
+    [FORECAST: city name]
+
+REMINDER - When user wants a reminder:
+    [REMINDER: time | message]
+    Examples: "remind me in 10 minutes to take my meds" → [REMINDER: 10 minutes | take your meds]
+
+NEWS - When user wants headlines:
+    [NEWS]
+    [NEWS: technology] or [NEWS: sports] or [NEWS: business] for category news
+
+PERSONALITY:
+- Be casual and conversational, like a helpful friend
+- Give short spoken answers — the user is listening, not reading
+- For weather/reminders/news, just give the answer directly, no preamble`;
+    }
 }
 
 // Get human-readable order status based on time elapsed
@@ -1634,6 +1679,53 @@ async function processCommands(response, user, phoneNumber) {
 
     // (budget handled at top of processCommands, before search)
 
+    // Weather
+    const weatherMatch = response.match(/\[WEATHER:\s*(.+?)\]/i);
+    if (weatherMatch) {
+        const location = weatherMatch[1].trim();
+        cleanResponse = cleanResponse.replace(weatherMatch[0], '').trim();
+        const weatherResult = await weather.getWeather(location);
+        additionalContext = `\n\n${weatherResult}`;
+        actions.push({ type: 'weather', location });
+    }
+
+    // Forecast
+    const forecastMatch = response.match(/\[FORECAST:\s*(.+?)\]/i);
+    if (forecastMatch) {
+        const location = forecastMatch[1].trim();
+        cleanResponse = cleanResponse.replace(forecastMatch[0], '').trim();
+        const forecastResult = await weather.getForecast(location);
+        additionalContext = `\n\n${forecastResult}`;
+        actions.push({ type: 'forecast', location });
+    }
+
+    // Reminder
+    const reminderMatch = response.match(/\[REMINDER:\s*(.+?)\s*\|\s*(.+?)\]/i);
+    if (reminderMatch) {
+        const timeStr = reminderMatch[1].trim();
+        const message = reminderMatch[2].trim();
+        cleanResponse = cleanResponse.replace(reminderMatch[0], '').trim();
+        const result = reminders.setReminder(user.id, timeStr, message, (uid, msg) => {
+            console.log(`[Reminder] Fired for user ${uid}: ${msg}`);
+        });
+        if (result.success) {
+            additionalContext = `\n\nReminder set for ${result.readableTime} from now.`;
+        } else {
+            additionalContext = `\n\n${result.error}`;
+        }
+        actions.push({ type: 'reminder', timeStr, message });
+    }
+
+    // News
+    const newsMatch = response.match(/\[NEWS(?::\s*(.+?))?\]/i);
+    if (newsMatch) {
+        const category = newsMatch[1]?.trim().toLowerCase() || 'general';
+        cleanResponse = cleanResponse.replace(newsMatch[0], '').trim();
+        const newsResult = await news.getHeadlines(category);
+        additionalContext = `\n\n${newsResult}`;
+        actions.push({ type: 'news', category });
+    }
+
     // Clear history
     if (response.includes('[CLEAR_HISTORY]')) {
         db.clearConversationHistory(user.id);
@@ -1680,11 +1772,11 @@ function withUserLock(phoneNumber, fn) {
 }
 
 // Handle incoming message
-async function handleMessage(phoneNumber, message) {
-    return withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message));
+async function handleMessage(phoneNumber, message, voiceMode = false) {
+    return withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message, voiceMode));
 }
 
-async function _handleMessage(phoneNumber, message) {
+async function _handleMessage(phoneNumber, message, voiceMode = false) {
     const user = db.getOrCreateUser(phoneNumber);
     const userAddress = db.getUserAddress(user.id);
     const preferences = db.getUserPreferences(user.id);
@@ -1755,8 +1847,8 @@ async function _handleMessage(phoneNumber, message) {
     try {
         claudeResponse = await anthropic.messages.create({
             model: 'claude-sonnet-4-20250514',
-            max_tokens: 800,
-            system: buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu),
+            max_tokens: voiceMode ? 300 : 800,
+            system: buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu, voiceMode),
             messages: messages
         });
     } catch (error) {
@@ -1779,6 +1871,17 @@ async function _handleMessage(phoneNumber, message) {
         if (cmdMatches) console.log(`[Claude] Commands: ${cmdMatches.join(' | ')}`);
         const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber);
         assistantMessage = cleanedResponse;
+
+        if (voiceMode) {
+            assistantMessage = assistantMessage
+                .replace(/[═─•◆▸►●★☆╔╗╚╝║╠╣╦╩╬]/g, '')
+                .replace(/\$(\d+\.?\d*)/g, '$1 dollars')
+                .replace(/[^\x00-\x7F]/g, '')
+                .replace(/\n{2,}/g, ' ')
+                .replace(/\n/g, ' ')
+                .replace(/\s{2,}/g, ' ')
+                .trim();
+        }
 
         db.saveMessage(user.id, 'assistant', assistantMessage);
 
@@ -2164,6 +2267,56 @@ async function checkScheduledOrders() {
 }
 
 setInterval(() => checkScheduledOrders().catch(err => console.error('[Scheduler] Unhandled error:', err?.message || String(err))), 60 * 1000);
+
+// ── Screen UI (SSE) ──────────────────────────────────────────────────────────
+const screenClients = new Set();
+let screenState = { state: 'idle' };
+
+function broadcastScreenState(state, data = {}) {
+    screenState = { state, ...data };
+    const msg = `data: ${JSON.stringify(screenState)}\n\n`;
+    screenClients.forEach(client => client.write(msg));
+}
+
+// SSE stream — screen.html connects here
+app.get('/api/screen/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+    res.write(`data: ${JSON.stringify(screenState)}\n\n`);
+    screenClients.add(res);
+    req.on('close', () => screenClients.delete(res));
+});
+
+// State update — called by voice_loop.py and internally
+app.post('/api/screen/state', (req, res) => {
+    const { state, userText, aiText } = req.body;
+    if (state) broadcastScreenState(state, { userText, aiText });
+    res.json({ ok: true });
+});
+
+// Voice endpoint — used by voice_loop.py
+// Accepts: { message: string }
+// Returns: { response: string }
+app.post('/api/voice', async (req, res) => {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ error: 'message required' });
+
+    console.log(`[Voice] Received: ${message}`);
+    broadcastScreenState('thinking', { userText: message });
+
+    try {
+        const { response, actions } = await handleMessage(PI_DEVICE_ID, message, true);
+        console.log(`[Voice] Response: ${response.substring(0, 100)}...`);
+        broadcastScreenState('speaking', { userText: message, aiText: response });
+        res.json({ response, actions });
+    } catch (error) {
+        console.error('[Voice] Error:', error);
+        broadcastScreenState('idle');
+        res.status(500).json({ response: 'Sorry, something went wrong.' });
+    }
+});
 
 // Start server
 app.listen(PORT, async () => {

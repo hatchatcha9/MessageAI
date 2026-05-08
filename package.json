@@ -1,5 +1,5 @@
 {
-  "name": "messageai",
+  "name": "frog",
   "version": "1.0.0",
   "description": "An SMS-based AI assistant that can order food, make recommendations, and execute tasks - all via text message.",
   "main": "index.js",
