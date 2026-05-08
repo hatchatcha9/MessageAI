@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PiAI Settings</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0a0f;
+      color: #e2e8f0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+      padding: 24px 16px 48px;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    header .logo {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      color: #6ee7f7;
+    }
+    header .subtitle {
+      font-size: 12px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #64748b;
+    }
+
+    /* ── Section cards ── */
+    .section {
+      background: #10101a;
+      border: 1px solid #1e1e2e;
+      border-radius: 12px;
+      padding: 20px 22px;
+      margin-bottom: 16px;
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #6ee7f7;
+      margin-bottom: 18px;
+    }
+
+    /* ── Rows ── */
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 0;
+      border-bottom: 1px solid #1a1a2e;
+    }
+    .row:last-child { border-bottom: none; padding-bottom: 0; }
+    .row:first-of-type { padding-top: 0; }
+
+    .row-label {
+      font-size: 13px;
+      color: #94a3b8;
+      flex-shrink: 0;
+    }
+    .row-value {
+      font-size: 13px;
+      color: #e2e8f0;
+      text-align: right;
+    }
+
+    /* ── Toggle ── */
+    .toggle-group {
+      display: flex;
+      gap: 8px;
+    }
+    .toggle-btn {
+      background: #1a1a2e;
+      border: 1px solid #2a2a45;
+      border-radius: 8px;
+      color: #64748b;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 7px 18px;
+      text-transform: uppercase;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .toggle-btn.active {
+      background: #1a2a35;
+      border-color: #6ee7f7;
+      color: #6ee7f7;
+    }
+
+    /* ── Sliders ── */
+    .slider-block {
+      width: 100%;
+      padding: 8px 0 4px;
+    }
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 10px;
+    }
+    .slider-label { font-size: 13px; color: #94a3b8; }
+    .slider-val   { font-size: 13px; font-weight: 600; color: #a78bfa; }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: #1e1e2e;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #a78bfa;
+      cursor: pointer;
+      box-shadow: 0 0 6px rgba(167, 139, 250, 0.5);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #a78bfa;
+      cursor: pointer;
+      border: none;
+    }
+
+    .rms-bar-wrap {
+      width: 100%;
+      background: #1a1a2e;
+      border-radius: 4px;
+      height: 8px;
+      margin-top: 10px;
+      overflow: hidden;
+    }
+    .rms-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #6ee7f7, #a78bfa);
+      border-radius: 4px;
+      transition: width 0.1s ease;
+    }
+    .rms-label {
+      font-size: 11px;
+      color: #4a5568;
+      margin-top: 5px;
+      text-align: right;
+    }
+
+    /* ── API Status dots ── */
+    .api-list { display: flex; flex-direction: column; gap: 0; }
+    .api-row  {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 0;
+      border-bottom: 1px solid #1a1a2e;
+    }
+    .api-row:last-child { border-bottom: none; }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
+    .dot.red   { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
+    .dot.grey  { background: #374151; }
+    .api-name  { font-size: 13px; color: #94a3b8; flex: 1; }
+    .api-note  { font-size: 11px; color: #4a5568; }
+
+    /* ── About ── */
+    .about-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px 8px;
+    }
+    .about-item-label { font-size: 11px; color: #4a5568; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
+    .about-item-value { font-size: 14px; color: #e2e8f0; font-weight: 600; }
+
+    /* ── Save button ── */
+    #save-btn {
+      display: block;
+      width: 100%;
+      padding: 13px;
+      background: #1a1a2e;
+      border: 1px solid #6ee7f7;
+      border-radius: 10px;
+      color: #6ee7f7;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      transition: background 0.15s;
+      margin-top: 8px;
+    }
+    #save-btn:hover   { background: #1a2a35; }
+    #save-btn:active  { background: #0f2030; }
+    #save-feedback {
+      text-align: center;
+      font-size: 12px;
+      letter-spacing: 1px;
+      height: 18px;
+      margin-top: 8px;
+      color: #34d399;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    #save-feedback.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">PIAI</div>
+    <div class="subtitle">Settings</div>
+  </div>
+</header>
+
+<!-- ── Voice ── -->
+<div class="section">
+  <div class="section-title">Voice</div>
+
+  <div class="row">
+    <span class="row-label">Voice Gender</span>
+    <div class="toggle-group">
+      <button class="toggle-btn" id="btn-female" data-voice="female">Female</button>
+      <button class="toggle-btn" id="btn-male"   data-voice="male">Male</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="row-label">Current Voice</span>
+    <span class="row-value" id="voice-name">—</span>
+  </div>
+</div>
+
+<!-- ── Microphone ── -->
+<div class="section">
+  <div class="section-title">Microphone</div>
+
+  <div class="slider-block">
+    <div class="slider-header">
+      <span class="slider-label">Speech Threshold</span>
+      <span class="slider-val" id="speech-val">200</span>
+    </div>
+    <input type="range" id="speech-slider" min="50" max="500" value="200" step="5">
+  </div>
+
+  <div class="slider-block" style="margin-top:14px;">
+    <div class="slider-header">
+      <span class="slider-label">Silence Threshold</span>
+      <span class="slider-val" id="silence-val">80</span>
+    </div>
+    <input type="range" id="silence-slider" min="20" max="200" value="80" step="2">
+  </div>
+
+  <div style="margin-top:18px;">
+    <div style="font-size:11px;color:#4a5568;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">
+      Live Ambient RMS
+    </div>
+    <div class="rms-bar-wrap">
+      <div class="rms-bar" id="rms-bar"></div>
+    </div>
+    <div class="rms-label" id="rms-label">— RMS</div>
+  </div>
+</div>
+
+<!-- ── API Status ── -->
+<div class="section">
+  <div class="section-title">API Status</div>
+  <div class="api-list" id="api-list">
+    <div class="api-row"><div class="dot grey" id="dot-anthropic"></div><span class="api-name">Anthropic</span><span class="api-note" id="note-anthropic">checking…</span></div>
+    <div class="api-row"><div class="dot grey" id="dot-weather"></div><span class="api-name">OpenWeather</span><span class="api-note" id="note-weather">checking…</span></div>
+    <div class="api-row"><div class="dot grey" id="dot-news"></div><span class="api-name">NewsAPI</span><span class="api-note" id="note-news">checking…</span></div>
+    <div class="api-row"><div class="dot grey" id="dot-calendar"></div><span class="api-name">Google Calendar</span><span class="api-note" id="note-calendar">checking…</span></div>
+    <div class="api-row"><div class="dot grey" id="dot-spotify"></div><span class="api-name">Spotify</span><span class="api-note" id="note-spotify">checking…</span></div>
+  </div>
+</div>
+
+<!-- ── About ── -->
+<div class="section">
+  <div class="section-title">About</div>
+  <div class="about-grid">
+    <div>
+      <div class="about-item-label">Platform</div>
+      <div class="about-item-value" id="about-platform">—</div>
+    </div>
+    <div>
+      <div class="about-item-label">Version</div>
+      <div class="about-item-value" id="about-version">—</div>
+    </div>
+    <div>
+      <div class="about-item-label">Uptime</div>
+      <div class="about-item-value" id="about-uptime">—</div>
+    </div>
+    <div>
+      <div class="about-item-label">Node</div>
+      <div class="about-item-value" id="about-node">—</div>
+    </div>
+  </div>
+</div>
+
+<button id="save-btn">Save Settings</button>
+<div id="save-feedback">Settings saved.</div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────
+  let settings = { voice: 'female', speechThreshold: 200, silenceThreshold: 80, silenceDuration: 1.5 };
+  let rmsPoller = null;
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+  function voiceName(gender) {
+    return gender === 'male' ? 'en-GB Male (espeak)' : 'en-GB Female (espeak)';
+  }
+
+  function formatUptime(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  // ── Apply settings to UI ───────────────────────────────────────────────
+  function applySettings(s) {
+    settings = { ...settings, ...s };
+
+    // Voice toggle
+    document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+    const activeBtn = document.querySelector(`[data-voice="${settings.voice}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
+    document.getElementById('voice-name').textContent = voiceName(settings.voice);
+
+    // Sliders
+    document.getElementById('speech-slider').value = settings.speechThreshold;
+    document.getElementById('speech-val').textContent = settings.speechThreshold;
+    document.getElementById('silence-slider').value = settings.silenceThreshold;
+    document.getElementById('silence-val').textContent = settings.silenceThreshold;
+  }
+
+  // ── Load settings from server ──────────────────────────────────────────
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings');
+      if (res.ok) applySettings(await res.json());
+    } catch (e) { console.warn('Could not load settings:', e); }
+  }
+
+  // ── Save settings to server ────────────────────────────────────────────
+  async function saveSettings() {
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      });
+      if (res.ok) {
+        const fb = document.getElementById('save-feedback');
+        fb.classList.add('show');
+        setTimeout(() => fb.classList.remove('show'), 2000);
+      }
+    } catch (e) { console.warn('Could not save settings:', e); }
+  }
+
+  // ── Voice toggle ───────────────────────────────────────────────────────
+  document.querySelectorAll('.toggle-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      settings.voice = btn.dataset.voice;
+      applySettings(settings);
+    });
+  });
+
+  // ── Sliders ────────────────────────────────────────────────────────────
+  document.getElementById('speech-slider').addEventListener('input', e => {
+    settings.speechThreshold = parseInt(e.target.value);
+    document.getElementById('speech-val').textContent = settings.speechThreshold;
+  });
+
+  document.getElementById('silence-slider').addEventListener('input', e => {
+    settings.silenceThreshold = parseInt(e.target.value);
+    document.getElementById('silence-val').textContent = settings.silenceThreshold;
+  });
+
+  // ── Save button ────────────────────────────────────────────────────────
+  document.getElementById('save-btn').addEventListener('click', saveSettings);
+
+  // ── RMS polling ────────────────────────────────────────────────────────
+  async function pollRms() {
+    try {
+      const res = await fetch('/api/voice/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      const rms  = data.rms ?? null;
+      const bar  = document.getElementById('rms-bar');
+      const lbl  = document.getElementById('rms-label');
+      if (rms === null) {
+        bar.style.width = '0%';
+        lbl.textContent = '— RMS';
+      } else {
+        const speechThr = settings.speechThreshold;
+        const pct = Math.min(100, Math.round((rms / (speechThr * 1.5)) * 100));
+        bar.style.width = pct + '%';
+        lbl.textContent = `${Math.round(rms)} RMS`;
+      }
+    } catch (e) { /* silently ignore */ }
+  }
+
+  rmsPoller = setInterval(pollRms, 300);
+  pollRms();
+
+  // ── API Status ─────────────────────────────────────────────────────────
+  async function loadApiStatus() {
+    const apis = [
+      { key: 'anthropic', label: 'Anthropic' },
+      { key: 'weather',   label: 'OpenWeather' },
+      { key: 'news',      label: 'NewsAPI' },
+      { key: 'calendar',  label: 'Google Calendar' },
+      { key: 'spotify',   label: 'Spotify' },
+    ];
+
+    try {
+      const res  = await fetch('/api/health/full');
+      const data = res.ok ? await res.json() : {};
+
+      for (const { key } of apis) {
+        const dot  = document.getElementById(`dot-${key}`);
+        const note = document.getElementById(`note-${key}`);
+        const val  = data[key];
+        if (val === undefined || val === null) {
+          dot.className  = 'dot grey';
+          note.textContent = 'unknown';
+        } else if (val === true || val === 'ok' || (typeof val === 'string' && val.startsWith('set'))) {
+          dot.className  = 'dot green';
+          note.textContent = 'connected';
+        } else {
+          dot.className  = 'dot red';
+          note.textContent = typeof val === 'string' ? val : 'not configured';
+        }
+      }
+    } catch (e) {
+      for (const { key } of apis) {
+        document.getElementById(`dot-${key}`).className = 'dot grey';
+        document.getElementById(`note-${key}`).textContent = 'unreachable';
+      }
+    }
+  }
+
+  // ── About ──────────────────────────────────────────────────────────────
+  async function loadAbout() {
+    try {
+      const res  = await fetch('/api/status');
+      const data = res.ok ? await res.json() : {};
+      document.getElementById('about-platform').textContent = data.platform || navigator.platform || '—';
+      document.getElementById('about-version').textContent  = data.version  || '1.0.0';
+      document.getElementById('about-uptime').textContent   = data.uptime   ? formatUptime(data.uptime) : '—';
+      document.getElementById('about-node').textContent     = data.node     || '—';
+    } catch (e) {
+      document.getElementById('about-uptime').textContent = '—';
+    }
+  }
+
+  // ── Boot ───────────────────────────────────────────────────────────────
+  loadSettings();
+  loadApiStatus();
+  loadAbout();
+</script>
+</body>
+</html>

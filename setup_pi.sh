@@ -1,97 +1,153 @@
 #!/bin/bash
 # PiAI Setup Script — run once on a fresh Raspberry Pi 4
-# Usage: curl -sSL <url> | bash
-#    or: bash setup_pi.sh
+# Usage: bash setup_pi.sh
+# Or one-line install (once repo is public):
+#   curl -sSL https://raw.githubusercontent.com/hatchatcha9/MessageAI/master/setup_pi.sh | bash
 
 set -e
 
 PIAI_DIR="$HOME/piai"
-REPO_URL="https://github.com/your-username/piai"  # TODO: update when repo is pushed
+REPO_URL="https://github.com/hatchatcha9/MessageAI.git"
 
 echo "========================================"
 echo "  PiAI Setup"
+echo "  Platform: $(uname -m) / $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || echo 'Unknown')"
 echo "========================================"
 
-# ── System packages ──────────────────────────────────────────────────────────
-echo "[1/7] Installing system dependencies..."
+# ── 1. System packages ────────────────────────────────────────────────────────
+echo ""
+echo "[1/8] Installing system dependencies..."
 sudo apt-get update -qq
 sudo apt-get install -y \
     python3 python3-pip python3-venv \
-    nodejs npm \
     portaudio19-dev \
     libsndfile1 \
-    espeak \
+    alsa-utils \
+    libasound2-dev \
     git \
-    ffmpeg
+    ffmpeg \
+    libcamera-apps \
+    v4l-utils \
+    i2c-tools
 
-# ── Node.js (ensure v18+) ─────────────────────────────────────────────────────
-echo "[2/7] Checking Node.js version..."
-NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
-if [ "$NODE_MAJOR" -lt 18 ]; then
-    echo "    Upgrading Node.js to v20..."
+# ── 2. Node.js v20 ────────────────────────────────────────────────────────────
+echo ""
+echo "[2/8] Checking Node.js..."
+if ! command -v node &>/dev/null || [ "$(node -e 'console.log(+process.versions.node.split(\".\")[0])')" -lt 18 ]; then
+    echo "    Installing Node.js v20..."
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
     sudo apt-get install -y nodejs
 fi
 echo "    Node.js $(node --version) ✓"
 
-# ── Clone / update repo ───────────────────────────────────────────────────────
-echo "[3/7] Setting up project directory..."
-if [ -d "$PIAI_DIR/.git" ]; then
-    echo "    Pulling latest changes..."
-    git -C "$PIAI_DIR" pull
+# ── 3. WM8960 Audio HAT ───────────────────────────────────────────────────────
+echo ""
+echo "[3/8] Configuring WM8960 audio HAT..."
+
+# Enable I2C and I2S in /boot/config.txt if not already
+CONFIG=/boot/firmware/config.txt   # Pi OS Bookworm path
+[ -f /boot/config.txt ] && CONFIG=/boot/config.txt   # older Pi OS
+
+for line in "dtparam=i2c_arm=on" "dtparam=i2s=on" "dtoverlay=wm8960-soundcard"; do
+    grep -qF "$line" "$CONFIG" || echo "$line" | sudo tee -a "$CONFIG" > /dev/null && echo "    Added: $line"
+done
+
+# Create ALSA config for WM8960 HAT
+sudo tee /etc/asound.conf > /dev/null << 'ALSA'
+pcm.!default {
+    type asym
+    playback.pcm {
+        type plug
+        slave.pcm "hw:wm8960soundcard,0"
+    }
+    capture.pcm {
+        type plug
+        slave.pcm "hw:wm8960soundcard,0"
+    }
+}
+ctl.!default {
+    type hw
+    card wm8960soundcard
+}
+ALSA
+
+# Set WM8960 mixer levels (run after reboot, skip if card not present yet)
+if aplay -l 2>/dev/null | grep -q wm8960; then
+    amixer -c wm8960soundcard sset 'Headphone',0 80% 2>/dev/null || true
+    amixer -c wm8960soundcard sset 'Speaker',0 80% 2>/dev/null || true
+    amixer -c wm8960soundcard sset 'Capture',0 80% unmute 2>/dev/null || true
+    echo "    WM8960 mixer levels set ✓"
 else
-    echo "    Cloning repo to $PIAI_DIR..."
-    git clone "$REPO_URL" "$PIAI_DIR"
+    echo "    WM8960 not detected yet (normal before first reboot with overlay)"
 fi
 
+# ── 4. Pi Camera 3 ────────────────────────────────────────────────────────────
+echo ""
+echo "[4/8] Enabling Pi Camera 3..."
+
+# Enable camera in config
+grep -qF "camera_auto_detect=1" "$CONFIG" || echo "camera_auto_detect=1" | sudo tee -a "$CONFIG" > /dev/null
+grep -qF "dtoverlay=imx708" "$CONFIG" || echo "dtoverlay=imx708" | sudo tee -a "$CONFIG" > /dev/null
+
+# Add user to video group
+sudo usermod -aG video "$USER"
+
+# Test capture (skip if camera not available yet)
+if libcamera-hello --list-cameras 2>/dev/null | grep -q "Available"; then
+    echo "    Camera detected ✓"
+else
+    echo "    Camera not detected yet (normal before first reboot)"
+fi
+
+# ── 5. Clone / update repo ────────────────────────────────────────────────────
+echo ""
+echo "[5/8] Setting up project..."
+if [ -d "$PIAI_DIR/.git" ]; then
+    echo "    Pulling latest..."
+    git -C "$PIAI_DIR" pull --rebase
+else
+    git clone "$REPO_URL" "$PIAI_DIR"
+fi
 cd "$PIAI_DIR"
 
-# ── Node dependencies ─────────────────────────────────────────────────────────
-echo "[4/7] Installing Node.js dependencies..."
+# ── 6. Node dependencies ──────────────────────────────────────────────────────
+echo ""
+echo "[6/8] Installing Node.js dependencies..."
 npm install --omit=dev
+npm install serialport @serialport/parser-readline  # GPS support
 
-# ── Python virtualenv ─────────────────────────────────────────────────────────
-echo "[5/7] Setting up Python environment..."
+# ── 7. Python voice loop ──────────────────────────────────────────────────────
+echo ""
+echo "[7/8] Setting up Python environment..."
 python3 -m venv voice/venv
 source voice/venv/bin/activate
 
 pip install --upgrade pip -q
 pip install -r voice/requirements.txt
 
-# Kokoro needs extra steps on Pi (ARM)
-echo "    Installing Kokoro TTS..."
-pip install kokoro -q || {
-    echo "    Kokoro pip install failed, trying with --extra-index-url..."
-    pip install kokoro --extra-index-url https://download.pytorch.org/whl/cpu -q
-}
+# Uncomment openwakeword for wake word support
+pip install openwakeword -q && echo "    openwakeword installed ✓" || echo "    openwakeword install failed (non-fatal)"
 
-echo "    Downloading Whisper base.en model..."
-python3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')" && echo "    Whisper ready ✓"
+# Pre-download Whisper model (tiny.en for Pi — faster than base.en)
+echo "    Downloading Whisper tiny.en model..."
+python3 -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')" \
+    && echo "    Whisper ready ✓"
 
 deactivate
 
-# ── .env file ─────────────────────────────────────────────────────────────────
-echo "[6/7] Configuring environment..."
+# ── 8. Environment & services ─────────────────────────────────────────────────
+echo ""
+echo "[8/8] Finalizing..."
+
+# Create .env if not present
 if [ ! -f "$PIAI_DIR/.env" ]; then
-    cat > "$PIAI_DIR/.env" << 'EOF'
-# Fill in your API keys
-ANTHROPIC_API_KEY=
-OPENWEATHER_API_KEY=
-NEWS_API_KEY=
-PORT=3000
-ENCRYPTION_KEY=
-EOF
+    cp "$PIAI_DIR/.env.example" "$PIAI_DIR/.env"
     echo ""
-    echo "  *** Created .env — EDIT IT before starting: nano $PIAI_DIR/.env ***"
+    echo "  *** .env created — EDIT IT NOW: nano $PIAI_DIR/.env ***"
     echo ""
-else
-    echo "    .env already exists, skipping."
 fi
 
-# ── Systemd services ──────────────────────────────────────────────────────────
-echo "[7/7] Installing systemd services..."
-
-# Server service
+# Systemd — server
 sudo tee /etc/systemd/system/piai-server.service > /dev/null << EOF
 [Unit]
 Description=PiAI Server
@@ -110,7 +166,7 @@ EnvironmentFile=$PIAI_DIR/.env
 WantedBy=multi-user.target
 EOF
 
-# Voice loop service
+# Systemd — voice loop
 sudo tee /etc/systemd/system/piai-voice.service > /dev/null << EOF
 [Unit]
 Description=PiAI Voice Loop
@@ -133,21 +189,35 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable piai-server piai-voice
-echo "    Services installed and enabled on boot."
+echo "    Services installed and enabled on boot ✓"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
-echo "  PiAI Setup Complete!"
+echo "  Setup Complete!"
 echo "========================================"
 echo ""
-echo "  Next steps:"
-echo "  1. Edit .env:  nano $PIAI_DIR/.env"
-echo "  2. Start:      sudo systemctl start piai-server piai-voice"
-echo "  3. Status:     sudo systemctl status piai-server piai-voice"
-echo "  4. Screen UI:  http://$(hostname -I | awk '{print $1}'):3000/screen.html"
+echo "  NEXT STEPS:"
+echo "  1. Edit .env:        nano $PIAI_DIR/.env"
+
+# Check if reboot needed (new overlays added)
+NEEDS_REBOOT=0
+grep -qF "dtoverlay=wm8960-soundcard" "$CONFIG" && NEEDS_REBOOT=1
+
+if [ "$NEEDS_REBOOT" -eq 1 ]; then
+    echo "  2. REBOOT REQUIRED:  sudo reboot"
+    echo "     (needed for WM8960 audio HAT + camera overlay)"
+    echo "  3. After reboot:     sudo systemctl start piai-server piai-voice"
+else
+    echo "  2. Start services:   sudo systemctl start piai-server piai-voice"
+fi
+
 echo ""
-echo "  Logs:"
+echo "  Screen UI:   http://$(hostname -I | awk '{print $1}'):3000/screen.html"
+echo "  Debug logs:  http://$(hostname -I | awk '{print $1}'):3000/debug.html"
+echo "  Settings:    http://$(hostname -I | awk '{print $1}'):3000/settings.html"
+echo ""
+echo "  Service logs:"
 echo "    sudo journalctl -u piai-server -f"
 echo "    sudo journalctl -u piai-voice -f"
 echo ""

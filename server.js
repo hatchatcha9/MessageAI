@@ -12,17 +12,26 @@ const reminders = require('./modules/reminders');
 const news = require('./modules/news');
 const gps = require('./modules/gps');
 const camera = require('./modules/camera');
+const calendar = require('./modules/calendar');
+const spotify = require('./modules/spotify');
 
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
 
 // In-memory log buffer for remote debugging
 const logBuffer = [];
+const sseLogClients = []; // SSE clients subscribed to /logs/stream
 const _origLog = console.log.bind(console);
 const _origErr = console.error.bind(console);
 const _ts = () => new Date().toISOString().replace('T', ' ').substring(0, 23);
-console.log = (...args) => { const line = `[${_ts()}] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origLog(...args); };
-console.error = (...args) => { const line = `[${_ts()}] [ERR] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _origErr(...args); };
+function _broadcastLogLine(line) {
+    for (let i = sseLogClients.length - 1; i >= 0; i--) {
+        try { sseLogClients[i].write(`data: ${JSON.stringify(line)}\n\n`); }
+        catch (e) { sseLogClients.splice(i, 1); }
+    }
+}
+console.log = (...args) => { const line = `[${_ts()}] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _broadcastLogLine(line); _origLog(...args); };
+console.error = (...args) => { const line = `[${_ts()}] [ERR] ` + args.join(' '); logBuffer.push(line); if (logBuffer.length > 2000) logBuffer.shift(); _broadcastLogLine(line); _origErr(...args); };
 
 const CRASH_LOG = path.join(__dirname, 'crash.log');
 process.on('uncaughtException', (err) => {
@@ -374,6 +383,19 @@ NEWS - When user wants headlines:
 CAMERA - When user asks what the camera sees, to take a photo, or describe surroundings:
     [CAMERA]
     Examples: "what do you see", "look around", "what's in front of you", "take a picture"
+
+CALENDAR - When user asks about their schedule or events:
+    [CALENDAR]           → today's events
+    [CALENDAR: upcoming] → next 7 days
+    Examples: "what's on my calendar", "any events today", "what do I have this week"
+
+SPOTIFY - When user wants to control music:
+    [SPOTIFY: play <song or artist>]
+    [SPOTIFY: pause]
+    [SPOTIFY: skip]
+    [SPOTIFY: volume <0-100>]
+    [SPOTIFY: what's playing]
+    Examples: "play some jazz", "skip this song", "turn it up to 70", "what song is this"
 
 MATH - When user asks you to calculate something or convert units:
     [MATH: expression]
@@ -1766,6 +1788,32 @@ async function processCommands(response, user, phoneNumber) {
         actions.push({ type: 'camera' });
     }
 
+    // Calendar
+    const calendarMatch = response.match(/\[CALENDAR(?::\s*(upcoming))?\]/i);
+    if (calendarMatch) {
+        cleanResponse = cleanResponse.replace(calendarMatch[0], '').trim();
+        const auth = calendar.getAuth();
+        const calResult = calendarMatch[1] ? await calendar.getUpcoming(auth) : await calendar.getToday(auth);
+        additionalContext = `\n\n${calResult}`;
+        actions.push({ type: 'calendar' });
+    }
+
+    // Spotify
+    const spotifyMatch = response.match(/\[SPOTIFY:\s*(.+?)\]/i);
+    if (spotifyMatch) {
+        cleanResponse = cleanResponse.replace(spotifyMatch[0], '').trim();
+        const cmd = spotifyMatch[1].trim().toLowerCase();
+        let spotResult;
+        if (cmd === 'pause')                      spotResult = await spotify.pause();
+        else if (cmd === 'skip')                  spotResult = await spotify.skip();
+        else if (cmd === "what's playing" || cmd === 'now playing') spotResult = await spotify.getCurrentTrack();
+        else if (/^volume\s+(\d+)$/.test(cmd))    spotResult = await spotify.setVolume(cmd.match(/(\d+)/)[1]);
+        else if (/^play\s+(.+)$/.test(cmd))       spotResult = await spotify.play(cmd.replace(/^play\s+/i, ''));
+        else                                       spotResult = await spotify.play(cmd);
+        additionalContext = `\n\n${spotResult}`;
+        actions.push({ type: 'spotify', cmd });
+    }
+
     // Clear history
     if (response.includes('[CLEAR_HISTORY]')) {
         db.clearConversationHistory(user.id);
@@ -2168,9 +2216,12 @@ app.get('/api/status', async (req, res) => {
         }
     }
     res.json({
-        weather: _weatherCache || null,
-        gps: gps.getLocation(),
-        uptime: Math.floor(process.uptime()),
+        weather:  _weatherCache || null,
+        gps:      gps.getLocation(),
+        uptime:   Math.floor(process.uptime()),
+        platform: process.platform,
+        node:     process.version,
+        version:  require('./package.json').version || '1.0.0',
     });
 });
 
@@ -2183,6 +2234,68 @@ app.get('/api/health', (req, res) => {
         dbPath: process.env.DB_PATH || 'default',
         browserDataDir: process.env.BROWSER_DATA_DIR || 'default'
     });
+});
+
+// Full health check — used by debug.html and settings.html
+app.get('/api/health/full', (req, res) => {
+    const mem = process.memoryUsage();
+    res.json({
+        anthropic:   !!process.env.ANTHROPIC_API_KEY,
+        weather:     !!process.env.OPENWEATHER_API_KEY,
+        news:        !!process.env.NEWS_API_KEY,
+        calendar:    !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN),
+        spotify:     !!(process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET && process.env.SPOTIFY_REFRESH_TOKEN),
+        gps: {
+            active:   false,   // updated by gps.js when serial opens
+            fix:      !!gps.getLocation(),
+            location: gps.getLocationString() || null,
+        },
+        camera:      { available: camera.IS_PI },
+        platform:    process.platform,
+        nodeVersion: process.version,
+        uptime:      Math.floor(process.uptime()),
+        memory: {
+            used:  Math.round(mem.heapUsed / 1024 / 1024),
+            total: Math.round(mem.heapTotal / 1024 / 1024),
+            rss:   Math.round(mem.rss / 1024 / 1024),
+        },
+    });
+});
+
+// Settings — persisted to settings.json, read by voice_loop.py on startup
+const SETTINGS_PATH = path.join(__dirname, 'settings.json');
+const DEFAULT_SETTINGS = {
+    voice: 'female',
+    speechThreshold: 200,
+    silenceThreshold: 80,
+    silenceDuration: 1.5,
+};
+
+function loadSettings() {
+    try {
+        return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')) };
+    } catch {
+        return { ...DEFAULT_SETTINGS };
+    }
+}
+
+function saveSettings(data) {
+    const current = loadSettings();
+    const updated = { ...current, ...data };
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(updated, null, 2));
+    return updated;
+}
+
+app.get('/api/settings', (req, res) => res.json(loadSettings()));
+
+app.post('/api/settings', (req, res) => {
+    try {
+        const updated = saveSettings(req.body);
+        console.log('[Settings] Updated:', JSON.stringify(req.body));
+        res.json(updated);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Serve the simulator UI
@@ -2206,6 +2319,28 @@ app.post('/api/doordash/manual-login', async (req, res) => {
 app.get('/logs', (req, res) => {
     const n = parseInt(req.query.n) || 500;
     res.type('text/plain').send(logBuffer.slice(-n).join('\n'));
+});
+
+// SSE log stream — sends last 100 lines immediately, then pushes new lines in real-time
+app.get('/logs/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    // Send buffered history
+    const history = logBuffer.slice(-100);
+    for (const line of history) {
+        res.write(`data: ${JSON.stringify(line)}\n\n`);
+    }
+
+    // Register this client for future lines
+    sseLogClients.push(res);
+
+    req.on('close', () => {
+        const idx = sseLogClients.indexOf(res);
+        if (idx !== -1) sseLogClients.splice(idx, 1);
+    });
 });
 
 // Export DoorDash cookies (run locally, paste into Railway env)
@@ -2423,6 +2558,27 @@ app.post('/api/screen/state', (req, res) => {
     const { state, userText, aiText } = req.body;
     if (state) broadcastScreenState(state, { userText, aiText });
     res.json({ ok: true });
+});
+
+// ── Voice RMS status ──────────────────────────────────────────────────────
+// voice_loop.py can POST { rms: <number> } here to share the latest 5s average.
+// The settings page polls this for the live ambient level bar.
+let _lastRms = null;
+let _lastRmsAt = 0;
+
+app.post('/api/voice/rms', (req, res) => {
+    const { rms } = req.body || {};
+    if (typeof rms === 'number') {
+        _lastRms   = rms;
+        _lastRmsAt = Date.now();
+    }
+    res.json({ ok: true });
+});
+
+app.get('/api/voice/status', (req, res) => {
+    // Expire the cached RMS after 10 seconds of silence from the voice loop
+    const rms = (Date.now() - _lastRmsAt < 10000) ? _lastRms : null;
+    res.json({ rms });
 });
 
 // Voice endpoint — used by voice_loop.py

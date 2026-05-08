@@ -17,9 +17,11 @@
     "better-sqlite3": "^12.6.2",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "googleapis": "^144.0.0",
     "playwright": "^1.40.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "spotify-web-api-node": "^5.0.2",
     "twilio": "^5.12.2"
   }
 }

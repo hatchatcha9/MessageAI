@@ -41,23 +41,90 @@ def _enter_pressed():
         return True
     return False
 
-# ---------- Config ----------
+# ---------- Pi detection ----------
+IS_PI = sys.platform == 'linux' and os.path.exists('/proc/device-tree/model')
+
+# ---------- Load settings from server (with env var overrides) ----------
 SERVER_URL = os.getenv("PIAI_SERVER_URL", "http://localhost:3000")
 VOICE_ENDPOINT = f"{SERVER_URL}/api/voice"
-SAMPLE_RATE = 16000
-CHANNELS = 1
-SPEECH_THRESHOLD  = 200      # RMS above this = speech detected
-SILENCE_THRESHOLD = 80       # RMS below this (after speech) = silence
-SILENCE_DURATION  = 1.5      # seconds of silence after speech to stop
-MAX_RECORD_SECONDS = 30      # max recording length
-WHISPER_MODEL = "base.en"    # tiny.en = fastest, base.en = better accuracy
-DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"  # press Enter instead of wake word
 
-# Voice selection — switch by setting PIAI_VOICE env var to "male" or "female"
+def _load_settings():
+    """Pull settings.json from server; fall back to env vars / defaults."""
+    defaults = {
+        "voice": os.getenv("PIAI_VOICE", "female").lower(),
+        "speechThreshold": int(os.getenv("SPEECH_THRESHOLD", "200")),
+        "silenceThreshold": int(os.getenv("SILENCE_THRESHOLD", "80")),
+        "silenceDuration": float(os.getenv("SILENCE_DURATION", "1.5")),
+    }
+    try:
+        r = requests.get(f"{SERVER_URL}/api/settings", timeout=3)
+        if r.status_code == 200:
+            srv = r.json()
+            defaults.update({k: v for k, v in srv.items() if v is not None})
+    except Exception:
+        pass  # server not up yet, use defaults
+    return defaults
+
+_settings = _load_settings()
+
+SAMPLE_RATE        = 16000
+CHANNELS           = 1
+SPEECH_THRESHOLD   = _settings["speechThreshold"]
+SILENCE_THRESHOLD  = _settings["silenceThreshold"]
+SILENCE_DURATION   = _settings["silenceDuration"]
+MAX_RECORD_SECONDS = 30
+WHISPER_MODEL      = "tiny.en" if IS_PI else "base.en"   # faster model on Pi
+DEV_MODE           = os.getenv("DEV_MODE", "true").lower() == "true"
+
+# Voice selection
 VOICE_MALE   = "am_michael"
 VOICE_FEMALE = "af_heart"
-VOICE_GENDER = os.getenv("PIAI_VOICE", "female").lower()
+VOICE_GENDER = _settings["voice"]
 KOKORO_VOICE = VOICE_MALE if VOICE_GENDER == "male" else VOICE_FEMALE
+
+# ---------- Audio device detection ----------
+def _find_audio_devices():
+    """
+    Find the best input and output devices.
+    Priority: USB mic > WM8960 HAT > system default.
+    On Pi, also look for 'snd_rpi_wm8960' or 'seeed' devices.
+    """
+    devices = sd.query_devices()
+    input_dev  = None
+    output_dev = None
+
+    priority_input  = ['usb', 'wm8960', 'seeed', 'respeaker', 'microphone', 'mic']
+    priority_output = ['wm8960', 'seeed', 'respeaker', 'usb', 'speaker', 'headphone']
+
+    def score(name, priorities):
+        name = name.lower()
+        for i, kw in enumerate(priorities):
+            if kw in name:
+                return len(priorities) - i
+        return 0
+
+    best_in_score, best_out_score = 0, 0
+    for i, d in enumerate(devices):
+        if d['max_input_channels'] > 0:
+            s = score(d['name'], priority_input)
+            if s > best_in_score:
+                best_in_score = s
+                input_dev = i
+        if d['max_output_channels'] > 0:
+            s = score(d['name'], priority_output)
+            if s > best_out_score:
+                best_out_score = s
+                output_dev = i
+
+    return input_dev, output_dev
+
+INPUT_DEVICE, OUTPUT_DEVICE = _find_audio_devices()
+if INPUT_DEVICE is not None:
+    sd.default.device[0] = INPUT_DEVICE
+    print(f"[PiAI] Input device:  {sd.query_devices(INPUT_DEVICE)['name']}")
+if OUTPUT_DEVICE is not None:
+    sd.default.device[1] = OUTPUT_DEVICE
+    print(f"[PiAI] Output device: {sd.query_devices(OUTPUT_DEVICE)['name']}")
 
 print("[PiAI] Loading Whisper model...")
 whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")

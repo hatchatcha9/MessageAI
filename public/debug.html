@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PiAI Debug</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0f;
+      color: #e8e8e8;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    #header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      border-bottom: 1px solid #1a1a2e;
+      flex-shrink: 0;
+    }
+
+    #header-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    #logo {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #6ee7f7;
+    }
+
+    #logo span {
+      color: #a78bfa;
+      font-weight: 400;
+    }
+
+    #sse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #1f5c1f;
+      transition: background 0.3s;
+      flex-shrink: 0;
+    }
+    #sse-dot.connected { background: #22c55e; box-shadow: 0 0 5px #22c55e; }
+    #sse-dot.error     { background: #ef4444; box-shadow: 0 0 5px #ef4444; }
+
+    #sse-label {
+      font-size: 11px;
+      color: #555;
+      letter-spacing: 1px;
+    }
+
+    /* ── Main layout ── */
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Log panel (left, 60%) ── */
+    #log-panel {
+      width: 60%;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #1a1a2e;
+      overflow: hidden;
+    }
+
+    #log-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      background: #0d0d18;
+      border-bottom: 1px solid #1a1a2e;
+      flex-shrink: 0;
+    }
+
+    #log-toolbar label {
+      font-size: 11px;
+      color: #555;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    #filter-input {
+      flex: 1;
+      background: #111120;
+      border: 1px solid #222238;
+      border-radius: 4px;
+      color: #ccc;
+      font-size: 11px;
+      padding: 4px 8px;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      outline: none;
+    }
+    #filter-input:focus { border-color: #6ee7f7; }
+    #filter-input::placeholder { color: #333; }
+
+    #clear-btn {
+      background: none;
+      border: 1px solid #2a2a3e;
+      border-radius: 4px;
+      color: #555;
+      font-size: 11px;
+      padding: 4px 10px;
+      cursor: pointer;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      transition: all 0.2s;
+    }
+    #clear-btn:hover { border-color: #ef4444; color: #ef4444; }
+
+    #log-count {
+      font-size: 10px;
+      color: #333;
+      white-space: nowrap;
+    }
+
+    #log-output {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 14px;
+      font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    #log-output::-webkit-scrollbar { width: 6px; }
+    #log-output::-webkit-scrollbar-track { background: #0a0a0f; }
+    #log-output::-webkit-scrollbar-thumb { background: #222; border-radius: 3px; }
+
+    .log-line {
+      white-space: pre-wrap;
+      word-break: break-all;
+      padding: 1px 0;
+    }
+    .log-line.hidden { display: none; }
+
+    /* Color coding */
+    .log-info    { color: #4ade80; }
+    .log-warn    { color: #fbbf24; }
+    .log-error   { color: #f87171; }
+    .log-special { color: #6ee7f7; }
+    .log-default { color: #ccc; }
+
+    /* ── Health panel (right, 40%) ── */
+    #health-panel {
+      width: 40%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #health-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 14px;
+      background: #0d0d18;
+      border-bottom: 1px solid #1a1a2e;
+      flex-shrink: 0;
+    }
+
+    #health-toolbar label {
+      font-size: 11px;
+      color: #555;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    #health-age {
+      font-size: 10px;
+      color: #333;
+    }
+
+    #health-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #health-body::-webkit-scrollbar { width: 6px; }
+    #health-body::-webkit-scrollbar-track { background: #0a0a0f; }
+    #health-body::-webkit-scrollbar-thumb { background: #222; border-radius: 3px; }
+
+    .health-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #0d0d18;
+      border: 1px solid #1a1a2e;
+      border-radius: 8px;
+    }
+
+    .health-name {
+      font-size: 13px;
+      color: #aaa;
+      letter-spacing: 0.5px;
+    }
+
+    .health-badge {
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+    }
+
+    .badge-ok {
+      background: #0d2b1a;
+      color: #4ade80;
+      border: 1px solid #1f5c1f;
+    }
+
+    .badge-err {
+      background: #2b0d0d;
+      color: #f87171;
+      border: 1px solid #5c1f1f;
+    }
+
+    .badge-info {
+      background: #0d1a2b;
+      color: #6ee7f7;
+      border: 1px solid #1a3a4a;
+      font-weight: 400;
+      letter-spacing: 0;
+      max-width: 180px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 11px;
+    }
+
+    .health-section-title {
+      font-size: 10px;
+      color: #333;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      padding: 4px 2px 0;
+    }
+
+    /* ── Footer ── */
+    #footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 7px 20px;
+      border-top: 1px solid #1a1a2e;
+      flex-shrink: 0;
+      background: #0d0d18;
+    }
+
+    .footer-item {
+      font-size: 11px;
+      color: #444;
+      letter-spacing: 0.5px;
+    }
+
+    .footer-item span {
+      color: #666;
+    }
+
+    #uptime-display span { color: #a78bfa; }
+    #platform-display span { color: #6ee7f7; }
+    #node-display span { color: #4ade80; }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div id="header-left">
+    <div id="logo">PiAI <span>/ debug</span></div>
+    <div id="sse-dot" title="Log stream status"></div>
+    <div id="sse-label">stream</div>
+  </div>
+  <a href="/screen.html" style="font-size:11px;color:#333;text-decoration:none;letter-spacing:1px;"
+     onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#333'">screen</a>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Log panel -->
+  <div id="log-panel">
+    <div id="log-toolbar">
+      <label>Logs</label>
+      <input id="filter-input" type="text" placeholder="filter..." autocomplete="off" spellcheck="false">
+      <span id="log-count">0 lines</span>
+      <button id="clear-btn">Clear</button>
+    </div>
+    <div id="log-output"></div>
+  </div>
+
+  <!-- Health panel -->
+  <div id="health-panel">
+    <div id="health-toolbar">
+      <label>System Health</label>
+      <span id="health-age">--</span>
+    </div>
+    <div id="health-body">
+      <div class="health-section-title">APIs</div>
+      <div class="health-row" id="row-anthropic">
+        <span class="health-name">Anthropic API</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-row" id="row-weather">
+        <span class="health-name">Weather API</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-row" id="row-news">
+        <span class="health-name">News API</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-section-title">Hardware</div>
+      <div class="health-row" id="row-gps">
+        <span class="health-name">GPS</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-row" id="row-camera">
+        <span class="health-name">Camera</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-section-title">System</div>
+      <div class="health-row" id="row-memory">
+        <span class="health-name">Memory</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Footer -->
+<div id="footer">
+  <div class="footer-item" id="platform-display">platform: <span>--</span></div>
+  <div class="footer-item" id="node-display">node: <span>--</span></div>
+  <div class="footer-item" id="uptime-display">uptime: <span>--</span></div>
+</div>
+
+<script>
+  // ── Log panel ──────────────────────────────────────────────────────────────
+
+  const logOutput = document.getElementById('log-output');
+  const filterInput = document.getElementById('filter-input');
+  const logCountEl = document.getElementById('log-count');
+  const sseDot = document.getElementById('sse-dot');
+
+  let totalLines = 0;
+  let autoScroll = true;
+  let filterText = '';
+
+  // Detect if log output is scrolled to bottom
+  logOutput.addEventListener('scroll', () => {
+    const atBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight < 40;
+    autoScroll = atBottom;
+  });
+
+  function classifyLine(line) {
+    const upper = line.toUpperCase();
+    if (/\[ERR\]|ERROR/.test(upper)) return 'log-error';
+    if (/WARN/.test(upper)) return 'log-warn';
+    if (/INFO/.test(upper)) return 'log-info';
+    if (/GPS|CAMERA|VOICE|WAKE|SPEECH|TTS|STT/.test(upper)) return 'log-special';
+    return 'log-default';
+  }
+
+  function appendLine(raw) {
+    const div = document.createElement('div');
+    div.className = 'log-line ' + classifyLine(raw);
+    div.textContent = raw;
+    if (filterText && !raw.toLowerCase().includes(filterText)) {
+      div.classList.add('hidden');
+    }
+    logOutput.appendChild(div);
+    totalLines++;
+
+    // Trim DOM to 2000 nodes to avoid memory bloat
+    while (logOutput.children.length > 2000) {
+      logOutput.removeChild(logOutput.firstChild);
+      totalLines = Math.max(0, totalLines - 1);
+    }
+
+    updateCount();
+    if (autoScroll) logOutput.scrollTop = logOutput.scrollHeight;
+  }
+
+  function updateCount() {
+    const visible = logOutput.querySelectorAll('.log-line:not(.hidden)').length;
+    logCountEl.textContent = `${visible} / ${totalLines} lines`;
+  }
+
+  document.getElementById('clear-btn').addEventListener('click', () => {
+    logOutput.innerHTML = '';
+    totalLines = 0;
+    updateCount();
+  });
+
+  filterInput.addEventListener('input', () => {
+    filterText = filterInput.value.toLowerCase();
+    const lines = logOutput.querySelectorAll('.log-line');
+    lines.forEach(div => {
+      const matches = !filterText || div.textContent.toLowerCase().includes(filterText);
+      div.classList.toggle('hidden', !matches);
+    });
+    updateCount();
+    if (autoScroll) logOutput.scrollTop = logOutput.scrollHeight;
+  });
+
+  // ── SSE connection ─────────────────────────────────────────────────────────
+
+  function connectLogStream() {
+    sseDot.className = '';
+    const es = new EventSource('/logs/stream');
+
+    es.onopen = () => {
+      sseDot.className = 'connected';
+    };
+
+    es.onmessage = (e) => {
+      try {
+        const line = JSON.parse(e.data);
+        appendLine(line);
+      } catch {}
+    };
+
+    es.onerror = () => {
+      sseDot.className = 'error';
+      es.close();
+      setTimeout(connectLogStream, 3000);
+    };
+  }
+
+  connectLogStream();
+
+  // ── Health panel ───────────────────────────────────────────────────────────
+
+  const healthAge = document.getElementById('health-age');
+
+  function badge(ok, trueLabel, falseLabel) {
+    return `<span class="health-badge ${ok ? 'badge-ok' : 'badge-err'}">${ok ? (trueLabel || 'OK') : (falseLabel || 'MISSING')}</span>`;
+  }
+
+  function infoBadge(text) {
+    return `<span class="health-badge badge-info" title="${text}">${text}</span>`;
+  }
+
+  function setRowBadge(rowId, html) {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const existing = row.querySelector('.health-badge');
+    if (existing) existing.outerHTML = html;
+    // outerHTML replacement doesn't work directly; use insertAdjacentHTML
+    row.querySelector('.health-badge').remove();
+    row.insertAdjacentHTML('beforeend', html);
+  }
+
+  async function fetchHealth() {
+    try {
+      const res = await fetch('/api/health/full');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const d = await res.json();
+
+      setRowBadge('row-anthropic', badge(d.anthropic, 'OK', 'MISSING'));
+      setRowBadge('row-weather',   badge(d.weather,   'OK', 'MISSING'));
+      setRowBadge('row-news',      badge(d.news,      'OK', 'MISSING'));
+
+      // GPS
+      const gpsLabel = d.gps.fix
+        ? (d.gps.location ? d.gps.location : 'FIX')
+        : (d.gps.active ? 'NO FIX' : 'OFF');
+      setRowBadge('row-gps', d.gps.fix
+        ? `<span class="health-badge badge-ok">${gpsLabel}</span>`
+        : `<span class="health-badge badge-err">${gpsLabel}</span>`);
+
+      setRowBadge('row-camera', badge(d.camera.available, 'OK', 'NONE'));
+
+      const memText = `${d.memory.used} MB`;
+      setRowBadge('row-memory', infoBadge(memText));
+
+      // Footer
+      document.querySelector('#platform-display span').textContent =
+        d.platform === 'linux' ? 'Raspberry Pi (linux)' : d.platform;
+      document.querySelector('#node-display span').textContent = d.nodeVersion;
+      _serverUptime = d.uptime;
+      _uptimeBase = Date.now();
+
+      healthAge.textContent = 'updated just now';
+      _lastHealthFetch = Date.now();
+    } catch (e) {
+      healthAge.textContent = 'error: ' + e.message;
+    }
+  }
+
+  let _serverUptime = 0;
+  let _uptimeBase = Date.now();
+  let _lastHealthFetch = 0;
+
+  function formatUptime(secs) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  setInterval(() => {
+    const elapsed = Math.floor((Date.now() - _uptimeBase) / 1000);
+    const total = _serverUptime + elapsed;
+    document.querySelector('#uptime-display span').textContent = formatUptime(total);
+
+    if (_lastHealthFetch > 0) {
+      const ago = Math.floor((Date.now() - _lastHealthFetch) / 1000);
+      if (ago < 60) healthAge.textContent = `updated ${ago}s ago`;
+      else healthAge.textContent = `updated ${Math.floor(ago / 60)}m ago`;
+    }
+  }, 1000);
+
+  fetchHealth();
+  setInterval(fetchHealth, 10000);
+</script>
+</body>
+</html>
