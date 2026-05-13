@@ -5034,10 +5034,15 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         const _cartMutationHandler = (req) => {
             if (req.method() !== 'POST') return;
             const url = req.url();
-            if (!url.includes('/graphql/')) return;
+            // Log ALL POST requests during add for debugging
             try {
                 const body = JSON.parse(req.postData() || '{}');
-                if ((body.operationName || '').toLowerCase().includes('addcart') || (body.query || '').toLowerCase().includes('addcartitem')) {
+                const opName = body.operationName || body.operation || '';
+                if (url.includes('doordash.com')) {
+                    const urlPath = url.replace('https://www.doordash.com', '').substring(0, 80);
+                    console.log(`[CartReq] POST ${urlPath} op=${opName || '(no op)'} bodyLen=${(req.postData() || '').length}`);
+                }
+                if (opName.toLowerCase().includes('addcart') || (body.query || '').toLowerCase().includes('addcartitem')) {
                     const vars = body.variables || body.input || {};
                     const iid = String(vars.itemId || vars.item_id || vars.input?.itemId || '');
                     const mid = String(vars.menuId || vars.menu_id || vars.input?.menuId || '');
