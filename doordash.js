@@ -3657,7 +3657,7 @@ async function extractMenuItems() {
                 }
                 if (!name || name.length < 3) continue;
                 // Filter promotional banners (e.g. "20% OFF, UP TO", "Free delivery", "Save $5")
-                if (/\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name) || /^limited time/i.test(name)) continue;
+                if (/\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name) || /^deals?\b/i.test(name) || /^limited time/i.test(name)) continue;
 
                 const key = name.toLowerCase();
                 if (!seen.has(key)) {
@@ -3776,6 +3776,7 @@ async function extractMenuItems() {
                         }
                     }
                     if (!name || name.length < 3) continue;
+                    if (/\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name) || /^deals?\b/i.test(name) || /^limited time/i.test(name)) continue;
 
                     const key = name.toLowerCase();
                     if (seen.has(key)) continue;
