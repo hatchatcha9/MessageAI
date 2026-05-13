@@ -4762,6 +4762,27 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             console.log('[DoorDash] Apollo cache extract error:', e.message);
         }
 
+        // Inspect MenuItem DOM attributes for item IDs (one-time debug)
+        try {
+            const domSamples = await Promise.race([
+                page.evaluate(() => {
+                    const els = document.querySelectorAll('[data-anchor-id="MenuItem"]');
+                    return Array.from(els).slice(0, 3).map(el => {
+                        const attrs = {};
+                        for (const a of el.attributes) attrs[a.name] = a.value;
+                        const anchors = Array.from(el.querySelectorAll('a')).map(a => a.getAttribute('href') || '').filter(Boolean);
+                        return { tag: el.tagName, attrs, anchors: anchors.slice(0, 3), textSnip: (el.innerText || '').substring(0, 60) };
+                    });
+                }),
+                new Promise(r => setTimeout(() => r([]), 5000))
+            ]);
+            if (domSamples.length > 0) {
+                domSamples.forEach((s, i) => console.log(`[DOMInspect] MenuItem[${i}]: tag=${s.tag} attrs=${JSON.stringify(s.attrs)} anchors=${JSON.stringify(s.anchors)} text="${s.textSnip}"`));
+            }
+        } catch (e) {
+            console.log('[DOMInspect] Error:', e.message);
+        }
+
         return {
             success: true,
             restaurantName,
