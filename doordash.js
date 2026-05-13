@@ -5028,6 +5028,25 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         }
         // ── End HTTP API fast path ────────────────────────────────────────────
 
+        // Intercept outgoing addCartItemV2 mutations to learn item IDs for future fast-path adds.
+        // DoorDash's GraphQL mutation body contains the itemId/menuId/storeId — capture it.
+        let _learnedItemId = '', _learnedMenuId = '';
+        const _cartMutationHandler = (req) => {
+            if (req.method() !== 'POST') return;
+            const url = req.url();
+            if (!url.includes('/graphql/')) return;
+            try {
+                const body = JSON.parse(req.postData() || '{}');
+                if ((body.operationName || '').toLowerCase().includes('addcart') || (body.query || '').toLowerCase().includes('addcartitem')) {
+                    const vars = body.variables || body.input || {};
+                    const iid = String(vars.itemId || vars.item_id || vars.input?.itemId || '');
+                    const mid = String(vars.menuId || vars.menu_id || vars.input?.menuId || '');
+                    if (iid && /^\d{4,}$/.test(iid)) { _learnedItemId = iid; _learnedMenuId = mid; }
+                }
+            } catch (e) {}
+        };
+        page.on('request', _cartMutationHandler);
+
         // If page is mid-render (raw Next.js SSR streaming), wait for React to hydrate
         const rawContent = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
         if (rawContent.includes('self.__next_f') || (rawContent.length < 150 && page.url().includes('doordash.com'))) {
@@ -5094,6 +5113,15 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     console.log('[DoorDash] Item added to cart successfully!');
                     stopDebugScreenshots();
                     await takeScreenshot('item-added');
+                    page.off('request', _cartMutationHandler);
+                    if (_learnedItemId && cachedItem?.name) {
+                        const sid = extractStoreIdFromUrl(page.url());
+                        if (sid) {
+                            if (!_capturedItemIds[sid]) _capturedItemIds[sid] = new Map();
+                            _capturedItemIds[sid].set(cachedItem.name.toLowerCase(), { itemId: _learnedItemId, menuId: _learnedMenuId, unitPrice: Math.round((cachedItem.price || 0) * 100) });
+                            console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
+                        }
+                    }
                     return { success: true };
                 }
 
@@ -5492,6 +5520,15 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     console.log('[DoorDash] Item added to cart successfully!');
                     stopDebugScreenshots();
                     await takeScreenshot('item-added');
+                    page.off('request', _cartMutationHandler);
+                    if (_learnedItemId && cachedItem?.name) {
+                        const sid = extractStoreIdFromUrl(page.url());
+                        if (sid) {
+                            if (!_capturedItemIds[sid]) _capturedItemIds[sid] = new Map();
+                            _capturedItemIds[sid].set(cachedItem.name.toLowerCase(), { itemId: _learnedItemId, menuId: _learnedMenuId, unitPrice: Math.round((cachedItem.price || 0) * 100) });
+                            console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
+                        }
+                    }
                     return { success: true };
                 }
 
@@ -5636,11 +5673,21 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log('[DoorDash] No modal detected - item added directly to cart');
             await takeScreenshot('no-modal-direct-add');
             stopDebugScreenshots();
+            page.off('request', _cartMutationHandler);
+            if (_learnedItemId && cachedItem?.name) {
+                const sid = extractStoreIdFromUrl(page.url());
+                if (sid) {
+                    if (!_capturedItemIds[sid]) _capturedItemIds[sid] = new Map();
+                    _capturedItemIds[sid].set(cachedItem.name.toLowerCase(), { itemId: _learnedItemId, menuId: _learnedMenuId, unitPrice: Math.round((cachedItem.price || 0) * 100) });
+                    console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
+                }
+            }
             return { success: true, message: 'Item added to cart (no customization needed)' };
         }
 
     } catch (error) {
         console.error('[DoorDash] Add item error:', error.message);
+        page.off('request', _cartMutationHandler);
         stopDebugScreenshots();
         // Chrome crashed — reset browser state so next call gets a fresh session
         if (error.message.includes('Target crashed') || error.message.includes('Session closed') || error.message.includes('Target page, context or browser has been closed')) {
