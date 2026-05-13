@@ -4696,6 +4696,52 @@ async function selectRestaurantFromSearch(indexOrUrl) {
         const categories = await extractMenuCategories();
         console.log(`[DoorDash] Found ${categories.length} menu categories`);
 
+        // Extract item IDs from Apollo cache — store page SSR hydrates all item data into
+        // window.__APOLLO_CLIENT__; this is the only way to get item IDs without extra requests.
+        try {
+            const apolloData = await Promise.race([
+                page.evaluate(() => {
+                    const client = window.__APOLLO_CLIENT__;
+                    if (!client) return null;
+                    return client.cache.extract();
+                }),
+                new Promise(r => setTimeout(() => r(null), 8000))
+            ]);
+            if (apolloData) {
+                const keys = Object.keys(apolloData);
+                console.log(`[DoorDash] Store Apollo cache: ${keys.length} keys`);
+                // Walk for MenuItem:*, Item:*, MenuCategory keys
+                let itemCount = 0;
+                const storeId = extractStoreIdFromUrl(page.url());
+                if (storeId) {
+                    if (!_capturedItemIds[storeId]) _capturedItemIds[storeId] = new Map();
+                    for (const key of keys) {
+                        const obj = apolloData[key];
+                        if (!obj || typeof obj !== 'object') continue;
+                        // DoorDash Apollo keys: "MenuItem:12345", "Item:12345", or objects with id + unitAmount
+                        const isItemKey = /^(MenuItem|Item|StoreMenuItem):/i.test(key);
+                        const name = obj.name || obj.title || '';
+                        const rawPrice = obj.unitAmount || obj.unit_amount || obj.price || 0;
+                        const price = typeof rawPrice === 'number' ? (rawPrice > 200 ? rawPrice / 100 : rawPrice) : parseFloat(String(rawPrice));
+                        const itemId = String(obj.id || obj.itemId || key.split(':')[1] || '');
+                        const menuId = String(obj.menuId || obj.menu_id || obj.catalogItemId || '');
+                        if (isItemKey && name && itemId && /^\d{4,}$/.test(itemId)) {
+                            _capturedItemIds[storeId].set(name.toLowerCase(), { itemId, menuId, unitPrice: Math.round(price * 100) });
+                            itemCount++;
+                        }
+                    }
+                    if (itemCount > 0) console.log(`[DoorDash] Captured ${itemCount} item IDs from store Apollo cache (storeId=${storeId})`);
+                    else {
+                        // Log sample keys to debug
+                        const sampleKeys = keys.filter(k => !k.startsWith('ROOT') && !k.startsWith('SideNav')).slice(0, 10);
+                        console.log(`[DoorDash] Store Apollo cache — no MenuItem keys. Sample: ${sampleKeys.join(', ')}`);
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('[DoorDash] Apollo cache extract error:', e.message);
+        }
+
         return {
             success: true,
             restaurantName,
