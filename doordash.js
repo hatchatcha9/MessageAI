@@ -3659,10 +3659,19 @@ async function extractMenuItems() {
                 // Filter promotional banners (e.g. "20% OFF, UP TO", "Free delivery", "Save $5")
                 if (/\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name) || /^deals?\b/i.test(name) || /^limited time/i.test(name)) continue;
 
+                // Try to extract item ID from anchor href: /store/.../item/ITEMID/ or ?itemId=ITEMID
+                let itemId = '';
+                const anchor = el.tagName === 'A' ? el : el.querySelector('a[href*="/item/"]');
+                if (anchor) {
+                    const href = anchor.getAttribute('href') || '';
+                    const m = href.match(/\/item\/(\d{4,})\b/) || href.match(/[?&]itemId=(\d{4,})/);
+                    if (m) itemId = m[1];
+                }
+
                 const key = name.toLowerCase();
                 if (!seen.has(key)) {
                     seen.add(key);
-                    results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + window.scrollY + rect.height / 2 });
+                    results.push({ name, price, itemId, x: rect.left + rect.width / 2, y: rect.top + window.scrollY + rect.height / 2 });
                 }
             }
             return results;
@@ -3809,10 +3818,12 @@ async function extractMenuItems() {
             }
         }
 
+        const storeIdForCapture = extractStoreIdFromUrl(page.url());
+        let capturedIdCount = 0;
         for (let i = 0; i < deduped.length; i++) {
             const item = deduped[i];
             menuItems.push({
-                id: `item-${i}`,
+                id: item.itemId ? `item-${item.itemId}` : `item-${i}`,
                 index: i,
                 name: item.name,
                 price: item.price,
@@ -3820,8 +3831,20 @@ async function extractMenuItems() {
                 x: item.x || 0,
                 y: item.y || 0
             });
-            console.log(`[DoorDash] Item ${i + 1}: "${item.name}" - $${item.price}`);
+            // Cache item ID for HTTP fast path if available
+            if (item.itemId && storeIdForCapture) {
+                if (!_capturedItemIds[storeIdForCapture]) _capturedItemIds[storeIdForCapture] = new Map();
+                _capturedItemIds[storeIdForCapture].set(item.name.toLowerCase(), {
+                    itemId: item.itemId,
+                    menuId: '',
+                    unitPrice: Math.round(item.price * 100)
+                });
+                capturedIdCount++;
+            }
+            console.log(`[DoorDash] Item ${i + 1}: "${item.name}" - $${item.price}${item.itemId ? ` [id=${item.itemId}]` : ''}`);
         }
+        if (capturedIdCount > 0) console.log(`[DoorDash] Captured ${capturedIdCount} item IDs from DOM (storeId=${storeIdForCapture})`);
+        else console.log(`[DoorDash] No item IDs found in DOM for storeId=${storeIdForCapture} — HTTP fast path unavailable`);
 
         console.log(`[DoorDash] extractMenuItems returning ${menuItems.length} items`);
         await takeScreenshot('extract-menu-done');
