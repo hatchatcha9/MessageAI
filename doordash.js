@@ -154,7 +154,8 @@ function _extractAndCacheMenuData(data) {
                         const price = typeof rawPrice === 'number'
                             ? (rawPrice > 200 ? rawPrice / 100 : rawPrice)
                             : parseFloat(String(rawPrice).replace(/[^0-9.]/g, ''));
-                        if (name && price > 0) {
+                        const isPromo = /\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name);
+                        if (name && price > 0 && !isPromo) {
                             const itemId = String(item.id || item.itemId || item.item_id || '');
                             items.push({ name, price, description: item.description || '', itemId, menuId });
                             // Cache API IDs for HTTP fast-path adds
@@ -3655,6 +3656,8 @@ async function extractMenuItems() {
                     }
                 }
                 if (!name || name.length < 3) continue;
+                // Filter promotional banners (e.g. "20% OFF, UP TO", "Free delivery", "Save $5")
+                if (/\d+%\s*off/i.test(name) || /^up to\b/i.test(name) || /^free\s/i.test(name) || /^save\s/i.test(name) || /^limited time/i.test(name)) continue;
 
                 const key = name.toLowerCase();
                 if (!seen.has(key)) {
