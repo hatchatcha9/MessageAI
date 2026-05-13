@@ -3846,6 +3846,77 @@ async function extractMenuItems() {
         if (capturedIdCount > 0) console.log(`[DoorDash] Captured ${capturedIdCount} item IDs from DOM (storeId=${storeIdForCapture})`);
         else console.log(`[DoorDash] No item IDs found in DOM for storeId=${storeIdForCapture} — HTTP fast path unavailable`);
 
+        // React fiber extraction — walk React's internal fiber tree to find itemId props
+        // Items are in DOM at this point (we just extracted them via scroll pass)
+        if (capturedIdCount === 0 && storeIdForCapture) {
+            try {
+                const fiberIds = await Promise.race([
+                    page.evaluate(() => {
+                        function getFiber(el) {
+                            const key = Object.keys(el).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+                            return key ? el[key] : null;
+                        }
+                        function walkFiber(fiber, depth) {
+                            if (!fiber || depth > 30) return null;
+                            const props = fiber.memoizedProps || fiber.pendingProps || {};
+                            // Look for itemId directly or nested in item/data objects
+                            const itemId = props.itemId || props.item?.id || props.data?.id || props.menuItem?.id
+                                || props.item?.itemId || props.data?.itemId;
+                            const itemName = props.itemName || props.name || props.item?.name || props.data?.name
+                                || props.menuItem?.name;
+                            const menuId = props.menuId || props.item?.menuId || props.data?.menuId;
+                            if (itemId && /^\d{4,}$/.test(String(itemId))) {
+                                return { itemId: String(itemId), name: String(itemName || ''), menuId: String(menuId || '') };
+                            }
+                            return walkFiber(fiber.return, depth + 1);
+                        }
+                        const els = document.querySelectorAll('[data-anchor-id="MenuItem"]');
+                        if (els.length === 0) {
+                            // fallback: any element with data-item-id or similar
+                            const allEls = document.querySelectorAll('[data-item-id],[data-id],[data-testid*="item"]');
+                            return { count: 0, sample: null, altAttrs: Array.from(allEls).slice(0, 3).map(e => {
+                                const a = {}; for (const attr of e.attributes) a[attr.name] = attr.value;
+                                return { tag: e.tagName, attrs: a, text: (e.innerText||'').substring(0,40) };
+                            })};
+                        }
+                        const results = [];
+                        for (const el of Array.from(els).slice(0, 60)) {
+                            let fiber = getFiber(el);
+                            const found = walkFiber(fiber, 0);
+                            if (found) results.push(found);
+                        }
+                        return { count: els.length, results };
+                    }),
+                    new Promise(r => setTimeout(() => r(null), 8000))
+                ]);
+                if (!fiberIds) {
+                    console.log('[Fiber] timed out');
+                } else if (fiberIds.altAttrs) {
+                    console.log(`[Fiber] 0 MenuItem elements found. Alt data-attrs: ${JSON.stringify(fiberIds.altAttrs)}`);
+                } else {
+                    console.log(`[Fiber] Found ${fiberIds.count} MenuItem elements, extracted ${fiberIds.results?.length || 0} IDs`);
+                    if (fiberIds.results?.length > 0) {
+                        if (!_capturedItemIds[storeIdForCapture]) _capturedItemIds[storeIdForCapture] = new Map();
+                        for (const r of fiberIds.results) {
+                            if (r.name) {
+                                _capturedItemIds[storeIdForCapture].set(r.name.toLowerCase(), {
+                                    itemId: r.itemId, menuId: r.menuId, unitPrice: 0
+                                });
+                            }
+                        }
+                        console.log(`[Fiber] Cached ${fiberIds.results.length} item IDs via React fiber for storeId=${storeIdForCapture}`);
+                        // Patch unitPrices from menuItems
+                        for (const mi of menuItems) {
+                            const entry = _capturedItemIds[storeIdForCapture].get(mi.name.toLowerCase());
+                            if (entry && entry.unitPrice === 0) entry.unitPrice = Math.round((mi.price || 0) * 100);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log('[Fiber] Error:', e.message);
+            }
+        }
+
         console.log(`[DoorDash] extractMenuItems returning ${menuItems.length} items`);
         await takeScreenshot('extract-menu-done');
         return menuItems;
