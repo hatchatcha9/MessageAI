@@ -442,7 +442,7 @@ function formatCheckoutError(error) {
 }
 
 // Process commands from AI response
-async function processCommands(response, user, phoneNumber) {
+async function processCommands(response, user, phoneNumber, userMsg = '') {
     let cleanResponse = response;
     let actions = [];
     let additionalContext = '';
@@ -456,6 +456,7 @@ async function processCommands(response, user, phoneNumber) {
         _prefs0.pendingDoordashOptions = null;
         _prefs0.pendingDoordashSelections = null;
         _prefs0.pendingOptionsExpiry = null;
+        _prefs0.pendingQueuedItems = null;
         db.setUserPreferences(user.id, _prefs0);
     }
 
@@ -495,6 +496,7 @@ async function processCommands(response, user, phoneNumber) {
         prefsForClear.pendingDoordashItem = null;
         prefsForClear.pendingDoordashOptions = null;
         prefsForClear.pendingDoordashSelections = null;
+        prefsForClear.pendingQueuedItems = null;
         prefsForClear.menuPage = 0;
         db.setUserPreferences(user.id, prefsForClear);
         db.clearDoorDashCache(user.id, 'current_restaurant'); // only clear active selection, preserve search+menu caches
@@ -617,6 +619,7 @@ async function processCommands(response, user, phoneNumber) {
                         delete prefs.pendingDoordashItem;
                         delete prefs.pendingDoordashOptions;
                         delete prefs.pendingDoordashSelections;
+                        delete prefs.pendingQueuedItems;
                         db.setUserPreferences(user.id, prefs);
                         db.clearCart(user.id);
                         doordash.clearBrowserCart().catch(() => {});
@@ -670,6 +673,7 @@ async function processCommands(response, user, phoneNumber) {
                             delete prefs.pendingDoordashItem;
                             delete prefs.pendingDoordashOptions;
                             delete prefs.pendingDoordashSelections;
+                            delete prefs.pendingQueuedItems;
                             db.setUserPreferences(user.id, prefs);
 
                             // Clear cart and menu page when switching restaurants
@@ -931,6 +935,7 @@ async function processCommands(response, user, phoneNumber) {
                         addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
                     }
                     if (addResultText.success) {
+                        const addedNamesText = [itemText.name];
                         prefsText.pendingDoordashItem = null;
                         prefsText.pendingDoordashOptions = null;
                         prefsText.pendingDoordashSelections = null;
@@ -938,9 +943,57 @@ async function processCommands(response, user, phoneNumber) {
                         db.addToCart(user.id, prefsText.currentRestaurant, { id: itemText.id || `doordash-${numText}`, name: itemText.name, price: itemText.price || 0, source: 'doordash' });
                         actions.push({ type: 'add_item_doordash', item: itemText.name });
                         textResolvedMenuIndex = numText; // mark so ADD_ITEM_NUM won't re-add this item
-                        // Show cart now — ADD_ITEM_NUM may not fire in the same response
-                        const cartNow = db.getCart(user.id);
-                        additionalContext = `\n\nAdded ${itemText.name}!\n\n${restaurants.formatCart(cartNow)}\n\nAnything else, or say "checkout" to order?`;
+                        // Process any queued items from a prior multi-item request
+                        const queuedAfterText = prefsText.pendingQueuedItems;
+                        if (queuedAfterText?.length > 0) {
+                            prefsText.pendingQueuedItems = null;
+                            db.setUserPreferences(user.id, prefsText);
+                            for (const queued of queuedAfterText) {
+                                try {
+                                    const qRes = await doordash.addItemByIndex(queued.num,
+                                        { selectFirst: false, restaurantUrl: prefsText.currentRestaurantUrl }, queued.item);
+                                    if (qRes.success) {
+                                        db.addToCart(user.id, prefsText.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, price: queued.item.price || 0, source: 'doordash' });
+                                        actions.push({ type: 'add_item_doordash', item: queued.item.name });
+                                        addedNamesText.push(queued.item.name);
+                                        console.log(`[Queue] Added queued item: ${queued.item.name}`);
+                                    } else if (qRes.needsOptions) {
+                                        const remainingQueueText = queuedAfterText.slice(queuedAfterText.indexOf(queued) + 1);
+                                        const qPrefsT = db.getUserPreferences(user.id);
+                                        const qAutoSelsT = [], qNeedsInputT = [];
+                                        qRes.requiredOptions.forEach((g, gi) => {
+                                            if (g.options.length === 1) qAutoSelsT.push({ groupIndex: gi, optionIndex: 0, optionText: g.options[0] });
+                                            else qNeedsInputT.push({ ...g, _origIdx: gi });
+                                        });
+                                        qPrefsT.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
+                                        qPrefsT.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000;
+                                        qPrefsT.pendingDoordashOptions = qNeedsInputT.length > 0 ? qNeedsInputT : qRes.requiredOptions;
+                                        qPrefsT.pendingDoordashSelections = qAutoSelsT.length > 0 ? qAutoSelsT : null;
+                                        if (remainingQueueText.length > 0) qPrefsT.pendingQueuedItems = remainingQueueText;
+                                        db.setUserPreferences(user.id, qPrefsT);
+                                        const qGroupsT = qNeedsInputT.length > 0 ? qNeedsInputT : qRes.requiredOptions;
+                                        const queuedCartT = db.getCart(user.id);
+                                        additionalContext = `\n\nAdded ${addedNamesText.join(' and ')}!\n\n${restaurants.formatCart(queuedCartT)}\n\n*${queued.item.name}*\n`;
+                                        qGroupsT.forEach(g => {
+                                            additionalContext += `\nPick ${g.name}:\n`;
+                                            g.options.slice(0, 12).forEach((opt, oi) => { additionalContext += `${oi + 1}. ${opt}\n`; });
+                                        });
+                                        additionalContext += qGroupsT.length > 1 ? `\nReply with one number per group, e.g. "1, 2"` : `\nReply with a number`;
+                                        break;
+                                    } else {
+                                        console.log(`[Queue] Failed to add queued item: ${queued.item.name}`);
+                                        break;
+                                    }
+                                } catch (qErr) {
+                                    console.error('[Queue] Error adding queued item:', qErr.message);
+                                    break;
+                                }
+                            }
+                        }
+                        if (!additionalContext) {
+                            const cartNow = db.getCart(user.id);
+                            additionalContext = `\n\nAdded ${addedNamesText.join(' and ')}!\n\n${restaurants.formatCart(cartNow)}\n\nAnything else, or say "checkout" to order?`;
+                        }
                     } else if (addResultText.needsOptions) {
                         const prevGroupNamesText = new Set((prefsText.pendingDoordashOptions || []).map(g => g.name.toLowerCase()));
                         const newGroupsText = addResultText.requiredOptions.filter(g => !prevGroupNamesText.has(g.name.toLowerCase()) || !g.hasSelection);
@@ -1006,15 +1059,65 @@ async function processCommands(response, user, phoneNumber) {
                     addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
                 }
                 if (addResultOpt.success) {
+                    const addedNames = [itemOpt.name];
                     prefsOpt.pendingDoordashItem = null;
                     prefsOpt.pendingDoordashOptions = null;
                     prefsOpt.pendingDoordashSelections = null;
                     db.setUserPreferences(user.id, prefsOpt);
                     db.addToCart(user.id, prefsOpt.currentRestaurant, { id: itemOpt.id || `doordash-${numOpt}`, name: itemOpt.name, price: itemOpt.price || 0, source: 'doordash' });
                     actions.push({ type: 'add_item_doordash', item: itemOpt.name });
-                    // Show cart now — ADD_ITEM_NUM may not fire in the same response
-                    const cartOpt = db.getCart(user.id);
-                    additionalContext = `\n\nAdded ${itemOpt.name}!\n\n${restaurants.formatCart(cartOpt)}\n\nAnything else, or say "checkout" to order?`;
+                    // Process any queued items from a prior multi-item request
+                    const queuedAfterOpt = prefsOpt.pendingQueuedItems;
+                    if (queuedAfterOpt?.length > 0) {
+                        prefsOpt.pendingQueuedItems = null;
+                        db.setUserPreferences(user.id, prefsOpt);
+                        for (const queued of queuedAfterOpt) {
+                            try {
+                                const qRes = await doordash.addItemByIndex(queued.num,
+                                    { selectFirst: false, restaurantUrl: prefsOpt.currentRestaurantUrl }, queued.item);
+                                if (qRes.success) {
+                                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, price: queued.item.price || 0, source: 'doordash' });
+                                    actions.push({ type: 'add_item_doordash', item: queued.item.name });
+                                    addedNames.push(queued.item.name);
+                                    console.log(`[Queue] Added queued item: ${queued.item.name}`);
+                                } else if (qRes.needsOptions) {
+                                    // This queued item needs options — save remaining queue and prompt
+                                    const remainingQueue = queuedAfterOpt.slice(queuedAfterOpt.indexOf(queued) + 1);
+                                    const qPrefs = db.getUserPreferences(user.id);
+                                    const qAutoSels = [], qNeedsInput = [];
+                                    qRes.requiredOptions.forEach((g, gi) => {
+                                        if (g.options.length === 1) qAutoSels.push({ groupIndex: gi, optionIndex: 0, optionText: g.options[0] });
+                                        else qNeedsInput.push({ ...g, _origIdx: gi });
+                                    });
+                                    qPrefs.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
+                                    qPrefs.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000;
+                                    qPrefs.pendingDoordashOptions = qNeedsInput.length > 0 ? qNeedsInput : qRes.requiredOptions;
+                                    qPrefs.pendingDoordashSelections = qAutoSels.length > 0 ? qAutoSels : null;
+                                    if (remainingQueue.length > 0) qPrefs.pendingQueuedItems = remainingQueue;
+                                    db.setUserPreferences(user.id, qPrefs);
+                                    const qGroups = qNeedsInput.length > 0 ? qNeedsInput : qRes.requiredOptions;
+                                    const queuedCart = db.getCart(user.id);
+                                    additionalContext = `\n\nAdded ${addedNames.join(' and ')}!\n\n${restaurants.formatCart(queuedCart)}\n\n*${queued.item.name}*\n`;
+                                    qGroups.forEach(g => {
+                                        additionalContext += `\nPick ${g.name}:\n`;
+                                        g.options.slice(0, 12).forEach((opt, oi) => { additionalContext += `${oi + 1}. ${opt}\n`; });
+                                    });
+                                    additionalContext += qGroups.length > 1 ? `\nReply with one number per group, e.g. "1, 2"` : `\nReply with a number`;
+                                    break;
+                                } else {
+                                    console.log(`[Queue] Failed to add queued item: ${queued.item.name} — ${qRes.error || 'unknown error'}`);
+                                    break;
+                                }
+                            } catch (qErr) {
+                                console.error('[Queue] Error adding queued item:', qErr.message);
+                                break;
+                            }
+                        }
+                    }
+                    if (!additionalContext) {
+                        const cartOpt = db.getCart(user.id);
+                        additionalContext = `\n\nAdded ${addedNames.join(' and ')}!\n\n${restaurants.formatCart(cartOpt)}\n\nAnything else, or say "checkout" to order?`;
+                    }
                 } else if (addResultOpt.needsOptions) {
                     // Filter out groups already answered (by name) to prevent infinite loops
                     const answeredNames = new Set((prefsOpt.pendingDoordashSelections || []).map(s => (s.optionText || '').toLowerCase()));
@@ -1030,7 +1133,7 @@ async function processCommands(response, user, phoneNumber) {
                     if (groupsToShow.length > 1) additionalContext += `\nReply with one number per group, e.g. "1, 2"`;
                     else additionalContext += `\nReply with a number`;
                     prefsOpt.pendingDoordashOptions = groupsToShow;
-                    prefsOpt.pendingDoordashSelections = null; // reset; rebuilt fresh next round
+                    prefsOpt.pendingDoordashSelections = selectionsOpt; // carry forward for multi-round options
                     db.setUserPreferences(user.id, prefsOpt);
                 } else if (addResultOpt.browserNotOpen) {
                     additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
@@ -1052,14 +1155,35 @@ async function processCommands(response, user, phoneNumber) {
     // Dedup: if item A's name is a substring of item B's name, drop A (keep more specific).
     // Prevents Claude from adding "Nuggets" alongside "Nuggets Meal" when user only asked for one.
     if (addNumMatches.length > 1) {
-        const _dedupeMenu = db.getCachedCurrentRestaurant(user.id);
+        let _dedupeMenu = db.getCachedCurrentRestaurant(user.id);
+        if (!_dedupeMenu?.menu) {
+            // Fallback: try restaurant-specific menu cache
+            const _dedupePrefs = db.getUserPreferences(user.id);
+            if (_dedupePrefs?.currentRestaurant) {
+                const _fallbackItems = db.getCachedRestaurantMenu(user.id, _dedupePrefs.currentRestaurant);
+                if (_fallbackItems) _dedupeMenu = { menu: _fallbackItems };
+            }
+        }
         if (_dedupeMenu?.menu) {
+            const _origLen = addNumMatches.length;
             const _names = addNumMatches.map(m => (_dedupeMenu.menu[parseInt(m[1]) - 1]?.name || '').toLowerCase());
             addNumMatches = addNumMatches.filter((m, i) =>
                 !_names.some((other, j) => j !== i && other.includes(_names[i]) && other.length > _names[i].length)
             );
-            if (addNumMatches.length < _names.length) {
-                console.log(`[ADD_ITEM_NUM] Deduped ${_names.length} → ${addNumMatches.length} items (removed substring-matched items)`);
+            if (addNumMatches.length < _origLen) {
+                console.log(`[ADD_ITEM_NUM] Deduped ${_origLen} → ${addNumMatches.length} items (removed substring-matched items)`);
+            }
+        }
+        // User-intent filter: if the user message mentions specific numbers, keep only those.
+        // Prevents Claude from adding item 1 when user said "add item 3 (Nuggets Meal)".
+        if (userMsg && addNumMatches.length > 1) {
+            const mentionedNums = new Set((userMsg.match(/\b(\d+)\b/g) || []).map(n => parseInt(n)));
+            if (mentionedNums.size > 0 && mentionedNums.size < addNumMatches.length) {
+                const byUserMention = addNumMatches.filter(m => mentionedNums.has(parseInt(m[1])));
+                if (byUserMention.length > 0 && byUserMention.length < addNumMatches.length) {
+                    console.log(`[ADD_ITEM_NUM] User-intent filter: ${addNumMatches.length} → ${byUserMention.length} items (keeping only numbers user mentioned: ${[...mentionedNums].join(',')})`);
+                    addNumMatches = byUserMention;
+                }
             }
         }
     }
@@ -1238,6 +1362,22 @@ async function processCommands(response, user, phoneNumber) {
                                 prefs.pendingDoordashOptions = groupsNeedingInput;
                                 prefs.pendingDoordashSelections = autoSelections.length > 0 ? autoSelections : null;
                                 prefs.pendingDoordashGroupIndex = 0;
+
+                                // Queue any remaining items so they're added after options resolved
+                                const remaining = addNumMatches.slice(matchIdx + 1);
+                                if (remaining.length > 0) {
+                                    const currentMenu = db.getCachedCurrentRestaurant(user.id);
+                                    const queuedItems = remaining.map(m => {
+                                        const idx = parseInt(m[1]) - 1;
+                                        const qItem = currentMenu?.menu?.[idx];
+                                        return qItem ? { num: idx, item: qItem } : null;
+                                    }).filter(Boolean);
+                                    if (queuedItems.length > 0) {
+                                        prefs.pendingQueuedItems = queuedItems;
+                                        console.log(`[ADD_ITEM_NUM] Queued ${queuedItems.length} item(s) for after options: ${queuedItems.map(q => q.item.name).join(', ')}`);
+                                    }
+                                }
+
                                 db.setUserPreferences(user.id, prefs);
 
                                 additionalContext = `\n\n*${item.name}*\n`;
@@ -1255,7 +1395,6 @@ async function processCommands(response, user, phoneNumber) {
                                     additionalContext += `\nReply with a number`;
                                 }
 
-                                const remaining = addNumMatches.slice(matchIdx + 1);
                                 if (remaining.length > 0) {
                                     const currentMenu = db.getCachedCurrentRestaurant(user.id);
                                     const remainingNames = remaining.map(m => {
@@ -1272,6 +1411,7 @@ async function processCommands(response, user, phoneNumber) {
                             prefs.pendingDoordashItem = null;
                             prefs.pendingDoordashOptions = null;
                             prefs.pendingDoordashSelections = null;
+                            prefs.pendingQueuedItems = null;
                             db.setUserPreferences(user.id, prefs);
                             additionalContext = `\n\nBrowser session expired. Please search for a restaurant again.`;
                         } else if (addResult.error === 'RESTAURANT_CLOSED') {
@@ -1292,8 +1432,8 @@ async function processCommands(response, user, phoneNumber) {
         }
     }
 
-    // Show cart after adding items
-    if (itemsAdded.length > 0) {
+    // Show cart after adding items — only if no other context (e.g. options prompt) was already set
+    if (itemsAdded.length > 0 && !additionalContext) {
         const cart = db.getCart(user.id);
         const itemList = itemsAdded.join(' and ');
         additionalContext = `\n\nAdded ${itemList}!\n\n${restaurants.formatCart(cart)}\n\nAnything else, or say "checkout" to order?`;
@@ -2001,7 +2141,7 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
         // Log commands Claude chose (helps debug wrong command selection)
         const cmdMatches = assistantMessage.match(/\[[A-Z_]+(?::[^\]]+)?\]/g);
         if (cmdMatches) console.log(`[Claude] Commands: ${cmdMatches.join(' | ')}`);
-        const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber);
+        const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber, message);
         assistantMessage = cleanedResponse;
 
         if (voiceMode) {

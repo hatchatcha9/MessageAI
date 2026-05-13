@@ -123,6 +123,12 @@ let _capturedSearchQueryFired = false; // true when searchWithFilterFacetFeed is
 let _preWarmPromise = null;
 let _preWarmUrl = null;
 
+// HTTP cart API state
+// storeId (string) -> Map<itemNameLower, { itemId, menuId, unitPrice (cents) }>
+let _capturedItemIds = {};
+// DoorDash cart UUID returned by addCartItemV2; passed back on subsequent adds
+let _activeCartId = '';
+
 /**
  * Parse a DoorDash API response and cache any menu items found for each store ID.
  * Handles search response shapes, store detail shapes, and GraphQL wrappers.
@@ -140,20 +146,34 @@ function _extractAndCacheMenuData(data) {
         if (storeId && storeId.length >= 5 && Array.isArray(menus) && menus.length > 0) {
             const items = [];
             for (const menu of menus) {
+                const menuId = String(menu.id || menu.menuId || '');
                 for (const cat of (menu.menu_categories || menu.categories || [])) {
                     for (const item of (cat.items || cat.menu_items || [])) {
                         const name = item.name || item.title || '';
-                        const rawPrice = item.price || item.display_price || item.displayPrice || 0;
+                        const rawPrice = item.price || item.display_price || item.displayPrice || item.unit_price || item.unitPrice || item.unitAmount || 0;
                         const price = typeof rawPrice === 'number'
                             ? (rawPrice > 200 ? rawPrice / 100 : rawPrice)
                             : parseFloat(String(rawPrice).replace(/[^0-9.]/g, ''));
-                        if (name && price > 0) items.push({ name, price, description: item.description || '' });
+                        if (name && price > 0) {
+                            const itemId = String(item.id || item.itemId || item.item_id || '');
+                            items.push({ name, price, description: item.description || '', itemId, menuId });
+                            // Cache API IDs for HTTP fast-path adds
+                            if (itemId && /^\d{5,}$/.test(itemId)) {
+                                if (!_capturedItemIds[storeId]) _capturedItemIds[storeId] = new Map();
+                                _capturedItemIds[storeId].set(name.toLowerCase(), {
+                                    itemId,
+                                    menuId,
+                                    unitPrice: Math.round(price * 100)
+                                });
+                            }
+                        }
                     }
                 }
             }
             if (items.length > 0) {
                 _capturedStoreMenus[storeId] = items;
-                console.log(`[DoorDash] Intercepted ${items.length} menu items for store ${storeId}`);
+                const withIds = items.filter(i => i.itemId).length;
+                console.log(`[DoorDash] Intercepted ${items.length} menu items for store ${storeId} (${withIds} with API IDs)`);
                 return;
             }
         }
@@ -216,6 +236,155 @@ function _extractAndCacheRestaurantList(data, opName = '') {
     }
     walk(data, 0);
 }
+
+// ─── DoorDash HTTP Cart API ───────────────────────────────────────────────────
+
+/** Extract numeric store ID from a DoorDash store URL. */
+function extractStoreIdFromUrl(url) {
+    if (!url) return null;
+    const m = url.match(/\/store\/[^/?#]*?\/(\d{5,})/) || url.match(/\/store\/(\d{5,})/);
+    return m ? m[1] : null;
+}
+
+/**
+ * Fetch item page details (option groups + option IDs) via DoorDash GraphQL.
+ * Uses page.evaluate so browser session cookies are automatically included.
+ */
+async function fetchItemPageViaAPI(storeId, itemId) {
+    const query = `query itemPage($storeId:ID!,$itemId:ID!,$isNested:Boolean!,$fulfillmentType:FulfillmentType){itemPage(storeId:$storeId,itemId:$itemId,isNested:$isNested,fulfillmentType:$fulfillmentType){itemHeader{id name description unitAmount currency menuId}optionLists{id name minNumOptions maxNumOptions numFreeOptions isOptional options{id name unitAmount defaultQuantity}}}}`;
+    return page.evaluate(async ({ query, vars }) => {
+        try {
+            const resp = await fetch(
+                'https://www.doordash.com/graphql/itemPage?operation=itemPage',
+                {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'x-channel-id': 'marketplace',
+                        'x-experience-id': 'doordash',
+                        'apollographql-client-name': '@doordash/app-consumer-production-ssr-client',
+                        'apollographql-client-version': '3.0',
+                        'accept': '*/*'
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({ operationName: 'itemPage', variables: vars, query })
+                }
+            );
+            const data = await resp.json();
+            return { ok: resp.ok, status: resp.status, data };
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+    }, { query, vars: { storeId, itemId, isNested: false, fulfillmentType: 'Delivery' } });
+}
+
+/**
+ * Add an item to the DoorDash cart via GraphQL HTTP (no Playwright click required).
+ * ~300ms vs ~4–8s for Playwright modal flow.
+ */
+async function addCartItemViaAPI({ storeId, menuId, itemId, itemName, unitPrice, nestedOptions = [], cartId = '' }) {
+    const mutation = `mutation addCartItem($addCartItemInput:AddCartItemInput!,$fulfillmentContext:FulfillmentContextInput!,$cartContext:CartContextInput,$returnCartFromOrderService:Boolean,$shouldKeepOnlyOneActiveCart:Boolean,$lowPriorityBatchAddCartItemInput:[AddCartItemInput!]){addCartItemV2(addCartItemInput:$addCartItemInput,fulfillmentContext:$fulfillmentContext,cartContext:$cartContext,returnCartFromOrderService:$returnCartFromOrderService,shouldKeepOnlyOneActiveCart:$shouldKeepOnlyOneActiveCart,lowPriorityBatchAddCartItemInput:$lowPriorityBatchAddCartItemInput){id subtotal total orders{id orderItems{id quantity item{id name}options{id name}}}}}`;
+    const variables = {
+        addCartItemInput: {
+            storeId,
+            menuId: menuId || '',
+            itemId,
+            itemName,
+            currency: 'USD',
+            quantity: 1,
+            nestedOptions: JSON.stringify(nestedOptions),
+            specialInstructions: null,
+            substitutionPreference: 'substitute',
+            isBundle: false,
+            bundleType: 'BUNDLE_TYPE_UNSPECIFIED',
+            unitPrice: unitPrice || 0,
+            cartId: cartId || ''
+        },
+        lowPriorityBatchAddCartItemInput: [],
+        fulfillmentContext: { shouldUpdateFulfillment: false, fulfillmentType: 'Delivery' },
+        monitoringContext: { isGroup: false },
+        cartContext: { isBundle: false },
+        returnCartFromOrderService: false,
+        shouldKeepOnlyOneActiveCart: false
+    };
+    return page.evaluate(async ({ mutation, variables }) => {
+        try {
+            const resp = await fetch(
+                'https://www.doordash.com/graphql/addCartItem?operation=addCartItem',
+                {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/json',
+                        'x-channel-id': 'marketplace',
+                        'x-experience-id': 'doordash',
+                        'apollographql-client-name': '@doordash/app-consumer-production-ssr-client',
+                        'apollographql-client-version': '3.0',
+                        'accept': '*/*'
+                    },
+                    credentials: 'include',
+                    body: JSON.stringify({ operationName: 'addCartItem', variables, query: mutation })
+                }
+            );
+            const data = await resp.json();
+            return { ok: resp.ok, status: resp.status, data };
+        } catch (e) {
+            return { ok: false, error: e.message };
+        }
+    }, { mutation, variables });
+}
+
+/**
+ * Convert DoorDash itemPage.optionLists to the requiredOptions format server.js expects.
+ * Includes _apiGroupId / _apiOptions so buildNestedOptionsFromSelections can use them.
+ */
+function convertOptionListsToRequired(optionLists) {
+    return optionLists
+        .filter(g => !g.isOptional && (g.minNumOptions || 0) > 0)
+        .map(g => ({
+            name: g.name,
+            options: g.options.map(o => o.name),
+            hasSelection: false,
+            _origIdx: optionLists.indexOf(g),
+            _apiGroupId: g.id,
+            _apiOptions: g.options.map(o => ({ id: o.id, name: o.name, unitAmount: o.unitAmount || 0 }))
+        }));
+}
+
+/**
+ * Build DoorDash nestedOptions payload from user selections + itemPage optionLists.
+ * selections: [{ groupIndex, optionIndex, optionText }] (from server.js pendingDoordashSelections)
+ * optionLists: from fetchItemPageViaAPI response (includes .id, .options[].id)
+ */
+function buildNestedOptionsFromSelections(selections, optionLists) {
+    const nestedOptions = [];
+    for (const sel of selections) {
+        const group = optionLists[sel.groupIndex];
+        if (!group) { console.log(`[API] No group at index ${sel.groupIndex} (have ${optionLists.length} groups)`); continue; }
+        const option = group.options[sel.optionIndex] || group.options[0];
+        if (!option) { console.log(`[API] No option at index ${sel.optionIndex} in group "${group.name}"`); continue; }
+        nestedOptions.push({
+            id: String(option.id),
+            quantity: 1,
+            options: [],
+            itemExtraOption: {
+                id: String(option.id),
+                name: option.name,
+                description: option.name,
+                price: option.unitAmount || 0,
+                itemExtraName: null,
+                chargeAbove: 0,
+                defaultQuantity: 0,
+                itemExtraId: String(group.id),
+                itemExtraNumFreeOptions: group.numFreeOptions || 0,
+                menuItemExtraOptionPrice: option.unitAmount || 0,
+                menuItemExtraOptionBasePrice: null
+            }
+        });
+    }
+    return nestedOptions;
+}
+
+// ─── End HTTP Cart API ────────────────────────────────────────────────────────
 
 // Session state tracking
 const sessionState = {
@@ -513,6 +682,21 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             console.error('[DoorDash] Failed to auto-import cookies:', e.message);
         }
     }
+
+    // Persistent interceptor: capture item IDs from all DoorDash API responses.
+    // Runs for every page navigation (not just search) so item IDs are always available
+    // for the HTTP cart fast path.
+    page.on('response', async (response) => {
+        try {
+            const url = response.url();
+            if (!url.includes('doordash.com') || response.status() !== 200) return;
+            const ct = response.headers()['content-type'] || '';
+            if (!ct.includes('json')) return;
+            if (!url.includes('/graphql') && !url.includes('/api/')) return;
+            const data = await response.json().catch(() => null);
+            if (data) _extractAndCacheMenuData(data);
+        } catch (e) {}
+    });
 
     return page;
 }
@@ -4700,17 +4884,97 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log(`[DoorDash] Now at: ${page.url()}`);
         }
 
+        // ── HTTP API fast path ────────────────────────────────────────────────
+        // Try to add the item via DoorDash's GraphQL HTTP API.
+        // Much faster than Playwright modal interaction (~300-600ms vs 4-8s).
+        // Falls back to Playwright if item IDs aren't captured or the call fails.
+        {
+            const storeId = extractStoreIdFromUrl(options.restaurantUrl || storeNavUrl || page.url());
+            const itemApiData = storeId ? _capturedItemIds[storeId]?.get((cachedItem?.name || '').toLowerCase()) : null;
+
+            if (storeId && itemApiData?.itemId) {
+                const t0 = Date.now();
+                try {
+                    console.log(`[API] Fast path: item="${cachedItem?.name}" storeId=${storeId} itemId=${itemApiData.itemId}`);
+
+                    const itemPageResult = await Promise.race([
+                        fetchItemPageViaAPI(storeId, itemApiData.itemId),
+                        new Promise(r => setTimeout(() => r({ ok: false, timeout: true }), 5000))
+                    ]);
+                    const t1 = Date.now();
+                    console.log(`[API] itemPage: ok=${itemPageResult.ok} status=${itemPageResult.status} in ${t1 - t0}ms`);
+
+                    if (itemPageResult.ok && itemPageResult.data?.data?.itemPage) {
+                        const optionLists = itemPageResult.data.data.itemPage.optionLists || [];
+                        const requiredGroups = optionLists.filter(g => !g.isOptional && (g.minNumOptions || 0) > 0);
+
+                        if (!options.skipOptionsCheck && requiredGroups.length > 0) {
+                            // Return option structure without Playwright — server.js will ask user
+                            const requiredOptions = convertOptionListsToRequired(optionLists);
+                            console.log(`[API] Item needs options (${requiredGroups.length} groups) — returning via API in ${t1 - t0}ms`);
+                            return { success: false, needsOptions: true, requiredOptions };
+                        }
+
+                        // Build nestedOptions from user selections
+                        let nestedOptions = [];
+                        if (options.selections?.length > 0 && optionLists.length > 0) {
+                            nestedOptions = buildNestedOptionsFromSelections(options.selections, optionLists);
+                            console.log(`[API] Built ${nestedOptions.length} nestedOptions from ${options.selections.length} selections`);
+                        }
+
+                        const menuId = itemApiData.menuId || itemPageResult.data.data.itemPage.itemHeader?.menuId || '';
+                        const cartResult = await Promise.race([
+                            addCartItemViaAPI({
+                                storeId,
+                                menuId,
+                                itemId: itemApiData.itemId,
+                                itemName: cachedItem?.name || '',
+                                unitPrice: itemApiData.unitPrice || Math.round((cachedItem?.price || 0) * 100),
+                                nestedOptions,
+                                cartId: _activeCartId
+                            }),
+                            new Promise(r => setTimeout(() => r({ ok: false, timeout: true }), 8000))
+                        ]);
+                        const t2 = Date.now();
+                        console.log(`[API] addCartItem: ok=${cartResult.ok} status=${cartResult.status} in ${t2 - t1}ms`);
+
+                        if (cartResult.ok && cartResult.data?.data?.addCartItemV2) {
+                            const cart = cartResult.data.data.addCartItemV2;
+                            _activeCartId = cart.id || _activeCartId;
+                            console.log(`[API] ✅ Item added via HTTP API in ${t2 - t0}ms total (itemPage: ${t1-t0}ms + addCart: ${t2-t1}ms)`);
+                            return { success: true };
+                        }
+
+                        const errs = cartResult.data?.errors;
+                        console.log(`[API] addCartItemV2 failed (${t2-t0}ms): ${JSON.stringify(errs || cartResult).substring(0, 200)}`);
+                    }
+                } catch (apiErr) {
+                    console.log('[API] Fast path error:', apiErr.message);
+                }
+                console.log('[API] Falling back to Playwright...');
+            } else {
+                console.log(`[API] No item IDs captured for "${cachedItem?.name}" (storeId=${storeId}) — using Playwright`);
+            }
+        }
+        // ── End HTTP API fast path ────────────────────────────────────────────
+
         // If page is mid-render (raw Next.js SSR streaming), wait for React to hydrate
         const rawContent = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
         if (rawContent.includes('self.__next_f') || (rawContent.length < 150 && page.url().includes('doordash.com'))) {
             console.log('[DoorDash] Page is mid-render, waiting for hydration...');
             await page.waitForFunction(
                 () => { const t = document.body?.innerText || ''; return t.length > 200 && !t.includes('self.__next_f'); },
-                { timeout: 10000 }
+                { timeout: 12000 }
             ).catch(async () => {
                 console.log('[DoorDash] Hydration timeout — reloading page...');
-                await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-                await delay(2000);
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+                await delay(3000);
+                // Re-check after reload — wait for CF if needed, then verify hydration
+                await waitForCFChallenge(10000);
+                await page.waitForFunction(
+                    () => { const t = document.body?.innerText || ''; return t.length > 200 && !t.includes('self.__next_f'); },
+                    { timeout: 8000 }
+                ).catch(() => console.log('[DoorDash] Still not hydrated after reload, proceeding anyway'));
             });
         }
 
@@ -4722,7 +4986,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // Modal open from a different item — close it before adding this one
             console.log('[DoorDash] Modal open but no selections — closing before fresh item add');
             await page.keyboard.press('Escape').catch(() => {});
-            await delay(600);
+            await delay(800);
+            // Confirm modal closed; try clicking outside if Escape didn't work
+            const stillOpen = await page.$('[role="dialog"], [aria-modal="true"]').catch(() => null);
+            if (stillOpen) {
+                console.log('[DoorDash] Modal still open after Escape — clicking outside to dismiss');
+                await page.mouse.click(10, 10).catch(() => {});
+                await delay(600);
+            }
         }
         if (existingModal && options.selections && options.selections.length > 0) {
             console.log('[DoorDash] Modal already open - applying selections directly');
@@ -6767,6 +7038,7 @@ async function openForManualLogin() {
  * Called when user does CLEAR_CART to keep DB and browser in sync
  */
 async function clearBrowserCart() {
+    _activeCartId = ''; // reset HTTP cart ID so next add starts a fresh cart
     if (!page || !context) {
         console.log('[DoorDash] clearBrowserCart: no browser open, nothing to clear');
         return;
