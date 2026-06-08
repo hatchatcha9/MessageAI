@@ -1,4 +1,4 @@
-# PiAI Voice Layer Dependencies
+# frog Voice Layer Dependencies
 # Install: pip install -r requirements.txt
 
 # Core
@@ -8,7 +8,7 @@ numpy>=1.24.0               # Audio processing
 requests>=2.31.0            # HTTP to Node.js server
 
 # TTS — Kokoro neural voices (male: am_michael, female: af_heart)
-# Switch voice by setting env var: PIAI_VOICE=male or PIAI_VOICE=female
+# Switch voice by setting env var: FROG_VOICE=male or FROG_VOICE=female
 kokoro>=0.9.4               # Neural TTS, works on Windows & Pi
 soundfile>=0.12.1           # Audio file I/O for Kokoro
 

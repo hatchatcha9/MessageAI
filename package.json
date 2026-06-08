@@ -1,7 +1,7 @@
 {
   "name": "frog",
   "version": "1.0.0",
-  "description": "An SMS-based AI assistant that can order food, make recommendations, and execute tasks - all via text message.",
+  "description": "frog — Raspberry Pi voice AI assistant (Rabbit R1-style). Wake word, Whisper STT, Kokoro TTS, Claude AI.",
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
@@ -18,10 +18,12 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "googleapis": "^144.0.0",
+    "spotify-web-api-node": "^5.0.2"
+  },
+  "optionalDependencies": {
     "playwright": "^1.40.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "spotify-web-api-node": "^5.0.2",
     "twilio": "^5.12.2"
   }
 }

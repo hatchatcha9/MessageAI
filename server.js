@@ -1,19 +1,30 @@
 require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk').default;
-const twilio = require('twilio');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { exec, execSync } = require('child_process');
 const db = require('./db');
 const restaurants = require('./restaurants');
-const doordash = require('./doordash');
 const weather = require('./modules/weather');
 const reminders = require('./modules/reminders');
 const news = require('./modules/news');
 const gps = require('./modules/gps');
 const camera = require('./modules/camera');
 const calendar = require('./modules/calendar');
-const spotify = require('./modules/spotify');
+const spotify  = require('./modules/spotify');
+const battery  = require('./modules/battery');
+const todo     = require('./modules/todo');
+
+// Optional SMS/DoorDash subsystem — only loaded when TWILIO_ENABLED=true
+const TWILIO_ENABLED = process.env.TWILIO_ENABLED === 'true';
+let twilio = null;
+let doordash = null;
+if (TWILIO_ENABLED) {
+    try { twilio   = require('twilio');       } catch (e) { console.warn('[Twilio] Package not installed — SMS disabled'); }
+    try { doordash = require('./doordash');   } catch (e) { console.warn('[DoorDash] Module unavailable:', e.message); }
+}
 
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
@@ -57,16 +68,20 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // For Twilio webhook
 app.use(express.static('public'));
 
-// Twilio Configuration
+// Twilio Configuration (only used when TWILIO_ENABLED=true)
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_PHONE = process.env.TWILIO_PHONE;
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 
-if (TWILIO_ACCOUNT_SID && TWILIO_PHONE) {
-    console.log(`[Twilio] Enabled — sending from ${TWILIO_PHONE}`);
+if (TWILIO_ENABLED) {
+    if (TWILIO_ACCOUNT_SID && TWILIO_PHONE) {
+        console.log(`[Twilio] Enabled — sending from ${TWILIO_PHONE}`);
+    } else {
+        console.log('[Twilio] TWILIO_ENABLED=true but missing TWILIO_ACCOUNT_SID or TWILIO_PHONE in .env');
+    }
 } else {
-    console.log('[Twilio] Disabled - missing TWILIO_ACCOUNT_SID or TWILIO_PHONE in .env');
+    console.log('[Twilio] Disabled (TWILIO_ENABLED=false) — voice-only mode');
 }
 
 const SMS_MAX_CHARS = 1550; // Twilio API limit is 1600; stay under to be safe
@@ -212,6 +227,140 @@ NEW USER ONBOARDING: This person just texted for the first time. Welcome them wa
 3. Mention DoorDash setup: "You'll also need to link your DoorDash account — say 'setup doordash email password' when ready."
 Keep it friendly and brief. Do NOT search for food yet.` : '';
 
+    if (voiceMode) {
+        const gpsLoc = gps.getLocationString();
+        const locationNote = gpsLoc ? `\nCurrent GPS location: ${gpsLoc} — use this when user asks about weather without specifying a city.` : '';
+        return `You are frog, a voice assistant running on a Raspberry Pi. You help with food ordering, weather, reminders, news, and general questions. You speak to the user — they hear your responses out loud.${locationNote}
+
+VOICE RULES (CRITICAL):
+- Respond in natural spoken English only. No markdown, no asterisks, no bullet points, no numbered lists, no headers, no box-drawing characters (═ ─ •), no emojis, no dollar signs, no special symbols of any kind.
+- Keep responses concise — 1 to 3 sentences unless detail is genuinely needed.
+- Spell out numbers and symbols: say "fifty dollars" not "$50", "three PM" not "3pm", "number 1" not "1.".
+- When listing items, use natural speech: "Your options are Dominos, Papa Johns, and Pizza Hut" not a numbered list.
+- Never say "I'll do X" without immediately doing it via a command.
+
+USER INFO:${context || '\nNew user - no saved info yet'}
+
+FOOD ORDERING COMMANDS (same as SMS version):
+[SEARCH: cuisine] [SELECT: N] [ADD_ITEM_NUM: N] [SELECT_OPTION: N] [SELECT_OPTIONS_TEXT: text]
+[SHOW_CART] [CLEAR_CART] [PLACE_ORDER] [SAVE_ADDRESS: address] [MY_ORDERS] [REORDER]
+
+NEW SKILL COMMANDS:
+WEATHER - When user asks about weather:
+    [WEATHER: city name]
+    If no city is given, use the home city: ${loadSettings().homeCity || 'Draper, Utah'}.
+
+FORECAST - When user wants a weather forecast:
+    [FORECAST: city name]
+    If no city is given, use the home city: ${loadSettings().homeCity || 'Draper, Utah'}.
+
+REMINDER - When user wants a reminder:
+    [REMINDER: time | message]
+    Examples: "remind me in 10 minutes to take my meds" → [REMINDER: 10 minutes | take your meds]
+
+NEWS - When user wants headlines:
+    [NEWS]
+    [NEWS: technology] or [NEWS: sports] or [NEWS: business] for category news
+
+CAMERA - When user asks what the camera sees, to take a photo, or describe surroundings:
+    [CAMERA]
+    Examples: "what do you see", "look around", "what's in front of you", "take a picture"
+
+CALENDAR - When user asks about their schedule or events:
+    [CALENDAR]           → today's events
+    [CALENDAR: upcoming] → next 7 days
+    Examples: "what's on my calendar", "any events today", "what do I have this week"
+
+SPOTIFY - When user wants to control music:
+    [SPOTIFY: play <song or artist>]
+    [SPOTIFY: pause]
+    [SPOTIFY: skip]
+    [SPOTIFY: volume <0-100>]
+    [SPOTIFY: what's playing]
+    Examples: "play some jazz", "skip this song", "turn it up to 70", "what song is this"
+
+BATTERY - When user asks about battery level, power, or how much charge is left:
+    [BATTERY]
+    Examples: "how's the battery", "what's the charge level", "am I plugged in"
+
+MATH - When user asks you to calculate something or convert units:
+    [MATH: expression]
+    Examples: "what's 15 percent of 80" → [MATH: 15% of 80]
+    "how many feet in 2 miles" → [MATH: 2 miles to feet]
+    "what's 847 divided by 13" → [MATH: 847 / 13]
+
+TIMER - When user sets a countdown timer with no custom message:
+    [TIMER: duration]
+    Examples: "set a 5 minute timer" → [TIMER: 5 minutes]
+    "timer for 30 seconds" → [TIMER: 30 seconds]
+    Use REMINDER when the user wants a specific message; use TIMER for generic countdowns.
+
+TODO - When user manages a to-do list:
+    [TODO: add | item text]        → add item
+    [TODO: list]                   → read the list aloud
+    [TODO: done | N or item name]  → mark item as done
+    [TODO: clear]                  → remove all completed items
+    Examples: "add milk to my list" → [TODO: add | buy milk]
+    "what's on my list" → [TODO: list]
+    "mark number 2 as done" → [TODO: done | 2]
+
+VOLUME - When user wants to change the speaker volume (not music — use SPOTIFY for music volume):
+    [VOLUME: up]   → louder
+    [VOLUME: down] → quieter
+    [VOLUME: mute] → mute
+    [VOLUME: N]    → set to N percent (0-100)
+    Examples: "turn it up", "volume down", "set volume to 50", "mute it"
+
+SYSINFO - When user asks about device status, IP address, CPU temperature, or uptime:
+    [SYSINFO]
+    Examples: "what's your IP", "how hot are you", "what's your temperature", "device info"
+
+STOCK - When user asks about a stock price or how a company is trading:
+    [STOCK: symbol]
+    Examples: "what's Apple stock at" → [STOCK: AAPL]
+    "how is Tesla doing" → [STOCK: TSLA]
+    "check the S&P 500" → [STOCK: SPY]
+
+JOKE - When user asks you to tell a joke or something funny:
+    [JOKE]
+    Then immediately tell a short spoken joke — setup then punchline, one or two sentences max.
+    Example: "tell me a joke" → [JOKE] Why don't scientists trust atoms? Because they make up everything.
+
+DEFINE - When user asks for the definition of a word:
+    [DEFINE: word]
+    Examples: "what does serendipity mean" → [DEFINE: serendipity]
+    "define ephemeral" → [DEFINE: ephemeral]
+
+WIKI - When user asks about a topic, person, place, or concept and wants a brief explanation:
+    [WIKI: topic]
+    Examples: "tell me about black holes" → [WIKI: black holes]
+    "who is Nikola Tesla" → [WIKI: Nikola Tesla]
+    Only use WIKI when the user wants background info, not for real-time info (use NEWS for current events).
+
+LOCATION - When user asks where they are or wants their current location:
+    [LOCATION]
+    Examples: "where am I", "what's my location", "where are we"
+
+WIFI - When user asks about wifi, internet connection, or IP address:
+    [WIFI]
+    Examples: "what's my IP", "am I connected to wifi", "what network am I on"
+
+REBOOT - When user wants to restart the device:
+    [REBOOT]
+    Examples: "reboot", "restart yourself", "reboot the Pi"
+    IMPORTANT: Only do this if the user explicitly asks. Say "Rebooting now" before using this command.
+
+SHUTDOWN - When user wants to power off the device:
+    [SHUTDOWN]
+    Examples: "shut down", "power off", "turn yourself off", "goodnight"
+    IMPORTANT: Only do this if the user explicitly asks. Say "Shutting down, goodbye" before using this command.
+
+PERSONALITY:
+- Be casual and conversational, like a helpful friend
+- Give short spoken answers — the user is listening, not reading
+- For weather/reminders/news, just give the answer directly, no preamble`;
+    }
+
     return `You are MessageAI, an SMS-based food ordering assistant. You help users find restaurants, browse menus, and place orders.${onboarding}
 
 USER INFO:${context || '\nNew user - no saved info yet'}
@@ -344,70 +493,6 @@ PERSONALITY:
 - Use their order history to make smart suggestions
 - If they seem indecisive, make a recommendation
 - Acknowledge their choice briefly, then use the command`;
-
-    if (voiceMode) {
-        const gpsLoc = gps.getLocationString();
-        const locationNote = gpsLoc ? `\nCurrent GPS location: ${gpsLoc} — use this when user asks about weather without specifying a city.` : '';
-        return `You are PiAI, a voice assistant running on a Raspberry Pi. You help with food ordering, weather, reminders, news, and general questions. You speak to the user — they hear your responses out loud.${locationNote}
-
-VOICE RULES (CRITICAL):
-- Respond in natural spoken English only. No markdown, no asterisks, no bullet points, no numbered lists, no headers, no box-drawing characters (═ ─ •), no emojis, no dollar signs, no special symbols of any kind.
-- Keep responses concise — 1 to 3 sentences unless detail is genuinely needed.
-- Spell out numbers and symbols: say "fifty dollars" not "$50", "three PM" not "3pm", "number 1" not "1.".
-- When listing items, use natural speech: "Your options are Dominos, Papa Johns, and Pizza Hut" not a numbered list.
-- Never say "I'll do X" without immediately doing it via a command.
-
-USER INFO:${context || '\nNew user - no saved info yet'}
-
-FOOD ORDERING COMMANDS (same as SMS version):
-[SEARCH: cuisine] [SELECT: N] [ADD_ITEM_NUM: N] [SELECT_OPTION: N] [SELECT_OPTIONS_TEXT: text]
-[SHOW_CART] [CLEAR_CART] [PLACE_ORDER] [SAVE_ADDRESS: address] [MY_ORDERS] [REORDER]
-
-NEW SKILL COMMANDS:
-WEATHER - When user asks about weather:
-    [WEATHER: city name]
-    Examples: "what's the weather like" → [WEATHER: Draper Utah]
-    Use their saved address city if no location given.
-
-FORECAST - When user wants a weather forecast:
-    [FORECAST: city name]
-
-REMINDER - When user wants a reminder:
-    [REMINDER: time | message]
-    Examples: "remind me in 10 minutes to take my meds" → [REMINDER: 10 minutes | take your meds]
-
-NEWS - When user wants headlines:
-    [NEWS]
-    [NEWS: technology] or [NEWS: sports] or [NEWS: business] for category news
-
-CAMERA - When user asks what the camera sees, to take a photo, or describe surroundings:
-    [CAMERA]
-    Examples: "what do you see", "look around", "what's in front of you", "take a picture"
-
-CALENDAR - When user asks about their schedule or events:
-    [CALENDAR]           → today's events
-    [CALENDAR: upcoming] → next 7 days
-    Examples: "what's on my calendar", "any events today", "what do I have this week"
-
-SPOTIFY - When user wants to control music:
-    [SPOTIFY: play <song or artist>]
-    [SPOTIFY: pause]
-    [SPOTIFY: skip]
-    [SPOTIFY: volume <0-100>]
-    [SPOTIFY: what's playing]
-    Examples: "play some jazz", "skip this song", "turn it up to 70", "what song is this"
-
-MATH - When user asks you to calculate something or convert units:
-    [MATH: expression]
-    Examples: "what's 15 percent of 80" → [MATH: 15% of 80]
-    "how many feet in 2 miles" → [MATH: 2 miles to feet]
-    "what's 847 divided by 13" → [MATH: 847 / 13]
-
-PERSONALITY:
-- Be casual and conversational, like a helpful friend
-- Give short spoken answers — the user is listening, not reading
-- For weather/reminders/news, just give the answer directly, no preamble`;
-    }
 }
 
 // Get human-readable order status based on time elapsed
@@ -522,7 +607,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
             password: process.env.DOORDASH_PASSWORD
         };
 
-        if (!address) {
+        if (!doordash) {
+            additionalContext = `\n\nFood ordering isn't available in voice mode on this device.`;
+        } else if (!address) {
             additionalContext = `\n\nI need your delivery address first. What's your address?`;
         } else {
             // Fast path: return cached results instantly (24h TTL), warm browser in background
@@ -1882,6 +1969,23 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
         actions.push({ type: 'forecast', location });
     }
 
+    // Timer (countdown with no custom message)
+    const timerMatch = response.match(/\[TIMER:\s*(.+?)\]/i);
+    if (timerMatch) {
+        const timeStr = timerMatch[1].trim();
+        cleanResponse = cleanResponse.replace(timerMatch[0], '').trim();
+        const result = reminders.setReminder(user.id, timeStr, "Your timer is done.", (uid, msg) => {
+            console.log(`[Timer] Fired for user ${uid}`);
+            pushPendingSpeech(msg);
+        });
+        if (result.success) {
+            additionalContext = `\n\nTIMER SET: Timer set for ${result.readableTime}.`;
+        } else {
+            additionalContext = `\n\nTIMER ERROR: ${result.error}`;
+        }
+        actions.push({ type: 'timer', timeStr });
+    }
+
     // Reminder
     const reminderMatch = response.match(/\[REMINDER:\s*(.+?)\s*\|\s*(.+?)\]/i);
     if (reminderMatch) {
@@ -1920,6 +2024,105 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
         actions.push({ type: 'math', expr });
     }
 
+    // Stock price
+    const stockMatch = response.match(/\[STOCK:\s*([A-Z0-9.^=-]{1,10})\]/i);
+    if (stockMatch) {
+        const symbol = stockMatch[1].trim().toUpperCase();
+        cleanResponse = cleanResponse.replace(stockMatch[0], '').trim();
+        try {
+            const res = await fetch(
+                `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`,
+                { headers: { 'User-Agent': 'Mozilla/5.0' } }
+            );
+            if (res.ok) {
+                const data = await res.json();
+                const meta = data?.chart?.result?.[0]?.meta;
+                if (meta) {
+                    const price  = meta.regularMarketPrice;
+                    const prev   = meta.chartPreviousClose || meta.previousClose;
+                    const change = prev ? (price - prev) : null;
+                    const pct    = prev ? ((change / prev) * 100) : null;
+                    const dir    = change >= 0 ? 'up' : 'down';
+                    const name   = meta.shortName || symbol;
+                    let result   = `${name} (${symbol}) is at $${price.toFixed(2)}`;
+                    if (pct !== null) {
+                        result += `, ${dir} ${Math.abs(pct).toFixed(2)}% today`;
+                    }
+                    additionalContext = `\n\nSTOCK RESULT:\n${result}`;
+                } else {
+                    additionalContext = `\n\nSTOCK RESULT:\nCouldn't find data for "${symbol}".`;
+                }
+            } else {
+                additionalContext = `\n\nSTOCK RESULT:\nCouldn't fetch stock data right now.`;
+            }
+        } catch (e) {
+            additionalContext = `\n\nSTOCK RESULT:\nCouldn't reach the market data service.`;
+        }
+        actions.push({ type: 'stock', symbol });
+    }
+
+    // Joke — tag is stripped, the joke text stays in cleanResponse
+    if (response.includes('[JOKE]')) {
+        cleanResponse = cleanResponse.replace('[JOKE]', '').trim();
+        actions.push({ type: 'joke' });
+    }
+
+    // Define word
+    const defineMatch = response.match(/\[DEFINE:\s*(.+?)\]/i);
+    if (defineMatch) {
+        const word = defineMatch[1].trim().toLowerCase();
+        cleanResponse = cleanResponse.replace(defineMatch[0], '').trim();
+        try {
+            const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+            if (res.ok) {
+                const data = await res.json();
+                const entry = data[0];
+                const phonetic = entry.phonetic || '';
+                const meaning = entry.meanings?.[0];
+                const partOfSpeech = meaning?.partOfSpeech || '';
+                const definition = meaning?.definitions?.[0]?.definition || 'No definition found.';
+                const example = meaning?.definitions?.[0]?.example;
+                let result = `${word}${phonetic ? ` (${phonetic})` : ''} — ${partOfSpeech}. ${definition}`;
+                if (example) result += ` For example: "${example}"`;
+                additionalContext = `\n\nDEFINITION RESULT:\n${result}`;
+            } else {
+                additionalContext = `\n\nDEFINITION RESULT:\nSorry, I couldn't find a definition for "${word}".`;
+            }
+        } catch (e) {
+            additionalContext = `\n\nDEFINITION RESULT:\nCouldn't reach the dictionary right now.`;
+        }
+        actions.push({ type: 'define', word });
+    }
+
+    // Wikipedia summary
+    const wikiMatch = response.match(/\[WIKI:\s*(.+?)\]/i);
+    if (wikiMatch) {
+        const topic = wikiMatch[1].trim();
+        cleanResponse = cleanResponse.replace(wikiMatch[0], '').trim();
+        try {
+            const searchRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(topic)}&format=json&origin=*`);
+            const searchData = await searchRes.json();
+            const pageTitle = searchData?.query?.search?.[0]?.title;
+            if (pageTitle) {
+                const summaryRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=extracts&exintro&explaintext&exsentences=3&format=json&origin=*`);
+                const summaryData = await summaryRes.json();
+                const pages = summaryData?.query?.pages;
+                const page = pages?.[Object.keys(pages)[0]];
+                const extract = page?.extract?.trim();
+                if (extract) {
+                    additionalContext = `\n\nWIKIPEDIA SUMMARY (${pageTitle}):\n${extract}`;
+                } else {
+                    additionalContext = `\n\nWIKIPEDIA SUMMARY:\nNo summary available for "${topic}".`;
+                }
+            } else {
+                additionalContext = `\n\nWIKIPEDIA SUMMARY:\nCouldn't find a Wikipedia article about "${topic}".`;
+            }
+        } catch (e) {
+            additionalContext = `\n\nWIKIPEDIA SUMMARY:\nCouldn't reach Wikipedia right now.`;
+        }
+        actions.push({ type: 'wiki', topic });
+    }
+
     // Camera
     if (response.includes('[CAMERA]')) {
         cleanResponse = cleanResponse.replace('[CAMERA]', '').trim();
@@ -1952,6 +2155,174 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
         else                                       spotResult = await spotify.play(cmd);
         additionalContext = `\n\n${spotResult}`;
         actions.push({ type: 'spotify', cmd });
+    }
+
+    // Battery
+    if (response.includes('[BATTERY]')) {
+        cleanResponse = cleanResponse.replace(/\[BATTERY\]/gi, '').trim();
+        const batResult = await battery.getSummary();
+        additionalContext = `\n\n${batResult}`;
+        actions.push({ type: 'battery' });
+    }
+
+    // Todo list
+    const todoMatch = response.match(/\[TODO:\s*(.+?)\]/i);
+    if (todoMatch) {
+        cleanResponse = cleanResponse.replace(todoMatch[0], '').trim();
+        const arg = todoMatch[1].trim();
+        let todoResult = '';
+        if (arg.toLowerCase() === 'list') {
+            todoResult = todo.listItems();
+        } else if (arg.toLowerCase() === 'clear') {
+            todoResult = todo.clearDone();
+        } else if (/^add\s*\|/i.test(arg)) {
+            const item = arg.replace(/^add\s*\|\s*/i, '').trim();
+            todoResult = todo.addItem(item);
+        } else if (/^done\s*\|/i.test(arg)) {
+            const ref = arg.replace(/^done\s*\|\s*/i, '').trim();
+            todoResult = todo.markDone(ref);
+        } else {
+            todoResult = `Unknown todo command: ${arg}`;
+        }
+        additionalContext = `\n\n${todoResult}`;
+        actions.push({ type: 'todo', arg });
+    }
+
+    // System volume
+    const volumeMatch = response.match(/\[VOLUME:\s*(.+?)\]/i);
+    if (volumeMatch) {
+        cleanResponse = cleanResponse.replace(volumeMatch[0], '').trim();
+        const level = volumeMatch[1].trim().toLowerCase();
+        const volResult = await new Promise((resolve) => {
+            if (process.platform !== 'linux') {
+                resolve('Volume control is only available on the Pi.');
+                return;
+            }
+            let cmd;
+            if (level === 'mute') {
+                cmd = `amixer sset 'Headphone' mute 2>/dev/null || amixer sset 'Speaker' mute 2>/dev/null || amixer sset 'Master' mute 2>/dev/null || true`;
+            } else if (level === 'up') {
+                cmd = `amixer sset 'Headphone' 10%+ unmute 2>/dev/null || amixer sset 'Speaker' 10%+ unmute 2>/dev/null || amixer sset 'Master' 10%+ unmute 2>/dev/null || true`;
+            } else if (level === 'down') {
+                cmd = `amixer sset 'Headphone' 10%- 2>/dev/null || amixer sset 'Speaker' 10%- 2>/dev/null || amixer sset 'Master' 10%- 2>/dev/null || true`;
+            } else {
+                const pct = Math.max(0, Math.min(100, parseInt(level) || 50));
+                cmd = `amixer sset 'Headphone' ${pct}% unmute 2>/dev/null || amixer sset 'Speaker' ${pct}% unmute 2>/dev/null || amixer sset 'Master' ${pct}% unmute 2>/dev/null || true`;
+            }
+            exec(cmd, (err, stdout) => {
+                const match = stdout && stdout.match(/\[(\d+)%\]/);
+                if (level === 'mute') resolve('Muted.');
+                else if (match) resolve(`Volume set to ${match[1]} percent.`);
+                else if (level === 'up') resolve('Volume increased.');
+                else if (level === 'down') resolve('Volume decreased.');
+                else resolve(`Volume set to ${level} percent.`);
+            });
+        });
+        additionalContext = `\n\n${volResult}`;
+        actions.push({ type: 'volume', level });
+    }
+
+    // System info
+    if (response.includes('[SYSINFO]')) {
+        cleanResponse = cleanResponse.replace(/\[SYSINFO\]/gi, '').trim();
+        const parts = [];
+        // IP address
+        const nets = os.networkInterfaces();
+        for (const iface of Object.values(nets)) {
+            const v4 = iface.find(a => a.family === 'IPv4' && !a.internal);
+            if (v4) { parts.push(`IP is ${v4.address}`); break; }
+        }
+        // CPU temp (Pi only)
+        if (process.platform === 'linux') {
+            try {
+                const raw = execSync('vcgencmd measure_temp 2>/dev/null', { timeout: 2000 }).toString();
+                const m = raw.match(/temp=([\d.]+)/);
+                if (m) parts.push(`CPU temperature is ${parseFloat(m[1]).toFixed(1)} degrees`);
+            } catch {
+                try {
+                    const raw = fs.readFileSync('/sys/class/thermal/thermal_zone0/temp', 'utf8');
+                    const t = (parseInt(raw.trim()) / 1000).toFixed(1);
+                    parts.push(`CPU temperature is ${t} degrees`);
+                } catch {}
+            }
+        }
+        // Uptime
+        const upSec = process.uptime();
+        const upHr  = Math.floor(upSec / 3600);
+        const upMin = Math.floor((upSec % 3600) / 60);
+        parts.push(`uptime is ${upHr > 0 ? `${upHr} hour${upHr !== 1 ? 's' : ''} ${upMin} minutes` : `${upMin} minutes`}`);
+
+        additionalContext = `\n\n${parts.join(', ')}.`;
+        actions.push({ type: 'sysinfo' });
+    }
+
+    // Location (GPS)
+    if (response.includes('[LOCATION]')) {
+        cleanResponse = cleanResponse.replace(/\[LOCATION\]/gi, '').trim();
+        const fix = gps.getLocation();
+        if (fix) {
+            const loc = fix.city || `${fix.lat}, ${fix.lon}`;
+            additionalContext = `\n\nGPS location: ${loc} (${fix.sats} satellites).`;
+        } else {
+            additionalContext = `\n\nGPS has no fix yet. The device may still be acquiring satellite signal — this can take up to 2 minutes outdoors.`;
+        }
+        actions.push({ type: 'location' });
+    }
+
+    // WiFi status
+    if (response.includes('[WIFI]')) {
+        cleanResponse = cleanResponse.replace(/\[WIFI\]/gi, '').trim();
+        const wifiParts = [];
+        // IP address(es)
+        const nets = os.networkInterfaces();
+        for (const [iface, addrs] of Object.entries(nets)) {
+            const v4 = addrs.find(a => a.family === 'IPv4' && !a.internal);
+            if (v4) wifiParts.push(`${iface}: ${v4.address}`);
+        }
+        // Signal quality (Linux/Pi only — /proc/net/wireless)
+        if (process.platform === 'linux') {
+            try {
+                const raw = fs.readFileSync('/proc/net/wireless', 'utf8');
+                const match = raw.match(/wlan\d+:\s+\d+\s+([\d.-]+)\s+([\d.-]+)/);
+                if (match) {
+                    const signal = parseFloat(match[2]);
+                    wifiParts.push(`signal ${signal} dBm`);
+                }
+            } catch { /* not available */ }
+        }
+        additionalContext = wifiParts.length
+            ? `\n\nWiFi: ${wifiParts.join(', ')}.`
+            : `\n\nNo network interface found.`;
+        actions.push({ type: 'wifi' });
+    }
+
+    // Reboot (Pi only)
+    if (response.includes('[REBOOT]')) {
+        cleanResponse = cleanResponse.replace(/\[REBOOT\]/gi, '').trim();
+        if (process.platform === 'linux') {
+            additionalContext = `\n\nRebooting now. See you in a moment!`;
+            // Delay so TTS has time to finish speaking before the reboot (allow ~8s for TTS + network)
+            setTimeout(() => {
+                try { execSync('sudo reboot', { timeout: 5000 }); } catch { /* expected */ }
+            }, 8000);
+        } else {
+            additionalContext = `\n\n(Reboot is only available on the Pi.)`;
+        }
+        actions.push({ type: 'reboot' });
+    }
+
+    // Shutdown (Pi only)
+    if (response.includes('[SHUTDOWN]')) {
+        cleanResponse = cleanResponse.replace(/\[SHUTDOWN\]/gi, '').trim();
+        if (process.platform === 'linux') {
+            additionalContext = `\n\nShutting down. Goodbye!`;
+            setTimeout(() => {
+                try { execSync('sudo shutdown -h now', { timeout: 5000 }); } catch { /* expected */ }
+            }, 8000);
+        } else {
+            additionalContext = `\n\n(Shutdown is only available on the Pi.)`;
+        }
+        actions.push({ type: 'shutdown' });
     }
 
     // Clear history
@@ -2165,6 +2536,7 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
 }
 
 // API endpoint for SMS simulation
+if (TWILIO_ENABLED) {
 app.post('/api/message', async (req, res) => {
     const { phoneNumber, message } = req.body;
 
@@ -2183,6 +2555,7 @@ app.post('/api/message', async (req, res) => {
 
     res.json({ response, actions });
 });
+} // end if (TWILIO_ENABLED) — /api/message
 
 // Returns a short instant acknowledgement for operations that take >3s, or null.
 // Sent BEFORE handleMessage so the user gets immediate feedback on slow operations.
@@ -2210,6 +2583,7 @@ function getInstantAck(msg, from) {
     return null;
 }
 
+if (TWILIO_ENABLED) {
 // Twilio Webhook - receives inbound SMS
 // Twilio sends form-encoded: From, To, Body
 app.post('/api/twilio/webhook', async (req, res) => {
@@ -2252,6 +2626,7 @@ app.post('/api/twilio/webhook', async (req, res) => {
         }
     })();
 });
+} // end if (TWILIO_ENABLED) — /api/twilio/webhook
 
 // Get user profile endpoint
 app.get('/api/user/:phoneNumber', (req, res) => {
@@ -2339,7 +2714,7 @@ app.get('/api/status', async (req, res) => {
     // Refresh weather cache every 10 minutes
     if (!_weatherCache || now - _weatherCacheTs > 10 * 60 * 1000) {
         try {
-            const loc = gps.getLocationString() || 'Draper,US';
+            const loc = gps.getLocationString() || loadSettings().homeCity || 'Draper,US';
             const raw = await weather.getRaw(loc);
             if (raw) {
                 _weatherCache = {
@@ -2355,9 +2730,11 @@ app.get('/api/status', async (req, res) => {
             console.error('[Status] Weather fetch error:', e.message);
         }
     }
+    const bat = await battery.getStatus();
     res.json({
         weather:  _weatherCache || null,
         gps:      gps.getLocation(),
+        battery:  bat,
         uptime:   Math.floor(process.uptime()),
         platform: process.platform,
         node:     process.version,
@@ -2409,6 +2786,7 @@ const DEFAULT_SETTINGS = {
     speechThreshold: 200,
     silenceThreshold: 80,
     silenceDuration: 1.5,
+    homeCity: 'Draper, Utah',
 };
 
 function loadSettings() {
@@ -2443,6 +2821,7 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+if (TWILIO_ENABLED && doordash) {
 // Manual DoorDash login - opens browser for user to log in themselves
 app.post('/api/doordash/manual-login', async (req, res) => {
     console.log('[Manual Login] Opening browser for manual DoorDash login...');
@@ -2454,6 +2833,7 @@ app.post('/api/doordash/manual-login', async (req, res) => {
         console.log('[Manual Login] Failed:', result.error);
     }
 });
+} // end if (TWILIO_ENABLED && doordash)
 
 // Remote log viewer
 app.get('/logs', (req, res) => {
@@ -2483,6 +2863,7 @@ app.get('/logs/stream', (req, res) => {
     });
 });
 
+if (TWILIO_ENABLED && doordash) {
 // Export DoorDash cookies (run locally, paste into Railway env)
 app.get('/api/export-cookies', async (req, res) => {
     const result = await doordash.exportCookies();
@@ -2492,6 +2873,7 @@ app.get('/api/export-cookies', async (req, res) => {
         res.status(500).json({ error: result.error });
     }
 });
+} // end if (TWILIO_ENABLED && doordash)
 
 // Cleanup expired sessions periodically
 setInterval(() => {
@@ -2678,8 +3060,17 @@ let screenState = { state: 'idle' };
 
 function broadcastScreenState(state, data = {}) {
     screenState = { state, ...data };
-    const msg = `data: ${JSON.stringify(screenState)}\n\n`;
-    screenClients.forEach(client => client.write(msg));
+    _broadcastRaw(screenState);
+}
+
+function _broadcastRaw(payload) {
+    const msg = `data: ${JSON.stringify(payload)}\n\n`;
+    const dead = [];
+    screenClients.forEach(client => {
+        if (client.writableEnded) { dead.push(client); return; }
+        try { client.write(msg); } catch { dead.push(client); }
+    });
+    dead.forEach(c => screenClients.delete(c));
 }
 
 // SSE stream — screen.html connects here
@@ -2690,7 +3081,9 @@ app.get('/api/screen/events', (req, res) => {
     res.flushHeaders();
     res.write(`data: ${JSON.stringify(screenState)}\n\n`);
     screenClients.add(res);
-    req.on('close', () => screenClients.delete(res));
+    const cleanup = () => screenClients.delete(res);
+    req.on('close', cleanup);
+    res.on('error', cleanup);
 });
 
 // State update — called by voice_loop.py and internally
@@ -2711,6 +3104,7 @@ app.post('/api/voice/rms', (req, res) => {
     if (typeof rms === 'number') {
         _lastRms   = rms;
         _lastRmsAt = Date.now();
+        _broadcastRaw({ state: 'rms', rms }); // don't overwrite screenState
     }
     res.json({ ok: true });
 });
@@ -2719,6 +3113,44 @@ app.get('/api/voice/status', (req, res) => {
     // Expire the cached RMS after 10 seconds of silence from the voice loop
     const rms = (Date.now() - _lastRmsAt < 10000) ? _lastRms : null;
     res.json({ rms });
+});
+
+// Touch-to-speak trigger — screen.html taps POST here; voice_loop.py polls GET here
+// Queue-based so rapid double-taps aren't silently dropped
+const _touchTriggerQueue = [];
+app.post('/api/voice/trigger', (req, res) => {
+    _touchTriggerQueue.push(Date.now());
+    _stopFlag = false; // clear any stale stop from previous interaction
+    res.json({ ok: true });
+});
+
+// Stop current TTS playback
+let _stopFlag = false;
+app.post('/api/voice/stop', (req, res) => {
+    _stopFlag = true;
+    res.json({ ok: true });
+});
+app.get('/api/voice/stop', (req, res) => {
+    const fired = _stopFlag;
+    _stopFlag = false;
+    res.json({ stop: fired });
+});
+app.get('/api/voice/trigger', (req, res) => {
+    const fired = _touchTriggerQueue.length > 0;
+    if (fired) _touchTriggerQueue.shift();
+    res.json({ triggered: fired });
+});
+
+// Clear the Pi device's conversation history
+app.post('/api/voice/clear', (req, res) => {
+    try {
+        const user = db.getUserByPhone(PI_DEVICE_ID);
+        if (user) db.clearConversationHistory(user.id);
+        console.log('[Voice] Conversation history cleared');
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Voice endpoint — used by voice_loop.py
@@ -2743,24 +3175,166 @@ app.post('/api/voice', async (req, res) => {
     }
 });
 
+// ─── OAuth Setup Routes ───────────────────────────────────────────────────────
+// These routes are only used once to generate refresh tokens.
+// Visit http://localhost:3000/oauth/google to set up Google Calendar.
+// Visit http://localhost:3000/oauth/spotify to set up Spotify.
+
+const GOOGLE_REDIRECT_URI  = `http://localhost:${PORT}/oauth/callback`;
+const SPOTIFY_REDIRECT_URI = `http://localhost:${PORT}/oauth/spotify/callback`;
+
+// Google Calendar — step 1: redirect to Google consent screen
+app.get('/oauth/google', (req, res) => {
+    const clientId     = process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+        return res.send(`
+            <h2>Missing credentials</h2>
+            <p>Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to your <code>.env</code> file first, then restart the server.</p>
+        `);
+    }
+
+    const { google } = require('googleapis');
+    const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, GOOGLE_REDIRECT_URI);
+    const url = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt:      'consent',
+        scope:       ['https://www.googleapis.com/auth/calendar.readonly'],
+    });
+    res.redirect(url);
+});
+
+// Google Calendar — step 2: exchange code for refresh token
+app.get('/oauth/callback', async (req, res) => {
+    const { code, error } = req.query;
+
+    if (error) {
+        return res.send(`<h2>Error</h2><p>${error}</p>`);
+    }
+    if (!code) {
+        return res.send(`<h2>No code received</h2>`);
+    }
+
+    try {
+        const { google } = require('googleapis');
+        const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REDIRECT_URI
+        );
+        const { tokens } = await oauth2Client.getToken(code);
+
+        res.send(`
+            <h2>Google Calendar — Success!</h2>
+            <p>Add this to your <code>.env</code> file and restart the server:</p>
+            <pre style="background:#111;color:#0f0;padding:16px;border-radius:8px;font-size:14px">GOOGLE_REFRESH_TOKEN=${tokens.refresh_token || '(none — re-authorize with prompt=consent)'}</pre>
+            <p>Then restart the server. You can close this tab.</p>
+        `);
+    } catch (err) {
+        res.send(`<h2>Token exchange failed</h2><pre>${err.message}</pre>`);
+    }
+});
+
+// Spotify — step 1: redirect to Spotify consent screen
+app.get('/oauth/spotify', (req, res) => {
+    const clientId = process.env.SPOTIFY_CLIENT_ID;
+
+    if (!clientId) {
+        return res.send(`
+            <h2>Missing credentials</h2>
+            <p>Add <code>SPOTIFY_CLIENT_ID</code> and <code>SPOTIFY_CLIENT_SECRET</code> to your <code>.env</code> file first, then restart the server.</p>
+        `);
+    }
+
+    const scopes = [
+        'user-read-playback-state',
+        'user-modify-playback-state',
+        'user-read-currently-playing',
+    ].join(' ');
+
+    const url = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({
+        client_id:     clientId,
+        response_type: 'code',
+        redirect_uri:  SPOTIFY_REDIRECT_URI,
+        scope:         scopes,
+    });
+
+    res.redirect(url);
+});
+
+// Spotify — step 2: exchange code for refresh token
+app.get('/oauth/spotify/callback', async (req, res) => {
+    const { code, error } = req.query;
+
+    if (error) {
+        return res.send(`<h2>Error</h2><p>${error}</p>`);
+    }
+    if (!code) {
+        return res.send(`<h2>No code received</h2>`);
+    }
+
+    try {
+        const clientId     = process.env.SPOTIFY_CLIENT_ID;
+        const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+        const credentials  = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+
+        const tokenRes = await fetch('https://accounts.spotify.com/api/token', {
+            method:  'POST',
+            headers: {
+                'Authorization': `Basic ${credentials}`,
+                'Content-Type':  'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                grant_type:   'authorization_code',
+                code,
+                redirect_uri: SPOTIFY_REDIRECT_URI,
+            }),
+        });
+
+        const data = await tokenRes.json();
+
+        if (data.error) {
+            return res.send(`<h2>Spotify error</h2><pre>${JSON.stringify(data, null, 2)}</pre>`);
+        }
+
+        res.send(`
+            <h2>Spotify — Success!</h2>
+            <p>Add this to your <code>.env</code> file and restart the server:</p>
+            <pre style="background:#111;color:#0f0;padding:16px;border-radius:8px;font-size:14px">SPOTIFY_REFRESH_TOKEN=${data.refresh_token}</pre>
+            <p>Then restart the server. You can close this tab.</p>
+        `);
+    } catch (err) {
+        res.send(`<h2>Token exchange failed</h2><pre>${err.message}</pre>`);
+    }
+});
+
 // Start server
 app.listen(PORT, async () => {
     console.log(`\n========================================`);
-    console.log(`  MessageAI Server Running!`);
+    console.log(`  frog Server Running`);
     console.log(`========================================`);
-    console.log(`  Open in browser: http://localhost:${PORT}`);
-    console.log(`  Database: messageai.db`);
+    console.log(`  Screen:   http://localhost:${PORT}/screen.html`);
+    console.log(`  Chat:     http://localhost:${PORT}/chat.html`);
+    console.log(`  Settings: http://localhost:${PORT}/settings.html`);
+    console.log(`  Debug:    http://localhost:${PORT}/debug.html`);
     console.log(`========================================\n`);
 
     if (!process.env.ANTHROPIC_API_KEY) {
         console.log('Warning: ANTHROPIC_API_KEY not set in .env file\n');
     }
 
+    // Restore persisted reminders from disk
+    reminders.restoreFromDisk((uid, msg) => {
+        console.log(`[Reminder] Fired (restored) for user ${uid}: ${msg}`);
+        pushPendingSpeech(msg);
+    });
+
     // Start GPS background reader (no-ops gracefully if hardware not present)
     gps.start().catch(err => console.error('[GPS] Start error:', err.message));
 
     // Auto-import DoorDash cookies from env var (set on Railway to skip login)
-    if (process.env.DOORDASH_COOKIES) {
+    if (TWILIO_ENABLED && doordash && process.env.DOORDASH_COOKIES) {
         try {
             const cookies = JSON.parse(process.env.DOORDASH_COOKIES);
             await doordash.importCookies(cookies);

@@ -45,6 +45,8 @@ function formatDateLabel(date) {
 function describeEvent(event) {
     const title = event.summary || 'an event';
 
+    if (!event.start) return title;
+
     // All-day events have only a date, not a dateTime
     if (event.start.date && !event.start.dateTime) {
         return `all day, ${title}`;

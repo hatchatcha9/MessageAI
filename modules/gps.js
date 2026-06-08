@@ -1,5 +1,5 @@
 /**
- * GPS module for PiAI — reads NEO-6M GPS over serial (USB)
+ * GPS module for frog — reads NEO-6M GPS over serial (USB)
  *
  * On Pi, the NEO-6M shows up as /dev/ttyUSB0 or /dev/ttyACM0.
  * On Windows dev machine, GPS is not connected so all calls return null gracefully.
@@ -51,7 +51,7 @@ function nmeaToDecimal(coord, dir) {
 async function reverseGeocode(lat, lon) {
     return new Promise((resolve) => {
         const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&zoom=10`;
-        const req = https.get(url, { headers: { 'User-Agent': 'PiAI/1.0' } }, (res) => {
+        const req = https.get(url, { headers: { 'User-Agent': 'frog/1.0' } }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {

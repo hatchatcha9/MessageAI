@@ -2,373 +2,500 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PiAI Settings</title>
+  <meta name="viewport" content="width=480, initial-scale=1.0">
+  <title>frog — Settings</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
+      width: 480px;
       background: #0a0a0f;
       color: #e2e8f0;
       font-family: 'Segoe UI', system-ui, sans-serif;
       font-size: 14px;
-      min-height: 100vh;
-      padding: 24px 16px 48px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-bottom: 24px;
     }
 
-    /* ── Header ── */
-    header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 28px;
-    }
-    header .logo {
-      font-size: 20px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      color: #6ee7f7;
-    }
-    header .subtitle {
-      font-size: 12px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      color: #64748b;
-    }
-
-    /* ── Section cards ── */
-    .section {
-      background: #10101a;
-      border: 1px solid #1e1e2e;
-      border-radius: 12px;
-      padding: 20px 22px;
-      margin-bottom: 16px;
-    }
-    .section-title {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      color: #6ee7f7;
-      margin-bottom: 18px;
-    }
-
-    /* ── Rows ── */
-    .row {
+    /* ── Sticky header ── */
+    #top-bar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 10px 0;
-      border-bottom: 1px solid #1a1a2e;
-    }
-    .row:last-child { border-bottom: none; padding-bottom: 0; }
-    .row:first-of-type { padding-top: 0; }
-
-    .row-label {
-      font-size: 13px;
-      color: #94a3b8;
-      flex-shrink: 0;
-    }
-    .row-value {
-      font-size: 13px;
-      color: #e2e8f0;
-      text-align: right;
+      height: 48px;
+      padding: 0 14px;
+      background: #0d0d18;
+      border-bottom: 1px solid #1e1e2e;
     }
 
-    /* ── Toggle ── */
-    .toggle-group {
+    #back-btn {
       display: flex;
-      gap: 8px;
+      align-items: center;
+      gap: 6px;
+      color: #6ee7f7;
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 12px 8px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
     }
-    .toggle-btn {
-      background: #1a1a2e;
-      border: 1px solid #2a2a45;
+    #back-btn:active { opacity: 0.6; }
+    #back-btn svg { width: 18px; height: 18px; }
+
+    #top-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #6ee7f7;
+    }
+
+    #save-btn {
+      background: #1a2a35;
+      border: 1px solid #6ee7f7;
       border-radius: 8px;
-      color: #64748b;
+      color: #6ee7f7;
       cursor: pointer;
       font-family: inherit;
       font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 1px;
-      padding: 7px 18px;
+      font-weight: 700;
+      letter-spacing: 2px;
       text-transform: uppercase;
-      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      padding: 12px 18px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s;
     }
-    .toggle-btn.active {
-      background: #1a2a35;
+    #save-btn:active  { background: #0f2030; }
+    #save-btn.saved   { background: #0d2b1a; border-color: #4ade80; color: #4ade80; }
+
+    /* ── Sections ── */
+    .section {
+      margin: 12px 12px 0;
+      background: #10101a;
+      border: 1px solid #1e1e2e;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: #6ee7f7;
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid #1a1a2e;
+    }
+
+    /* ── Voice toggle ── */
+    #voice-btns {
+      display: flex;
+      gap: 0;
+      padding: 14px 16px;
+    }
+
+    .voice-btn {
+      flex: 1;
+      height: 56px;
+      background: #1a1a2e;
+      border: 1px solid #2a2a45;
+      color: #64748b;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .voice-btn:first-child { border-radius: 10px 0 0 10px; }
+    .voice-btn:last-child  { border-radius: 0 10px 10px 0; border-left: none; }
+    .voice-btn.active {
+      background: #0d2b35;
       border-color: #6ee7f7;
       color: #6ee7f7;
     }
+    .voice-btn:active { opacity: 0.7; }
+
+    #voice-name-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 16px 14px;
+      font-size: 12px;
+      color: #4a5568;
+      letter-spacing: 0.5px;
+    }
 
     /* ── Sliders ── */
-    .slider-block {
-      width: 100%;
-      padding: 8px 0 4px;
-    }
-    .slider-header {
+    .slider-row {
       display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      margin-bottom: 10px;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #1a1a2e;
     }
-    .slider-label { font-size: 13px; color: #94a3b8; }
-    .slider-val   { font-size: 13px; font-weight: 600; color: #a78bfa; }
+    .slider-row:last-of-type { border-bottom: none; }
+
+    .slider-label {
+      font-size: 12px;
+      color: #94a3b8;
+      width: 120px;
+      flex-shrink: 0;
+    }
 
     input[type="range"] {
       -webkit-appearance: none;
-      width: 100%;
-      height: 4px;
-      border-radius: 2px;
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
       background: #1e1e2e;
       outline: none;
     }
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
-      width: 16px;
-      height: 16px;
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
       background: #a78bfa;
       cursor: pointer;
-      box-shadow: 0 0 6px rgba(167, 139, 250, 0.5);
+      box-shadow: 0 0 8px rgba(167, 139, 250, 0.5);
     }
     input[type="range"]::-moz-range-thumb {
-      width: 16px;
-      height: 16px;
+      width: 22px;
+      height: 22px;
       border-radius: 50%;
       background: #a78bfa;
       cursor: pointer;
       border: none;
     }
 
-    .rms-bar-wrap {
+    .slider-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: #a78bfa;
+      width: 36px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* ── RMS bar ── */
+    #rms-row {
+      padding: 10px 16px 14px;
+    }
+
+    #rms-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    #rms-header span:first-child {
+      font-size: 11px;
+      color: #4a5568;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+    }
+    #rms-value {
+      font-size: 12px;
+      color: #6ee7f7;
+      font-weight: 600;
+    }
+
+    #rms-track {
       width: 100%;
+      height: 10px;
       background: #1a1a2e;
-      border-radius: 4px;
-      height: 8px;
-      margin-top: 10px;
+      border-radius: 5px;
       overflow: hidden;
     }
-    .rms-bar {
+    #rms-fill {
       height: 100%;
       width: 0%;
       background: linear-gradient(90deg, #6ee7f7, #a78bfa);
-      border-radius: 4px;
+      border-radius: 5px;
       transition: width 0.1s ease;
     }
-    .rms-label {
-      font-size: 11px;
-      color: #4a5568;
-      margin-top: 5px;
-      text-align: right;
+
+    #rms-markers {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    .rms-marker {
+      font-size: 9px;
+      color: #2a2a40;
+      letter-spacing: 0.5px;
+    }
+    .rms-marker.speech-mark { color: #a78bfa; }
+    .rms-marker.silence-mark { color: #6ee7f7; }
+
+    /* ── API status ── */
+    #api-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0;
     }
 
-    /* ── API Status dots ── */
-    .api-list { display: flex; flex-direction: column; gap: 0; }
-    .api-row  {
+    .api-cell {
       display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 10px;
-      padding: 9px 0;
+      gap: 6px;
+      padding: 16px 8px;
+      border-right: 1px solid #1a1a2e;
       border-bottom: 1px solid #1a1a2e;
     }
-    .api-row:last-child { border-bottom: none; }
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-    .dot.green { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
-    .dot.red   { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
-    .dot.grey  { background: #374151; }
-    .api-name  { font-size: 13px; color: #94a3b8; flex: 1; }
-    .api-note  { font-size: 11px; color: #4a5568; }
+    .api-cell:nth-child(3),
+    .api-cell:nth-child(6) { border-right: none; }
+    .api-cell:nth-child(4),
+    .api-cell:nth-child(5),
+    .api-cell:nth-child(6) { border-bottom: none; }
 
-    /* ── About ── */
-    .about-grid {
+    .api-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #374151;
+    }
+    .api-dot.ok  { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
+    .api-dot.err { background: #f87171; box-shadow: 0 0 5px rgba(248, 113, 113, 0.4); }
+
+    .api-label {
+      font-size: 11px;
+      color: #64748b;
+      text-align: center;
+      letter-spacing: 0.5px;
+    }
+    .api-label.ok  { color: #34d399; }
+    .api-label.err { color: #f87171; }
+
+    /* ── About grid ── */
+    #about-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 14px 8px;
+      gap: 0;
     }
-    .about-item-label { font-size: 11px; color: #4a5568; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
-    .about-item-value { font-size: 14px; color: #e2e8f0; font-weight: 600; }
 
-    /* ── Save button ── */
-    #save-btn {
-      display: block;
+    .about-cell {
+      padding: 14px 16px;
+      border-right: 1px solid #1a1a2e;
+      border-bottom: 1px solid #1a1a2e;
+    }
+    .about-cell:nth-child(even) { border-right: none; }
+    .about-cell:nth-child(3),
+    .about-cell:nth-child(4) { border-bottom: none; }
+
+    .about-label {
+      font-size: 10px;
+      color: #374151;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 4px;
+    }
+    .about-value {
+      font-size: 14px;
+      color: #e2e8f0;
+      font-weight: 600;
+    }
+
+    /* ── Nav footer ── */
+    #nav-footer {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin-top: 16px;
+      padding: 0 12px;
+    }
+
+    #debug-link {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      height: 44px;
       width: 100%;
-      padding: 13px;
-      background: #1a1a2e;
-      border: 1px solid #6ee7f7;
+      background: #10101a;
+      border: 1px solid #1e1e2e;
       border-radius: 10px;
-      color: #6ee7f7;
-      cursor: pointer;
-      font-family: inherit;
-      font-size: 13px;
-      font-weight: 700;
+      color: #4a5568;
+      text-decoration: none;
+      font-size: 11px;
       letter-spacing: 2px;
       text-transform: uppercase;
-      transition: background 0.15s;
-      margin-top: 8px;
+      transition: color 0.15s, border-color 0.15s;
     }
-    #save-btn:hover   { background: #1a2a35; }
-    #save-btn:active  { background: #0f2030; }
-    #save-feedback {
-      text-align: center;
-      font-size: 12px;
-      letter-spacing: 1px;
-      height: 18px;
-      margin-top: 8px;
-      color: #34d399;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-    #save-feedback.show { opacity: 1; }
+    #debug-link:active { color: #a78bfa; border-color: #a78bfa; }
   </style>
 </head>
 <body>
 
-<header>
-  <div>
-    <div class="logo">PIAI</div>
-    <div class="subtitle">Settings</div>
-  </div>
-</header>
+<!-- Header -->
+<div id="top-bar">
+  <a id="back-btn" href="/screen.html">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="10,3 5,8 10,13"></polyline>
+    </svg>
+    Screen
+  </a>
+  <div id="top-title">Settings</div>
+  <button id="save-btn">Save</button>
+</div>
 
-<!-- ── Voice ── -->
+<!-- Voice -->
 <div class="section">
   <div class="section-title">Voice</div>
-
-  <div class="row">
-    <span class="row-label">Voice Gender</span>
-    <div class="toggle-group">
-      <button class="toggle-btn" id="btn-female" data-voice="female">Female</button>
-      <button class="toggle-btn" id="btn-male"   data-voice="male">Male</button>
-    </div>
+  <div id="voice-btns">
+    <button class="voice-btn" id="btn-female" data-voice="female">Female</button>
+    <button class="voice-btn" id="btn-male"   data-voice="male">Male</button>
   </div>
+  <div id="voice-name-row">Heart · Kokoro af_heart</div>
 
-  <div class="row">
-    <span class="row-label">Current Voice</span>
-    <span class="row-value" id="voice-name">—</span>
+  <div style="padding: 0 16px 14px; border-top: 1px solid #1a1a2e; padding-top: 14px;">
+    <div style="font-size:10px;color:#4a5568;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;">Home City</div>
+    <input type="text" id="city-input" placeholder="e.g. Draper, Utah"
+      style="width:100%;background:#111120;border:1px solid #1e1e2e;border-radius:8px;color:#e2e8f0;font-family:inherit;font-size:13px;padding:11px 14px;outline:none;transition:border-color 0.15s;"
+      autocomplete="off" spellcheck="false">
+    <div style="font-size:11px;color:#374151;margin-top:6px;">Used for weather when GPS isn't available.</div>
   </div>
 </div>
 
-<!-- ── Microphone ── -->
+<!-- Mic -->
 <div class="section">
   <div class="section-title">Microphone</div>
 
-  <div class="slider-block">
-    <div class="slider-header">
-      <span class="slider-label">Speech Threshold</span>
-      <span class="slider-val" id="speech-val">200</span>
-    </div>
+  <div class="slider-row">
+    <span class="slider-label">Speech Detect</span>
     <input type="range" id="speech-slider" min="50" max="500" value="200" step="5">
+    <span class="slider-val" id="speech-val">200</span>
   </div>
 
-  <div class="slider-block" style="margin-top:14px;">
-    <div class="slider-header">
-      <span class="slider-label">Silence Threshold</span>
-      <span class="slider-val" id="silence-val">80</span>
-    </div>
+  <div class="slider-row">
+    <span class="slider-label">Silence Cutoff</span>
     <input type="range" id="silence-slider" min="20" max="200" value="80" step="2">
+    <span class="slider-val" id="silence-val">80</span>
   </div>
 
-  <div style="margin-top:18px;">
-    <div style="font-size:11px;color:#4a5568;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">
-      Live Ambient RMS
+  <div class="slider-row">
+    <span class="slider-label">Silence Wait</span>
+    <input type="range" id="duration-slider" min="0.5" max="3.0" value="1.5" step="0.1">
+    <span class="slider-val" id="duration-val">1.5s</span>
+  </div>
+
+  <div id="rms-row">
+    <div id="rms-header">
+      <span>Live Ambient RMS</span>
+      <span id="rms-value">— RMS</span>
     </div>
-    <div class="rms-bar-wrap">
-      <div class="rms-bar" id="rms-bar"></div>
+    <div id="rms-track"><div id="rms-fill"></div></div>
+    <div id="rms-markers">
+      <span class="rms-marker">0</span>
+      <span class="rms-marker silence-mark" id="silence-marker">silence</span>
+      <span class="rms-marker speech-mark"  id="speech-marker">speech</span>
+      <span class="rms-marker">500</span>
     </div>
-    <div class="rms-label" id="rms-label">— RMS</div>
   </div>
 </div>
 
-<!-- ── API Status ── -->
+<!-- API Status -->
 <div class="section">
   <div class="section-title">API Status</div>
-  <div class="api-list" id="api-list">
-    <div class="api-row"><div class="dot grey" id="dot-anthropic"></div><span class="api-name">Anthropic</span><span class="api-note" id="note-anthropic">checking…</span></div>
-    <div class="api-row"><div class="dot grey" id="dot-weather"></div><span class="api-name">OpenWeather</span><span class="api-note" id="note-weather">checking…</span></div>
-    <div class="api-row"><div class="dot grey" id="dot-news"></div><span class="api-name">NewsAPI</span><span class="api-note" id="note-news">checking…</span></div>
-    <div class="api-row"><div class="dot grey" id="dot-calendar"></div><span class="api-name">Google Calendar</span><span class="api-note" id="note-calendar">checking…</span></div>
-    <div class="api-row"><div class="dot grey" id="dot-spotify"></div><span class="api-name">Spotify</span><span class="api-note" id="note-spotify">checking…</span></div>
+  <div id="api-grid">
+    <div class="api-cell"><div class="api-dot" id="dot-anthropic"></div><div class="api-label" id="lbl-anthropic">Anthropic</div></div>
+    <div class="api-cell"><div class="api-dot" id="dot-weather"></div><div class="api-label" id="lbl-weather">Weather</div></div>
+    <div class="api-cell"><div class="api-dot" id="dot-news"></div><div class="api-label" id="lbl-news">News</div></div>
+    <div class="api-cell"><div class="api-dot" id="dot-calendar"></div><div class="api-label" id="lbl-calendar">Calendar</div></div>
+    <div class="api-cell"><div class="api-dot" id="dot-spotify"></div><div class="api-label" id="lbl-spotify">Spotify</div></div>
+    <div class="api-cell"><div class="api-dot" id="dot-gps"></div><div class="api-label" id="lbl-gps">GPS</div></div>
   </div>
 </div>
 
-<!-- ── About ── -->
+<!-- About -->
 <div class="section">
   <div class="section-title">About</div>
-  <div class="about-grid">
-    <div>
-      <div class="about-item-label">Platform</div>
-      <div class="about-item-value" id="about-platform">—</div>
-    </div>
-    <div>
-      <div class="about-item-label">Version</div>
-      <div class="about-item-value" id="about-version">—</div>
-    </div>
-    <div>
-      <div class="about-item-label">Uptime</div>
-      <div class="about-item-value" id="about-uptime">—</div>
-    </div>
-    <div>
-      <div class="about-item-label">Node</div>
-      <div class="about-item-value" id="about-node">—</div>
-    </div>
+  <div id="about-grid">
+    <div class="about-cell"><div class="about-label">Platform</div><div class="about-value" id="about-platform">—</div></div>
+    <div class="about-cell"><div class="about-label">Version</div><div class="about-value" id="about-version">1.0.0</div></div>
+    <div class="about-cell"><div class="about-label">Uptime</div><div class="about-value" id="about-uptime">—</div></div>
+    <div class="about-cell"><div class="about-label">Node</div><div class="about-value" id="about-node">—</div></div>
   </div>
 </div>
 
-<button id="save-btn">Save Settings</button>
-<div id="save-feedback">Settings saved.</div>
+<!-- Debug link -->
+<div id="nav-footer">
+  <a id="debug-link" href="/debug.html">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+      <rect x="2" y="3" width="12" height="10" rx="1.5"></rect>
+      <line x1="5" y1="7" x2="11" y2="7"></line>
+      <line x1="5" y1="10" x2="9" y2="10"></line>
+    </svg>
+    Debug Console
+  </a>
+</div>
 
 <script>
-  // ── State ──────────────────────────────────────────────────────────────
   let settings = { voice: 'female', speechThreshold: 200, silenceThreshold: 80, silenceDuration: 1.5 };
-  let rmsPoller = null;
 
-  // ── Helpers ────────────────────────────────────────────────────────────
-  function voiceName(gender) {
-    return gender === 'male' ? 'en-GB Male (espeak)' : 'en-GB Female (espeak)';
-  }
+  // ── Voice names ────────────────────────────────────────────────────────────
+  const VOICE_NAMES = {
+    female: 'Heart · Kokoro af_heart',
+    male:   'Michael · Kokoro am_michael',
+  };
 
-  function formatUptime(seconds) {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
-  }
-
-  // ── Apply settings to UI ───────────────────────────────────────────────
   function applySettings(s) {
     settings = { ...settings, ...s };
 
-    // Voice toggle
-    document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.voice-btn').forEach(b => b.classList.remove('active'));
     const activeBtn = document.querySelector(`[data-voice="${settings.voice}"]`);
     if (activeBtn) activeBtn.classList.add('active');
-    document.getElementById('voice-name').textContent = voiceName(settings.voice);
+    document.getElementById('voice-name-row').textContent = VOICE_NAMES[settings.voice] || settings.voice;
 
-    // Sliders
-    document.getElementById('speech-slider').value = settings.speechThreshold;
+    document.getElementById('speech-slider').value  = settings.speechThreshold;
     document.getElementById('speech-val').textContent = settings.speechThreshold;
-    document.getElementById('silence-slider').value = settings.silenceThreshold;
+    document.getElementById('silence-slider').value  = settings.silenceThreshold;
     document.getElementById('silence-val').textContent = settings.silenceThreshold;
+    document.getElementById('duration-slider').value  = settings.silenceDuration;
+    document.getElementById('duration-val').textContent = settings.silenceDuration + 's';
+    if (settings.homeCity) document.getElementById('city-input').value = settings.homeCity;
+    updateMarkers();
   }
 
-  // ── Load settings from server ──────────────────────────────────────────
+  function updateMarkers() {
+    const silence = settings.silenceThreshold;
+    const speech  = settings.speechThreshold;
+    const pctSilence = Math.min(96, Math.round((silence / 500) * 100));
+    const pctSpeech  = Math.min(96, Math.round((speech  / 500) * 100));
+    document.getElementById('silence-marker').style.marginLeft = `calc(${pctSilence}% - 30px)`;
+    document.getElementById('speech-marker').style.marginLeft  = `calc(${pctSpeech}%  - 30px)`;
+  }
+
+  // ── Load / save ────────────────────────────────────────────────────────────
   async function loadSettings() {
     try {
       const res = await fetch('/api/settings');
       if (res.ok) applySettings(await res.json());
-    } catch (e) { console.warn('Could not load settings:', e); }
+    } catch {}
   }
 
-  // ── Save settings to server ────────────────────────────────────────────
+  const cityInput = document.getElementById('city-input');
+  cityInput.addEventListener('focus', () => cityInput.style.borderColor = '#6ee7f7');
+  cityInput.addEventListener('blur',  () => cityInput.style.borderColor = '#1e1e2e');
+  cityInput.addEventListener('change', e => {
+    settings.homeCity = e.target.value.trim();
+  });
+
   async function saveSettings() {
+    const cityVal = document.getElementById('city-input').value.trim();
+    if (cityVal) settings.homeCity = cityVal;
+    const btn = document.getElementById('save-btn');
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
@@ -376,114 +503,112 @@
         body: JSON.stringify(settings),
       });
       if (res.ok) {
-        const fb = document.getElementById('save-feedback');
-        fb.classList.add('show');
-        setTimeout(() => fb.classList.remove('show'), 2000);
+        btn.textContent = 'Saved ✓';
+        btn.classList.add('saved');
+        setTimeout(() => { btn.textContent = 'Save'; btn.classList.remove('saved'); }, 2000);
       }
-    } catch (e) { console.warn('Could not save settings:', e); }
+    } catch {}
   }
 
-  // ── Voice toggle ───────────────────────────────────────────────────────
-  document.querySelectorAll('.toggle-btn').forEach(btn => {
+  // ── Interactions ───────────────────────────────────────────────────────────
+  document.querySelectorAll('.voice-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       settings.voice = btn.dataset.voice;
       applySettings(settings);
     });
   });
 
-  // ── Sliders ────────────────────────────────────────────────────────────
   document.getElementById('speech-slider').addEventListener('input', e => {
     settings.speechThreshold = parseInt(e.target.value);
     document.getElementById('speech-val').textContent = settings.speechThreshold;
+    updateMarkers();
   });
 
   document.getElementById('silence-slider').addEventListener('input', e => {
     settings.silenceThreshold = parseInt(e.target.value);
     document.getElementById('silence-val').textContent = settings.silenceThreshold;
+    updateMarkers();
   });
 
-  // ── Save button ────────────────────────────────────────────────────────
+  document.getElementById('duration-slider').addEventListener('input', e => {
+    settings.silenceDuration = parseFloat(e.target.value);
+    document.getElementById('duration-val').textContent = settings.silenceDuration.toFixed(1) + 's';
+  });
+
   document.getElementById('save-btn').addEventListener('click', saveSettings);
 
-  // ── RMS polling ────────────────────────────────────────────────────────
+  // ── RMS polling ────────────────────────────────────────────────────────────
   async function pollRms() {
     try {
       const res = await fetch('/api/voice/status');
       if (!res.ok) return;
       const data = await res.json();
-      const rms  = data.rms ?? null;
-      const bar  = document.getElementById('rms-bar');
-      const lbl  = document.getElementById('rms-label');
+      const rms = data.rms ?? null;
       if (rms === null) {
-        bar.style.width = '0%';
-        lbl.textContent = '— RMS';
+        document.getElementById('rms-fill').style.width = '0%';
+        document.getElementById('rms-value').textContent = '— RMS';
       } else {
-        const speechThr = settings.speechThreshold;
-        const pct = Math.min(100, Math.round((rms / (speechThr * 1.5)) * 100));
-        bar.style.width = pct + '%';
-        lbl.textContent = `${Math.round(rms)} RMS`;
+        const pct = Math.min(100, Math.round((rms / 500) * 100));
+        document.getElementById('rms-fill').style.width = pct + '%';
+        document.getElementById('rms-value').textContent = `${Math.round(rms)} RMS`;
       }
-    } catch (e) { /* silently ignore */ }
+    } catch {}
   }
-
-  rmsPoller = setInterval(pollRms, 300);
+  setInterval(pollRms, 300);
   pollRms();
 
-  // ── API Status ─────────────────────────────────────────────────────────
+  // ── API Status ─────────────────────────────────────────────────────────────
   async function loadApiStatus() {
-    const apis = [
-      { key: 'anthropic', label: 'Anthropic' },
-      { key: 'weather',   label: 'OpenWeather' },
-      { key: 'news',      label: 'NewsAPI' },
-      { key: 'calendar',  label: 'Google Calendar' },
-      { key: 'spotify',   label: 'Spotify' },
-    ];
-
     try {
       const res  = await fetch('/api/health/full');
-      const data = res.ok ? await res.json() : {};
+      const d    = res.ok ? await res.json() : {};
 
-      for (const { key } of apis) {
-        const dot  = document.getElementById(`dot-${key}`);
-        const note = document.getElementById(`note-${key}`);
-        const val  = data[key];
-        if (val === undefined || val === null) {
-          dot.className  = 'dot grey';
-          note.textContent = 'unknown';
-        } else if (val === true || val === 'ok' || (typeof val === 'string' && val.startsWith('set'))) {
-          dot.className  = 'dot green';
-          note.textContent = 'connected';
-        } else {
-          dot.className  = 'dot red';
-          note.textContent = typeof val === 'string' ? val : 'not configured';
-        }
+      const apis = [
+        { key: 'anthropic', ok: d.anthropic },
+        { key: 'weather',   ok: d.weather   },
+        { key: 'news',      ok: d.news      },
+        { key: 'calendar',  ok: d.calendar  },
+        { key: 'spotify',   ok: d.spotify   },
+        { key: 'gps',       ok: d.gps?.fix  },
+      ];
+
+      for (const { key, ok } of apis) {
+        const dot = document.getElementById(`dot-${key}`);
+        const lbl = document.getElementById(`lbl-${key}`);
+        dot.className = 'api-dot ' + (ok ? 'ok' : 'err');
+        lbl.className = 'api-label ' + (ok ? 'ok' : 'err');
       }
-    } catch (e) {
-      for (const { key } of apis) {
-        document.getElementById(`dot-${key}`).className = 'dot grey';
-        document.getElementById(`note-${key}`).textContent = 'unreachable';
-      }
-    }
+
+      // About
+      document.getElementById('about-platform').textContent =
+        d.platform === 'linux' ? 'Raspberry Pi' : (d.platform || '—');
+      document.getElementById('about-node').textContent = d.nodeVersion || '—';
+      _serverUptime = d.uptime || 0;
+      _uptimeBase = Date.now();
+    } catch {}
   }
 
-  // ── About ──────────────────────────────────────────────────────────────
-  async function loadAbout() {
-    try {
-      const res  = await fetch('/api/status');
-      const data = res.ok ? await res.json() : {};
-      document.getElementById('about-platform').textContent = data.platform || navigator.platform || '—';
-      document.getElementById('about-version').textContent  = data.version  || '1.0.0';
-      document.getElementById('about-uptime').textContent   = data.uptime   ? formatUptime(data.uptime) : '—';
-      document.getElementById('about-node').textContent     = data.node     || '—';
-    } catch (e) {
-      document.getElementById('about-uptime').textContent = '—';
-    }
+  // ── Uptime ticker ──────────────────────────────────────────────────────────
+  let _serverUptime = 0;
+  let _uptimeBase = Date.now();
+
+  function formatUptime(secs) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
   }
 
-  // ── Boot ───────────────────────────────────────────────────────────────
+  setInterval(() => {
+    const elapsed = Math.floor((Date.now() - _uptimeBase) / 1000);
+    document.getElementById('about-uptime').textContent = formatUptime(_serverUptime + elapsed);
+  }, 1000);
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
   loadSettings();
   loadApiStatus();
-  loadAbout();
 </script>
 </body>
 </html>

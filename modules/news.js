@@ -9,7 +9,7 @@ async function getHeadlines(category = 'general') {
 
     return new Promise((resolve) => {
         const url = `https://newsapi.org/v2/top-headlines?country=us&category=${category}&pageSize=5&apiKey=${NEWS_API_KEY}`;
-        const options = { headers: { 'User-Agent': 'PiAI/1.0' } };
+        const options = { headers: { 'User-Agent': 'frog/1.0' } };
 
         https.get(url, options, (res) => {
             let data = '';

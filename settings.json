@@ -1,0 +1,7 @@
+{
+  "voice": "female",
+  "speechThreshold": 300,
+  "silenceThreshold": 80,
+  "silenceDuration": 2.0,
+  "homeCity": "Draper, Utah"
+}

@@ -159,7 +159,7 @@ node server.js
 
 # Start voice loop (new terminal)
 python voice/voice_loop.py              # female voice (Heart)
-PIAI_VOICE=male python voice/voice_loop.py  # male voice (Michael)
+FROG_VOICE=male python voice/voice_loop.py  # male voice (Michael)
 
 # Open screen UI
 # Browser: http://localhost:3000/screen.html

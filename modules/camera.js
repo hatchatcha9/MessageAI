@@ -1,5 +1,5 @@
 /**
- * Camera module for PiAI — Pi Camera 3 via libcamera-still + Claude Vision
+ * Camera module for frog — Pi Camera 3 via libcamera-still + Claude Vision
  *
  * On Pi: captures a JPEG with libcamera-still, sends to Claude Vision API.
  * On Windows dev machine: returns a placeholder message gracefully.
@@ -19,7 +19,7 @@ const IS_PI = process.platform === 'linux' && fs.existsSync('/dev/video0') ||
               fs.existsSync('/proc/device-tree/model') &&
               fs.readFileSync('/proc/device-tree/model', 'utf8').includes('Raspberry');
 
-const CAPTURE_PATH = path.join(os.tmpdir(), 'piai_capture.jpg');
+const CAPTURE_PATH = path.join(os.tmpdir(), 'frog_capture.jpg');
 
 // ---------- Capture ----------
 

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>frog — Preview</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #050508;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #fff;
+    }
+
+    .label {
+      font-size: 11px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #333;
+    }
+
+    /* Device frame around the 480×320 screen */
+    .device {
+      background: #0d0d12;
+      border: 2px solid #1a1a2a;
+      border-radius: 12px;
+      box-shadow: 0 0 60px rgba(110, 231, 247, 0.06), 0 0 0 1px #111;
+      overflow: hidden;
+      width: 480px;
+      height: 320px;
+      flex-shrink: 0;
+    }
+
+    .device iframe {
+      width: 480px;
+      height: 320px;
+      border: none;
+      display: block;
+    }
+
+    /* Demo controls */
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .ctrl-label {
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: #2a2a3a;
+      margin-right: 4px;
+    }
+
+    .btn {
+      padding: 8px 18px;
+      border-radius: 8px;
+      border: 1px solid #1a1a2a;
+      background: #0d0d18;
+      color: #444;
+      font-size: 12px;
+      letter-spacing: 1px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn:hover { background: #111120; border-color: #2a2a3a; }
+    .btn.idle      { border-color: #1e3a4a; color: #4a6a7a; }
+    .btn.listening { border-color: #1e4a4a; color: #6ee7f7; }
+    .btn.thinking  { border-color: #2a1e4a; color: #a78bfa; }
+    .btn.speaking  { border-color: #1e3a2a; color: #4ade80; }
+
+    .btn.idle:hover      { background: #0d1f2a; }
+    .btn.listening:hover { background: #0d2b30; }
+    .btn.thinking:hover  { background: #1a1230; }
+    .btn.speaking:hover  { background: #0d2b1a; }
+
+    .dims {
+      font-size: 10px;
+      color: #222;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="label">frog · display preview</div>
+
+  <div class="device">
+    <iframe id="screen" src="/screen.html?demo=1"></iframe>
+  </div>
+
+  <div class="dims">480 × 320 px — GeeekPi 3.5" touchscreen</div>
+
+  <div class="controls">
+    <span class="ctrl-label">Demo</span>
+    <button class="btn idle"      onclick="send('idle')">Idle</button>
+    <button class="btn listening" onclick="send('listening')">Listening</button>
+    <button class="btn thinking"  onclick="send('thinking')">Thinking</button>
+    <button class="btn speaking"  onclick="send('speaking')">Speaking</button>
+  </div>
+
+  <script>
+    const DEMO_TEXTS = {
+      thinking:  { userText: "What's the weather like in Draper?" },
+      speaking:  { userText: "What's the weather like in Draper?",
+                   aiText:   "It's currently 72 degrees in Draper with clear skies. Great day to be outside." },
+      idle:      { aiText:   "It's currently 72 degrees in Draper with clear skies." },
+    };
+
+    function send(state) {
+      const frame = document.getElementById('screen');
+      frame.contentWindow.postMessage({ type: 'demo-state', state, ...(DEMO_TEXTS[state] || {}) }, '*');
+    }
+  </script>
+</body>
+</html>

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PiAI Debug</title>
+  <title>frog Debug</title>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -288,12 +288,30 @@
 <!-- Header -->
 <div id="header">
   <div id="header-left">
-    <div id="logo">PiAI <span>/ debug</span></div>
+    <div id="logo">frog <span>/ debug</span></div>
     <div id="sse-dot" title="Log stream status"></div>
     <div id="sse-label">stream</div>
   </div>
-  <a href="/screen.html" style="font-size:11px;color:#333;text-decoration:none;letter-spacing:1px;"
-     onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#333'">screen</a>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <a href="/chat.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Chat">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H2a1 1 0 00-1 1v8a1 1 0 001 1h3l3 2 3-2h3a1 1 0 001-1V3a1 1 0 00-1-1z"></path>
+      </svg>
+    </a>
+    <a href="/settings.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Settings">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="8" r="2.5"></circle>
+        <path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7"></path>
+      </svg>
+    </a>
+    <a href="/screen.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Screen">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="1" y="2" width="14" height="10" rx="1.5"></rect>
+        <line x1="5" y1="14" x2="11" y2="14"></line>
+        <line x1="8" y1="12" x2="8" y2="14"></line>
+      </svg>
+    </a>
+  </div>
 </div>
 
 <!-- Main -->
@@ -328,6 +346,14 @@
       </div>
       <div class="health-row" id="row-news">
         <span class="health-name">News API</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-row" id="row-calendar">
+        <span class="health-name">Google Calendar</span>
+        <span class="health-badge badge-info">--</span>
+      </div>
+      <div class="health-row" id="row-spotify">
+        <span class="health-name">Spotify</span>
         <span class="health-badge badge-info">--</span>
       </div>
       <div class="health-section-title">Hardware</div>
@@ -482,6 +508,8 @@
       setRowBadge('row-anthropic', badge(d.anthropic, 'OK', 'MISSING'));
       setRowBadge('row-weather',   badge(d.weather,   'OK', 'MISSING'));
       setRowBadge('row-news',      badge(d.news,      'OK', 'MISSING'));
+      setRowBadge('row-calendar',  badge(d.calendar,  'OK', 'NOT SET'));
+      setRowBadge('row-spotify',   badge(d.spotify,   'OK', 'NOT SET'));
 
       // GPS
       const gpsLabel = d.gps.fix

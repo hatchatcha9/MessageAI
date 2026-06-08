@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=480, initial-scale=1.0">
-  <title>PiAI</title>
+  <title>frog</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -79,11 +79,11 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 8px;
+      gap: 4px;
     }
 
     #clock {
-      font-size: 48px;
+      font-size: 44px;
       font-weight: 200;
       color: #e8e8e8;
       letter-spacing: 2px;
@@ -92,39 +92,81 @@
 
     #date {
       font-size: 14px;
-      color: #555;
+      color: #777;
       letter-spacing: 1px;
     }
 
     #wake-hint {
-      margin-top: 12px;
+      margin-top: 2px;
       font-size: 12px;
-      color: #333;
+      color: #555;
       letter-spacing: 1px;
+    }
+
+    /* ── Tap-to-speak button ── */
+    #tap-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: #0d1f2a;
+      border: 2px solid #1e3a4a;
+      cursor: pointer;
+      margin-top: 6px;
+      transition: background 0.15s, border-color 0.15s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #tap-btn:active {
+      background: #0d3040;
+      border-color: #6ee7f7;
+      transform: scale(0.93);
+    }
+    #tap-btn svg { width: 28px; height: 28px; color: #4a8a9a; }
+    #tap-btn.triggered svg { color: #6ee7f7; }
+
+    #last-response {
+      margin-top: 4px;
+      font-size: 12px;
+      color: #6b7280;
+      font-style: italic;
+      max-width: 420px;
+      text-align: center;
+      line-height: 1.4;
+      /* Collapsed by default — takes no layout space until text appears */
+      max-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transition: opacity 1.5s ease, max-height 0.3s ease;
+    }
+    #last-response.visible {
+      opacity: 1;
+      max-height: 44px;
     }
 
     /* ── Weather widget (idle) ── */
     #weather-widget {
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-top: 10px;
-      padding: 6px 14px;
+      gap: 8px;
+      margin-top: 4px;
+      padding: 4px 12px;
       background: #111118;
       border: 1px solid #1e1e2e;
       border-radius: 12px;
-      min-width: 180px;
+      min-width: 160px;
       justify-content: center;
     }
 
     #weather-temp {
-      font-size: 22px;
+      font-size: 20px;
       font-weight: 300;
       color: #e8e8e8;
     }
 
     #weather-icon {
-      font-size: 22px;
+      font-size: 20px;
       line-height: 1;
     }
 
@@ -135,14 +177,14 @@
     }
 
     #weather-desc {
-      font-size: 11px;
-      color: #666;
+      font-size: 12px;
+      color: #999;
       text-transform: capitalize;
     }
 
     #weather-city {
-      font-size: 10px;
-      color: #444;
+      font-size: 11px;
+      color: #666;
     }
 
     /* ── Listening state ── */
@@ -164,22 +206,9 @@
       width: 5px;
       border-radius: 3px;
       background: #6ee7f7;
-      animation: wave 1s ease-in-out infinite;
-    }
-
-    .wave-bar:nth-child(1)  { animation-delay: 0.0s; }
-    .wave-bar:nth-child(2)  { animation-delay: 0.1s; }
-    .wave-bar:nth-child(3)  { animation-delay: 0.2s; }
-    .wave-bar:nth-child(4)  { animation-delay: 0.3s; }
-    .wave-bar:nth-child(5)  { animation-delay: 0.4s; }
-    .wave-bar:nth-child(6)  { animation-delay: 0.3s; }
-    .wave-bar:nth-child(7)  { animation-delay: 0.2s; }
-    .wave-bar:nth-child(8)  { animation-delay: 0.1s; }
-    .wave-bar:nth-child(9)  { animation-delay: 0.0s; }
-
-    @keyframes wave {
-      0%, 100% { height: 10px; opacity: 0.4; }
-      50%       { height: 44px; opacity: 1.0; }
+      height: 8px;
+      transition: height 0.08s ease-out, opacity 0.08s ease-out;
+      opacity: 0.4;
     }
 
     #listen-label {
@@ -229,7 +258,7 @@
 
     #user-said {
       font-size: 12px;
-      color: #444;
+      color: #666;
       font-style: italic;
       max-width: 440px;
       overflow: hidden;
@@ -280,8 +309,31 @@
 
     #footer-clock {
       font-size: 12px;
-      color: #333;
+      color: #666;
+      min-width: 54px;
     }
+
+    #footer-nav {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .footer-nav-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 50px;
+      height: 50px;
+      color: #4a4a6a;
+      text-decoration: none;
+      border-radius: 10px;
+      border: 1px solid #1a1a2e;
+      transition: color 0.15s, background 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .footer-nav-btn:active { color: #6ee7f7; background: #1a1a2e; border-color: #6ee7f7; }
+    .footer-nav-btn svg { width: 20px; height: 20px; }
 
     #connection-dot {
       width: 6px;
@@ -292,6 +344,50 @@
     }
     #connection-dot.connected { background: #22c55e; }
     #connection-dot.error     { background: #ef4444; }
+
+    /* ── Battery indicator ── */
+    #battery-indicator {
+      display: none;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: #555;
+    }
+
+    #battery-bar-wrap {
+      position: relative;
+      width: 22px;
+      height: 11px;
+      border: 1.5px solid #444;
+      border-radius: 2px;
+    }
+    #battery-bar-wrap::after {
+      content: '';
+      position: absolute;
+      right: -4px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 2.5px;
+      height: 5px;
+      background: #444;
+      border-radius: 0 1px 1px 0;
+    }
+
+    #battery-fill {
+      height: 100%;
+      border-radius: 1px;
+      background: #22c55e;
+      transition: width 0.5s ease, background 0.5s ease;
+    }
+    #battery-fill.low      { background: #ef4444; }
+    #battery-fill.medium   { background: #f59e0b; }
+    #battery-fill.charging { background: #6ee7f7; }
+
+    #battery-pct {
+      font-size: 11px;
+      color: #777;
+      min-width: 26px;
+    }
 
     /* ── State colours ── */
     body.listening #status-dot  { background: #6ee7f7; box-shadow: 0 0 6px #6ee7f7; }
@@ -309,7 +405,13 @@
 
   <!-- Header -->
   <div id="header">
-    <div id="logo">PiAI</div>
+    <div id="logo">frog</div>
+    <div id="battery-indicator">
+      <div id="battery-bar-wrap">
+        <div id="battery-fill" style="width:0%"></div>
+      </div>
+      <span id="battery-pct"></span>
+    </div>
     <div id="status-badge">
       <div id="status-dot"></div>
       <span id="status-text">Idle</span>
@@ -331,7 +433,8 @@
           <div id="weather-city">--</div>
         </div>
       </div>
-      <div id="wake-hint">Say "Hey Pi" to start</div>
+      <div id="wake-hint">Say "Hey Jarvis" or tap mic to speak</div>
+      <div id="last-response"></div>
     </div>
 
     <!-- Listening -->
@@ -372,7 +475,33 @@
   <!-- Footer -->
   <div id="footer">
     <div id="footer-clock">--:-- --</div>
-    <a href="/debug.html" target="_blank" style="font-size:10px;color:#333;text-decoration:none;letter-spacing:1px;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#333'">debug</a>
+    <div id="footer-nav">
+      <!-- Mic / Stop button — always visible, changes function by state -->
+      <div id="tap-btn" class="footer-nav-btn" title="Tap to speak">
+        <svg id="tap-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+          <line x1="8" y1="23" x2="16" y2="23"></line>
+        </svg>
+        <svg id="stop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+          <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"></rect>
+        </svg>
+      </div>
+      <!-- Chat -->
+      <a class="footer-nav-btn" href="/chat.html" title="Chat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H2a1 1 0 00-1 1v8a1 1 0 001 1h3l3 2 3-2h3a1 1 0 001-1V3a1 1 0 00-1-1z"></path>
+        </svg>
+      </a>
+      <!-- Settings -->
+      <a class="footer-nav-btn" href="/settings.html" title="Settings">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="2.5"></circle>
+          <path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7"></path>
+        </svg>
+      </a>
+    </div>
     <div id="connection-dot" title="Server connection"></div>
   </div>
 
@@ -408,6 +537,22 @@
     speaking:  { view: 'speak-view',  label: 'Speaking',   class: 'speaking'  },
   };
 
+  let _lastResponseText = '';
+  let _lastResponseTimer = null;
+
+  function showLastResponse(text) {
+    const el = document.getElementById('last-response');
+    if (!text) return;
+    _lastResponseText = text;
+    el.textContent = text;
+    el.classList.add('visible');
+    if (_lastResponseTimer) clearTimeout(_lastResponseTimer);
+    // Fade out after 30s
+    _lastResponseTimer = setTimeout(() => {
+      el.classList.remove('visible');
+    }, 30000);
+  }
+
   function setState(state, data = {}) {
     const cfg = stateMap[state] || stateMap.idle;
 
@@ -428,6 +573,10 @@
       document.getElementById('user-said').textContent = data.userText ? `"${data.userText}"` : '';
       document.getElementById('response-text').textContent = data.aiText || '';
     }
+    // When returning to idle, show the last response faded below the clock
+    if (state === 'idle' && data.aiText) {
+      showLastResponse(data.aiText);
+    }
   }
 
   setState('idle');
@@ -445,6 +594,7 @@
     es.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
+        if (msg.state === 'rms') { updateWaveform(msg.rms); return; }
         setState(msg.state, msg);
       } catch {}
     };
@@ -457,6 +607,31 @@
   }
 
   connectSSE();
+
+  // ── Live waveform driven by real mic RMS ──
+  const _waveBars = Array.from(document.querySelectorAll('.wave-bar'));
+  // Per-bar random offsets so they don't all move identically
+  const _barOffsets = _waveBars.map(() => (Math.random() - 0.5) * 0.3);
+
+  function updateWaveform(rms) {
+    if (_currentState !== 'listening') return;
+    // Scale: ambient (~20) → 8px, loud speech (~1000) → 44px
+    const base = Math.max(8, Math.min(44, 8 + (rms / 900) * 36));
+    const baseOp = Math.max(0.3, Math.min(1.0, rms / 500));
+    _waveBars.forEach((bar, i) => {
+      const scale = 1 + _barOffsets[i] * (rms > 100 ? 1 : 0.2);
+      const h = Math.max(4, Math.min(48, base * scale));
+      bar.style.height = h + 'px';
+      bar.style.opacity = baseOp;
+    });
+  }
+
+  // ── Demo mode (preview.html sends postMessage) ──
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'demo-state') {
+      setState(e.data.state, e.data);
+    }
+  });
 
   // ── Weather widget ──
   const WEATHER_ICONS = {
@@ -475,24 +650,96 @@
     return '🌡';
   }
 
-  async function fetchWeather() {
+  async function fetchStatus() {
     try {
       const res = await fetch('/api/status');
       if (!res.ok) return;
       const data = await res.json();
-      if (!data.weather) return;
 
-      const w = data.weather;
-      document.getElementById('weather-temp').textContent = `${w.temp}°`;
-      document.getElementById('weather-desc').textContent = w.description;
-      document.getElementById('weather-city').textContent = w.city;
-      document.getElementById('weather-icon').textContent = weatherIcon(w.description);
-      document.getElementById('weather-widget').style.display = 'flex';
+      // Weather
+      if (data.weather) {
+        const w = data.weather;
+        document.getElementById('weather-temp').textContent = `${w.temp}°`;
+        document.getElementById('weather-desc').textContent = w.description;
+        document.getElementById('weather-city').textContent = w.city;
+        document.getElementById('weather-icon').textContent = weatherIcon(w.description);
+        document.getElementById('weather-widget').style.display = 'flex';
+      }
+
+      // Battery
+      if (data.battery) {
+        const b   = data.battery;
+        const pct = Math.max(0, Math.min(100, b.percent));
+        const fill = document.getElementById('battery-fill');
+        fill.style.width = `${pct}%`;
+        fill.className   = b.charging ? 'charging'
+                         : pct <= 15  ? 'low'
+                         : pct <= 40  ? 'medium'
+                         : '';
+        document.getElementById('battery-pct').textContent = `${pct}%`;
+        document.getElementById('battery-indicator').style.display = 'flex';
+      }
     } catch (e) {}
   }
 
-  fetchWeather();
-  setInterval(fetchWeather, 5 * 60 * 1000); // refresh every 5 min
+  fetchStatus();
+  setInterval(fetchStatus, 30 * 1000); // refresh every 30s
+
+  // ── Mic/Stop button ──
+  // In idle/listening/thinking: acts as mic (triggers voice).
+  // In speaking: acts as stop (cuts off TTS).
+  let _currentState = 'idle';
+  let _tapFromTouch = false;
+
+  function _updateTapBtn(state) {
+    _currentState = state;
+    const tapIcon  = document.getElementById('tap-icon');
+    const stopIcon = document.getElementById('stop-icon');
+    const btn      = document.getElementById('tap-btn');
+    if (state === 'speaking' || state === 'listening') {
+      tapIcon.style.display  = 'none';
+      stopIcon.style.display = '';
+      btn.style.color = '#ef4444';
+      btn.title = 'Tap to stop';
+    } else {
+      tapIcon.style.display  = '';
+      stopIcon.style.display = 'none';
+      btn.style.color = '';
+      btn.title = 'Tap to speak';
+    }
+  }
+
+  // Hook into setState to keep button in sync
+  const _origSetState = setState;
+  setState = function(state, data) {
+    _origSetState(state, data);
+    _updateTapBtn(state);
+  };
+
+  async function _handleTap() {
+    const btn = document.getElementById('tap-btn');
+    btn.classList.add('triggered');
+    try {
+      if (_currentState === 'speaking' || _currentState === 'listening') {
+        await fetch('/api/voice/stop', { method: 'POST' });
+      } else {
+        await fetch('/api/voice/trigger', { method: 'POST' });
+      }
+    } catch {}
+    setTimeout(() => btn.classList.remove('triggered'), 400);
+  }
+
+  document.getElementById('tap-btn').addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    _tapFromTouch = true;
+    _handleTap();
+  }, { passive: false });
+  document.getElementById('tap-btn').addEventListener('touchmove',   () => { _tapFromTouch = false; }, { passive: true });
+  document.getElementById('tap-btn').addEventListener('touchcancel', () => { _tapFromTouch = false; }, { passive: true });
+  document.getElementById('tap-btn').addEventListener('click', () => {
+    if (_tapFromTouch) { _tapFromTouch = false; return; }
+    _handleTap();
+  });
 </script>
 </body>
 </html>
