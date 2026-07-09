@@ -7,10 +7,11 @@ sounddevice>=0.4.6          # Mic input / audio playback
 numpy>=1.24.0               # Audio processing
 requests>=2.31.0            # HTTP to Node.js server
 
-# TTS — Kokoro neural voices (male: am_michael, female: af_heart)
+# TTS — Kokoro neural voices (Windows only; Pi uses piper binary)
 # Switch voice by setting env var: FROG_VOICE=male or FROG_VOICE=female
-kokoro>=0.9.4               # Neural TTS, works on Windows & Pi
-soundfile>=0.12.1           # Audio file I/O for Kokoro
+# Install manually on Windows: pip install kokoro soundfile
+# kokoro>=0.9.4
+# soundfile>=0.12.1
 
 # Wake word (optional, used on Pi in production mode)
 # openwakeword>=0.6.0       # Uncomment when deploying to Pi
