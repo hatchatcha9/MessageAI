@@ -77,12 +77,12 @@ def _load_settings():
 _settings = _load_settings()
 
 SAMPLE_RATE        = 16000
-CHANNELS           = 1
+CHANNELS           = 2  # USB audio devices are typically stereo; mixed to mono before processing
 SPEECH_THRESHOLD   = _settings["speechThreshold"]
 SILENCE_THRESHOLD  = _settings["silenceThreshold"]
 SILENCE_DURATION   = _settings["silenceDuration"]
-MAX_RECORD_SECONDS = 30
-WHISPER_MODEL      = "tiny.en" if IS_PI else "base.en"   # faster model on Pi
+MAX_RECORD_SECONDS = 8
+WHISPER_MODEL      = os.getenv("WHISPER_MODEL_PATH", "tiny.en") if IS_PI else "base.en"   # on Pi, env var can point to /dev/shm cache
 DEV_MODE           = os.getenv("DEV_MODE", "false").lower() == "true"
 
 # Sanity check: if inverted, voice detection is broken (silence > speech doesn't make sense)
@@ -108,8 +108,8 @@ def _find_audio_devices():
     input_dev  = None
     output_dev = None
 
-    priority_input  = ['yeti', 'c-media', 'sabrent', 'usb', 'wm8960', 'seeed', 'respeaker', 'microphone', 'mic']
-    priority_output = ['yeti', 'c-media', 'sabrent', 'wm8960', 'seeed', 'respeaker', 'realtek']
+    priority_input  = ['yeti', 'c-media', 'sabrent', 'usb', 'pnp', 'wm8960', 'seeed', 'respeaker', 'microphone', 'mic']
+    priority_output = ['yeti', 'c-media', 'sabrent', 'usb', 'pnp', 'wm8960', 'seeed', 'respeaker', 'realtek']
 
     def score(name, priorities):
         name = name.lower()
@@ -138,7 +138,7 @@ if INPUT_DEVICE is not None:
     sd.default.device[0] = INPUT_DEVICE
     print(f"[frog] Input device:  {sd.query_devices(INPUT_DEVICE)['name']}")
 
-# Output: find Microsoft Sound Mapper which always routes to Windows default output
+# Output: on Windows use Sound Mapper; on Pi use the detected USB device
 _sound_mapper = next(
     (i for i, d in enumerate(sd.query_devices())
      if 'microsoft sound mapper' in d['name'].lower() and d['max_output_channels'] > 0),
@@ -146,11 +146,38 @@ _sound_mapper = next(
 )
 if _sound_mapper is not None:
     sd.default.device[1] = _sound_mapper
+elif OUTPUT_DEVICE is not None:
+    sd.default.device[1] = OUTPUT_DEVICE
 print(f"[frog] Output device: {sd.query_devices(sd.default.device[1])['name']}")
 
+# ---------- Vosk live transcription (optional, Pi only) ----------
+_vosk_rec = None
+_vosk_last_partial = ''  # last partial seen — readable from main loop after record_until_silence returns
+
+def _init_vosk():
+    global _vosk_rec
+    if _vosk_rec is not None:
+        return _vosk_rec
+    model_path = os.path.expanduser('~/vosk-models/small-en')
+    if not IS_PI or not os.path.exists(model_path):
+        return None
+    try:
+        import os as _os
+        from vosk import Model, KaldiRecognizer, SetLogLevel
+        SetLogLevel(-1)  # suppress Vosk's verbose LOG output
+        _vosk_rec = KaldiRecognizer(Model(model_path), SAMPLE_RATE)
+        print("[frog] Vosk live transcription ready.")
+    except Exception as e:
+        print(f"[frog] Vosk unavailable: {e}")
+        _vosk_rec = None
+    return _vosk_rec
+
 print("[frog] Loading Whisper model...")
-whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=4, num_workers=1)
 print(f"[frog] Whisper '{WHISPER_MODEL}' ready.")
+
+# Init Vosk eagerly at startup so the first recording isn't delayed
+_init_vosk()
 
 if IS_PI:
     import subprocess
@@ -209,7 +236,7 @@ def speak(text):
     sd.stop()  # cut off any audio still playing before starting new speech
     try:
         if IS_PI:
-            # Use piper TTS binary (Pi — no kokoro Python 3.13 support)
+            # Use piper TTS binary then play with aplay (bypasses sounddevice resampling issues)
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                 wav_path = f.name
             subprocess.run(
@@ -217,10 +244,31 @@ def speak(text):
                 input=text.encode(), check=True, capture_output=True
             )
             with wave.open(wav_path, 'rb') as wf:
-                sample_rate = wf.getframerate()
+                src_rate = wf.getframerate()
                 data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
             os.unlink(wav_path)
-            audio = data.astype(np.float32) / 32768.0
+            # Resample mono→48kHz stereo (device native rate) and write temp WAV for aplay
+            n_out = int(len(data) * 48000 / src_rate)
+            resampled = np.interp(np.linspace(0, len(data) - 1, n_out), np.arange(len(data)), data).astype(np.int16)
+            stereo = np.column_stack([resampled, resampled])
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                play_path = f.name
+            with wave.open(play_path, 'wb') as wf:
+                wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(48000)
+                wf.writeframes(stereo.tobytes())
+            dur = len(resampled) / 48000
+            print(f"[frog] Playing {dur:.1f}s on 'USB PnP Audio Device: Audio (hw:2,0)'")
+            _stop_event.clear()
+            proc = subprocess.Popen(['aplay', '-D', 'hw:Device,0', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            while proc.poll() is None:
+                if check_stop_signal():
+                    proc.terminate()
+                    print("[frog] Stopped by user.")
+                    break
+                time.sleep(0.1)
+            os.unlink(play_path)
+            print("[frog] Done speaking")
+            return
         else:
             # Use Kokoro TTS (Windows dev machine)
             sample_rate = 24000
@@ -266,14 +314,15 @@ def transcribe(audio_np):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
     _save_wav(wav_path, audio_np)
-    segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1)
+    segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1, vad_filter=False)
     text = " ".join(s.text for s in segments).strip()
     os.unlink(wav_path)
     return text
 
 def _save_wav(path, audio_np):
+    # audio_np is always mono at this point (mixed down in record_until_silence)
     with wave.open(path, 'wb') as wf:
-        wf.setnchannels(CHANNELS)
+        wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_np.tobytes())
@@ -290,7 +339,18 @@ def record_until_silence():
     silence_chunks_needed = int(SILENCE_DURATION / 0.1)
     max_chunks = int(MAX_RECORD_SECONDS / 0.1)
 
-    _rms_post_counter = 0
+    global _vosk_last_partial
+    vosk = _init_vosk()
+    if vosk:
+        vosk.Reset()
+    _vosk_last_partial = ''
+
+    def _post_partial(text):
+        try:
+            requests.post(f"{SERVER_URL}/api/screen/state",
+                          json={"state": "listening", "userText": text}, timeout=0.3)
+        except Exception:
+            pass
 
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype='int16',
@@ -301,6 +361,8 @@ def record_until_silence():
                 except Exception as e:
                     print(f"[frog] Audio read error (mic disconnected?): {e}")
                     break
+                if chunk.ndim > 1:
+                    chunk = chunk.mean(axis=1).astype(np.int16)
                 frames.append(chunk.copy())
                 rms = np.sqrt(np.mean(chunk.astype(np.float32) ** 2))
 
@@ -316,6 +378,19 @@ def record_until_silence():
                     print("[frog] Recording stopped by user.")
                     return None
 
+                # Feed every chunk to Vosk — even pre-speech, so it has context ready
+                if vosk:
+                    if vosk.AcceptWaveform(chunk.tobytes()):
+                        result = json.loads(vosk.Result()).get('text', '').strip()
+                        if result and speech_detected and result != _vosk_last_partial:
+                            _vosk_last_partial = result
+                            threading.Thread(target=_post_partial, args=(result,), daemon=True).start()
+                    else:
+                        partial = json.loads(vosk.PartialResult()).get('partial', '').strip()
+                        if partial and speech_detected and partial != _vosk_last_partial:
+                            _vosk_last_partial = partial
+                            threading.Thread(target=_post_partial, args=(partial,), daemon=True).start()
+
                 if not speech_detected:
                     if rms >= SPEECH_THRESHOLD:
                         speech_detected = True
@@ -327,7 +402,8 @@ def record_until_silence():
                         if silent_chunks >= silence_chunks_needed:
                             break
                     else:
-                        silent_chunks = 0
+                        # Decay instead of reset — occasional noise spikes don't restart the countdown
+                        silent_chunks = max(0, silent_chunks - 1)
     except Exception as e:
         print(f"[frog] Recording stream error: {e}")
         return None
@@ -339,8 +415,61 @@ def record_until_silence():
     return audio
 
 # ---------- Server ----------
+def stream_and_speak(text, user_text=None):
+    """
+    Stream Claude's response sentence-by-sentence from the server SSE endpoint.
+    Speaks each sentence immediately as it arrives instead of waiting for the full reply.
+    Returns the full response text.
+    """
+    import urllib.parse
+    url = f"{SERVER_URL}/api/voice/stream?message={urllib.parse.quote(text)}"
+    full_response = []
+    try:
+        with requests.get(url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            for raw_line in r.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line
+                if not line.startswith('data: '):
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                except Exception:
+                    continue
+
+                if data.get('type') == 'sentence':
+                    sentence = data['text'].strip()
+                    if sentence:
+                        full_response.append(sentence)
+                        set_screen_state('speaking', user_text=user_text, ai_text=' '.join(full_response))
+                        speak(sentence)
+                        if check_stop_signal():
+                            break
+
+                elif data.get('type') == 'done':
+                    remaining = data.get('remaining', '').strip()
+                    if remaining:
+                        full_response.append(remaining)
+                        set_screen_state('speaking', user_text=user_text, ai_text=' '.join(full_response))
+                        speak(remaining)
+                    break
+
+                elif data.get('type') == 'error':
+                    speak("Sorry, something went wrong.")
+                    break
+
+    except requests.exceptions.ConnectionError:
+        speak("I can't reach the server.")
+    except Exception as e:
+        print(f"[frog] Stream error: {e}")
+        speak("Something went wrong.")
+
+    return ' '.join(full_response)
+
+
 def send_to_server(text):
-    """Send transcribed text to frog server, return response text."""
+    """Send transcribed text to frog server, return response text. (fallback)"""
     try:
         res = requests.post(VOICE_ENDPOINT, json={"message": text}, timeout=30)
         res.raise_for_status()
@@ -430,22 +559,38 @@ def wait_for_wake_word():
                 return ("user", None)
             time.sleep(0.5)
 
+    if IS_PI:
+        # On Pi: poll for screen tap trigger (tap the screen UI to speak)
+        print("[frog] Waiting for screen tap...")
+        while True:
+            if check_touch_trigger():
+                print("[frog] Touch trigger detected!")
+                _play_beep()
+                return ("user", None)
+            pending = check_pending_speech()
+            if pending:
+                return ("pending", pending)
+            time.sleep(0.3)
     try:
         from openwakeword.model import Model
-        oww = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        import openwakeword
+        _oww_models_dir = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+        _jarvis_path = os.path.join(_oww_models_dir, "hey_jarvis_v0.1.onnx")
+        oww = Model(wakeword_model_paths=[_jarvis_path])
         print("[frog] Waiting for wake word 'Hey Jarvis'...")
         chunk_size = 1280
         _poll_counter = 0
-        with sd.InputStream(samplerate=16000, channels=1, dtype='int16', blocksize=chunk_size) as stream:
+        with sd.InputStream(samplerate=16000, channels=CHANNELS, dtype='int16', blocksize=chunk_size) as stream:
             while True:
                 chunk, _ = stream.read(chunk_size)
+                if chunk.ndim > 1:
+                    chunk = chunk.mean(axis=1).astype(np.int16)
                 oww.predict(chunk.flatten())
-                scores = oww.prediction_buffer.get("hey_jarvis", [0])
-                if scores and scores[-1] > 0.5:
+                scores = oww.prediction_buffer.get("hey_jarvis_v0.1", [0])
+                if scores and scores[-1] > 0.3:
                     print("[frog] Wake word detected!")
                     _play_beep()
                     return ("user", None)
-                # Poll for touch trigger and reminders every ~500ms (every 6 chunks)
                 _poll_counter += 1
                 if _poll_counter % 6 == 0:
                     if check_touch_trigger():
@@ -566,6 +711,7 @@ def main():
                 in_conversation = False
                 continue
 
+            set_screen_state('thinking', user_text=_vosk_last_partial)
             print("[frog] Processing speech...")
             text = transcribe(audio)
 
@@ -575,10 +721,8 @@ def main():
 
             print(f"[frog] You said: {text}")
             set_screen_state('thinking', user_text=text)
-            response = send_to_server(text)
+            response = stream_and_speak(text, user_text=text)
             print(f"[frog] Response: {response[:100]}...")
-            set_screen_state('speaking', user_text=text, ai_text=response)
-            speak(response)
             set_screen_state('idle', ai_text=response)
             check_battery_warning()
             in_conversation = True  # stay tap-ready after responding

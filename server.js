@@ -2489,7 +2489,7 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
     let claudeResponse;
     try {
         claudeResponse = await anthropic.messages.create({
-            model: 'claude-sonnet-4-20250514',
+            model: 'claude-sonnet-4-5',
             max_tokens: voiceMode ? 300 : 800,
             system: buildSystemPrompt(user, userAddress, preferences, cart, currentRestaurant, doordashMenu, voiceMode),
             messages: messages
