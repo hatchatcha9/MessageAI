@@ -130,23 +130,28 @@ async function getUpcoming(auth, days = 7) {
             return `You have no events in the next ${days} days.`;
         }
 
-        // Group by calendar day
+        // Group by calendar day. All-day events use a bare "YYYY-MM-DD" string,
+        // which `new Date()` parses as UTC midnight — rolling back a day in
+        // negative-offset zones — so use that string directly as the key instead
+        // of round-tripping through Date. Keys are zero-padded so sort() (string
+        // sort) still produces chronological order across single/double-digit
+        // month or day boundaries (e.g. day 9 vs 10).
+        const dayKey = (date) =>
+            `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
         const byDay = {};
         for (const event of events) {
-            const dt = event.start.dateTime
-                ? new Date(event.start.dateTime)
-                : new Date(event.start.date);
-            const key = `${dt.getFullYear()}-${dt.getMonth()}-${dt.getDate()}`;
-            if (!byDay[key]) byDay[key] = { date: dt, events: [] };
+            const isAllDay = event.start.date && !event.start.dateTime;
+            const key = isAllDay ? event.start.date : dayKey(new Date(event.start.dateTime));
+            const date = isAllDay ? new Date(event.start.date + 'T00:00:00') : new Date(event.start.dateTime);
+            if (!byDay[key]) byDay[key] = { date, events: [] };
             byDay[key].events.push(event);
         }
 
         // Sort by date and build spoken summary
         const dayKeys   = Object.keys(byDay).sort();
-        const today     = new Date();
-        const todayKey  = `${today.getFullYear()}-${today.getMonth()}-${today.getDate()}`;
-        const tomorrowDate = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-        const tomorrowKey  = `${tomorrowDate.getFullYear()}-${tomorrowDate.getMonth()}-${tomorrowDate.getDate()}`;
+        const todayKey     = dayKey(new Date());
+        const tomorrowKey  = dayKey(new Date(Date.now() + 24 * 60 * 60 * 1000));
 
         const sentences = dayKeys.map(key => {
             const { date, events: dayEvents } = byDay[key];

@@ -7,17 +7,34 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --surface-2: #212c1d;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-ink: #16220c;
+      --accent-2: #e8b64a;
+      --danger: #ef4444;
+      --success: #4ade80;
+    }
+
     body {
       width: 480px;
-      background: #0a0a0f;
-      color: #e2e8f0;
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--ground);
+      color: var(--ink);
+      font-family: -apple-system, 'Segoe UI', 'Noto Sans', sans-serif;
       font-size: 14px;
       overflow-x: hidden;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
       padding-bottom: 24px;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     /* ── Sticky header ── */
@@ -30,15 +47,15 @@
       justify-content: space-between;
       height: 48px;
       padding: 0 14px;
-      background: #0d0d18;
-      border-bottom: 1px solid #1e1e2e;
+      background: #151d13;
+      border-bottom: 1px solid var(--hairline);
     }
 
     #back-btn {
       display: flex;
       align-items: center;
       gap: 6px;
-      color: #6ee7f7;
+      color: var(--accent);
       text-decoration: none;
       font-size: 13px;
       font-weight: 600;
@@ -55,14 +72,14 @@
       font-weight: 700;
       letter-spacing: 3px;
       text-transform: uppercase;
-      color: #6ee7f7;
+      color: var(--muted);
     }
 
     #save-btn {
-      background: #1a2a35;
-      border: 1px solid #6ee7f7;
+      background: #223019;
+      border: 1px solid var(--accent);
       border-radius: 8px;
-      color: #6ee7f7;
+      color: var(--accent);
       cursor: pointer;
       font-family: inherit;
       font-size: 12px;
@@ -74,14 +91,14 @@
       -webkit-tap-highlight-color: transparent;
       transition: background 0.15s;
     }
-    #save-btn:active  { background: #0f2030; }
-    #save-btn.saved   { background: #0d2b1a; border-color: #4ade80; color: #4ade80; }
+    #save-btn:active  { background: #16220c; }
+    #save-btn.saved   { background: #16220c; border-color: var(--success); color: var(--success); }
 
     /* ── Sections ── */
     .section {
       margin: 12px 12px 0;
-      background: #10101a;
-      border: 1px solid #1e1e2e;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
       border-radius: 12px;
       overflow: hidden;
     }
@@ -91,9 +108,9 @@
       font-weight: 700;
       letter-spacing: 2.5px;
       text-transform: uppercase;
-      color: #6ee7f7;
+      color: var(--accent);
       padding: 12px 16px 10px;
-      border-bottom: 1px solid #1a1a2e;
+      border-bottom: 1px solid var(--hairline);
     }
 
     /* ── Voice toggle ── */
@@ -106,9 +123,9 @@
     .voice-btn {
       flex: 1;
       height: 56px;
-      background: #1a1a2e;
-      border: 1px solid #2a2a45;
-      color: #64748b;
+      background: var(--surface-2);
+      border: 1px solid var(--hairline);
+      color: var(--muted);
       cursor: pointer;
       font-family: inherit;
       font-size: 14px;
@@ -121,9 +138,9 @@
     .voice-btn:first-child { border-radius: 10px 0 0 10px; }
     .voice-btn:last-child  { border-radius: 0 10px 10px 0; border-left: none; }
     .voice-btn.active {
-      background: #0d2b35;
-      border-color: #6ee7f7;
-      color: #6ee7f7;
+      background: #223019;
+      border-color: var(--accent);
+      color: var(--accent);
     }
     .voice-btn:active { opacity: 0.7; }
 
@@ -133,7 +150,7 @@
       justify-content: center;
       padding: 0 16px 14px;
       font-size: 12px;
-      color: #4a5568;
+      color: var(--muted-2);
       letter-spacing: 0.5px;
     }
 
@@ -143,13 +160,13 @@
       align-items: center;
       gap: 12px;
       padding: 14px 16px;
-      border-bottom: 1px solid #1a1a2e;
+      border-bottom: 1px solid var(--hairline);
     }
     .slider-row:last-of-type { border-bottom: none; }
 
     .slider-label {
       font-size: 12px;
-      color: #94a3b8;
+      color: var(--muted);
       width: 120px;
       flex-shrink: 0;
     }
@@ -159,7 +176,7 @@
       flex: 1;
       height: 6px;
       border-radius: 3px;
-      background: #1e1e2e;
+      background: var(--hairline);
       outline: none;
     }
     input[type="range"]::-webkit-slider-thumb {
@@ -167,15 +184,15 @@
       width: 22px;
       height: 22px;
       border-radius: 50%;
-      background: #a78bfa;
+      background: var(--accent-2);
       cursor: pointer;
-      box-shadow: 0 0 8px rgba(167, 139, 250, 0.5);
+      box-shadow: 0 0 8px rgba(232, 182, 74, 0.5);
     }
     input[type="range"]::-moz-range-thumb {
       width: 22px;
       height: 22px;
       border-radius: 50%;
-      background: #a78bfa;
+      background: var(--accent-2);
       cursor: pointer;
       border: none;
     }
@@ -183,10 +200,11 @@
     .slider-val {
       font-size: 13px;
       font-weight: 700;
-      color: #a78bfa;
+      color: var(--accent-2);
       width: 36px;
       text-align: right;
       flex-shrink: 0;
+      font-variant-numeric: tabular-nums;
     }
 
     /* ── RMS bar ── */
@@ -202,27 +220,28 @@
     }
     #rms-header span:first-child {
       font-size: 11px;
-      color: #4a5568;
+      color: var(--muted-2);
       text-transform: uppercase;
       letter-spacing: 1.5px;
     }
     #rms-value {
       font-size: 12px;
-      color: #6ee7f7;
+      color: var(--accent);
       font-weight: 600;
+      font-variant-numeric: tabular-nums;
     }
 
     #rms-track {
       width: 100%;
       height: 10px;
-      background: #1a1a2e;
+      background: var(--surface-2);
       border-radius: 5px;
       overflow: hidden;
     }
     #rms-fill {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, #6ee7f7, #a78bfa);
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
       border-radius: 5px;
       transition: width 0.1s ease;
     }
@@ -234,11 +253,11 @@
     }
     .rms-marker {
       font-size: 9px;
-      color: #2a2a40;
+      color: var(--muted-2);
       letter-spacing: 0.5px;
     }
-    .rms-marker.speech-mark { color: #a78bfa; }
-    .rms-marker.silence-mark { color: #6ee7f7; }
+    .rms-marker.speech-mark { color: var(--accent-2); }
+    .rms-marker.silence-mark { color: var(--accent); }
 
     /* ── API status ── */
     #api-grid {
@@ -253,8 +272,8 @@
       align-items: center;
       gap: 6px;
       padding: 16px 8px;
-      border-right: 1px solid #1a1a2e;
-      border-bottom: 1px solid #1a1a2e;
+      border-right: 1px solid var(--hairline);
+      border-bottom: 1px solid var(--hairline);
     }
     .api-cell:nth-child(3),
     .api-cell:nth-child(6) { border-right: none; }
@@ -266,18 +285,18 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
-      background: #374151;
+      background: var(--muted-2);
     }
-    .api-dot.ok  { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.6); }
+    .api-dot.ok  { background: var(--accent); box-shadow: 0 0 6px rgba(158, 232, 90, 0.6); }
     .api-dot.err { background: #f87171; box-shadow: 0 0 5px rgba(248, 113, 113, 0.4); }
 
     .api-label {
       font-size: 11px;
-      color: #64748b;
+      color: var(--muted);
       text-align: center;
       letter-spacing: 0.5px;
     }
-    .api-label.ok  { color: #34d399; }
+    .api-label.ok  { color: var(--accent); }
     .api-label.err { color: #f87171; }
 
     /* ── About grid ── */
@@ -289,8 +308,8 @@
 
     .about-cell {
       padding: 14px 16px;
-      border-right: 1px solid #1a1a2e;
-      border-bottom: 1px solid #1a1a2e;
+      border-right: 1px solid var(--hairline);
+      border-bottom: 1px solid var(--hairline);
     }
     .about-cell:nth-child(even) { border-right: none; }
     .about-cell:nth-child(3),
@@ -298,15 +317,16 @@
 
     .about-label {
       font-size: 10px;
-      color: #374151;
+      color: var(--muted-2);
       text-transform: uppercase;
       letter-spacing: 1.5px;
       margin-bottom: 4px;
     }
     .about-value {
       font-size: 14px;
-      color: #e2e8f0;
+      color: var(--ink);
       font-weight: 600;
+      font-variant-numeric: tabular-nums;
     }
 
     /* ── Nav footer ── */
@@ -325,17 +345,17 @@
       gap: 6px;
       height: 44px;
       width: 100%;
-      background: #10101a;
-      border: 1px solid #1e1e2e;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
       border-radius: 10px;
-      color: #4a5568;
+      color: var(--muted);
       text-decoration: none;
       font-size: 11px;
       letter-spacing: 2px;
       text-transform: uppercase;
       transition: color 0.15s, border-color 0.15s;
     }
-    #debug-link:active { color: #a78bfa; border-color: #a78bfa; }
+    #debug-link:active { color: var(--accent-2); border-color: var(--accent-2); }
   </style>
 </head>
 <body>
@@ -361,12 +381,12 @@
   </div>
   <div id="voice-name-row">Heart · Kokoro af_heart</div>
 
-  <div style="padding: 0 16px 14px; border-top: 1px solid #1a1a2e; padding-top: 14px;">
-    <div style="font-size:10px;color:#4a5568;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;">Home City</div>
+  <div style="padding: 0 16px 14px; border-top: 1px solid var(--hairline); padding-top: 14px;">
+    <div style="font-size:10px;color:var(--muted-2);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;">Home City</div>
     <input type="text" id="city-input" placeholder="e.g. Draper, Utah"
-      style="width:100%;background:#111120;border:1px solid #1e1e2e;border-radius:8px;color:#e2e8f0;font-family:inherit;font-size:13px;padding:11px 14px;outline:none;transition:border-color 0.15s;"
+      style="width:100%;background:var(--surface-2);border:1px solid var(--hairline);border-radius:8px;color:var(--ink);font-family:inherit;font-size:13px;padding:11px 14px;outline:none;transition:border-color 0.15s;"
       autocomplete="off" spellcheck="false">
-    <div style="font-size:11px;color:#374151;margin-top:6px;">Used for weather when GPS isn't available.</div>
+    <div style="font-size:11px;color:var(--muted-2);margin-top:6px;">Used for weather when GPS isn't available.</div>
   </div>
 </div>
 
@@ -488,8 +508,8 @@
   }
 
   const cityInput = document.getElementById('city-input');
-  cityInput.addEventListener('focus', () => cityInput.style.borderColor = '#6ee7f7');
-  cityInput.addEventListener('blur',  () => cityInput.style.borderColor = '#1e1e2e');
+  cityInput.addEventListener('focus', () => cityInput.style.borderColor = '#9ee85a');
+  cityInput.addEventListener('blur',  () => cityInput.style.borderColor = '#2a3524');
   cityInput.addEventListener('change', e => {
     settings.homeCity = e.target.value.trim();
   });
@@ -607,6 +627,32 @@
     const elapsed = Math.floor((Date.now() - _uptimeBase) / 1000);
     document.getElementById('about-uptime').textContent = formatUptime(_serverUptime + elapsed);
   }, 1000);
+
+  // ── Drag-to-scroll ─────────────────────────────────────────────────────────
+  // The GeeekPi touchscreen is an ADS7846 resistive digitizer reported to X11
+  // as a plain mouse pointer (no HTML5 touch events), so a finger drag never
+  // triggers native page scrolling. Emulate it manually via pointer events.
+  (function enableDragScroll() {
+    const SKIP = 'button, a, input, .voice-btn';
+    let dragging = false, startY = 0, startScroll = 0;
+
+    document.body.addEventListener('pointerdown', e => {
+      if (e.target.closest(SKIP)) return;
+      dragging = true;
+      startY = e.clientY;
+      startScroll = window.scrollY;
+    });
+
+    document.body.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      window.scrollTo(0, startScroll - (e.clientY - startY));
+    });
+
+    const stopDrag = () => { dragging = false; };
+    document.body.addEventListener('pointerup', stopDrag);
+    document.body.addEventListener('pointercancel', stopDrag);
+    document.body.addEventListener('pointerleave', stopDrag);
+  })();
 
   // ── Boot ───────────────────────────────────────────────────────────────────
   loadSettings();

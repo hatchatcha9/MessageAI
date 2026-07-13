@@ -2,9 +2,9 @@ const https = require('https');
 
 const WEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 
-// Convert "City State" (e.g. "Draper Utah") → "City,US" for OpenWeather compatibility
+// Convert "City, State" or "City State" (e.g. "Draper, Utah") → "City,US" for OpenWeather compatibility
 function normalizeLocation(location) {
-    const parts = location.trim().split(/\s+/);
+    const parts = location.trim().replace(/,/g, ' ').split(/\s+/).filter(Boolean);
     return parts.length >= 2 ? parts[0] + ',US' : location.trim();
 }
 

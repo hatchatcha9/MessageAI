@@ -2742,6 +2742,117 @@ app.get('/api/status', async (req, res) => {
     });
 });
 
+// Calendar — used by calendar.html for direct (non-voice) browsing
+app.get('/api/calendar/events', async (req, res) => {
+    const auth = calendar.getAuth();
+    if (!auth) return res.json({ configured: false, days: [] });
+
+    try {
+        const now   = new Date();
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        const end   = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+        const google = require('googleapis').google;
+        const cal    = google.calendar({ version: 'v3', auth });
+        const result = await cal.events.list({
+            calendarId: 'primary',
+            timeMin:    start.toISOString(),
+            timeMax:    end.toISOString(),
+            singleEvents: true,
+            orderBy:    'startTime',
+            maxResults: 50,
+        });
+
+        const byDay = {};
+        for (const ev of result.data.items || []) {
+            const isAllDay = !!(ev.start.date && !ev.start.dateTime);
+            // All-day events use a bare "YYYY-MM-DD" string, which `new Date()` parses
+            // as UTC midnight — rolling back a day in negative-offset zones. Use it
+            // directly as the grouping key instead of round-tripping through Date.
+            const key = isAllDay ? ev.start.date : (() => {
+                const d = new Date(ev.start.dateTime);
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            })();
+            const dt = isAllDay ? null : new Date(ev.start.dateTime);
+            if (!byDay[key]) byDay[key] = [];
+            byDay[key].push({
+                title: ev.summary || 'Untitled event',
+                allDay: isAllDay,
+                time: isAllDay ? null : dt.toISOString(),
+            });
+        }
+
+        const days = Object.keys(byDay).sort().map(key => ({ date: key, events: byDay[key] }));
+        res.json({ configured: true, days });
+    } catch (err) {
+        console.error('[Calendar] /api/calendar/events error:', err.message);
+        res.status(502).json({ configured: true, error: 'Could not reach Google Calendar.', days: [] });
+    }
+});
+
+// Spotify — used by spotify.html for direct (non-voice) playback control
+app.get('/api/spotify/now', async (req, res) => {
+    if (!spotify.isConfigured || !spotify.isConfigured()) return res.json({ configured: false });
+
+    try {
+        const api = await spotify.getApi();
+        if (!api) return res.json({ configured: false });
+
+        const result = await api.getMyCurrentPlaybackState();
+        if (!result.body || !result.body.item) {
+            return res.json({ configured: true, playing: false });
+        }
+        res.json({
+            configured: true,
+            playing:    !!result.body.is_playing,
+            track:      result.body.item.name,
+            artist:     result.body.item.artists.map(a => a.name).join(', '),
+            album:      result.body.item.album?.name || null,
+            image:      result.body.item.album?.images?.[0]?.url || null,
+            progressMs: result.body.progress_ms,
+            durationMs: result.body.item.duration_ms,
+            volume:     result.body.device?.volume_percent ?? null,
+        });
+    } catch (err) {
+        console.error('[Spotify] /api/spotify/now error:', err.message);
+        res.status(502).json({ configured: true, error: 'Could not reach Spotify.' });
+    }
+});
+
+app.post('/api/spotify/control', async (req, res) => {
+    const { action, value } = req.body || {};
+    try {
+        let message;
+        if (action === 'play')         message = await spotify.resume();
+        else if (action === 'pause')   message = await spotify.pause();
+        else if (action === 'skip')    message = await spotify.skip();
+        else if (action === 'volume')  message = await spotify.setVolume(value);
+        else if (action === 'transfer') message = await spotify.transferPlayback(value);
+        else return res.status(400).json({ error: 'Unknown action' });
+        res.json({ message });
+    } catch (err) {
+        console.error('[Spotify] /api/spotify/control error:', err.message);
+        res.status(502).json({ error: 'Could not reach Spotify.' });
+    }
+});
+
+app.get('/api/spotify/devices', async (req, res) => {
+    if (!spotify.isConfigured()) return res.json({ configured: false, devices: [] });
+    try {
+        const devices = await spotify.getDevices();
+        res.json({
+            configured: true,
+            devices: devices.map(d => ({
+                id: d.id, name: d.name, type: d.type,
+                isActive: d.is_active, volumePercent: d.volume_percent,
+            })),
+        });
+    } catch (err) {
+        console.error('[Spotify] /api/spotify/devices error:', err.message);
+        res.status(502).json({ configured: true, error: 'Could not reach Spotify.', devices: [] });
+    }
+});
+
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
@@ -3136,6 +3247,12 @@ app.get('/api/voice/stop', (req, res) => {
     res.json({ stop: fired });
 });
 app.get('/api/voice/trigger', (req, res) => {
+    // Drop stale entries — a trigger queued more than a few seconds ago (e.g. a
+    // screen-tap debounce bounce, or a tap during "thinking") is no longer wanted;
+    // consuming it late would silently open the mic with no visible tap.
+    while (_touchTriggerQueue.length > 0 && Date.now() - _touchTriggerQueue[0] > 3000) {
+        _touchTriggerQueue.shift();
+    }
     const fired = _touchTriggerQueue.length > 0;
     if (fired) _touchTriggerQueue.shift();
     res.json({ triggered: fired });

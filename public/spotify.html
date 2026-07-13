@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=480, initial-scale=1.0">
+  <title>frog — Spotify</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-ink: #16220c;
+      --accent-2: #e8b64a;
+    }
+
+    body {
+      width: 480px;
+      height: 320px;
+      background: var(--ground);
+      color: var(--ink);
+      font-family: -apple-system, 'Segoe UI', 'Noto Sans', sans-serif;
+      font-size: 14px;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      padding: 0 14px;
+      background: #151d13;
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    #back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 12px 8px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #back-btn:active { opacity: 0.6; }
+    #back-btn svg { width: 18px; height: 18px; }
+
+    #top-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    #device-btn {
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      background: none;
+      border: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #device-btn svg { width: 18px; height: 18px; }
+
+    /* ── Device overlay ── */
+    #device-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      background: var(--ground);
+      flex-direction: column;
+    }
+    #device-overlay.open { display: flex; }
+
+    .mini-top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      padding: 0 14px;
+      background: #151d13;
+      border-bottom: 1px solid var(--hairline);
+      flex-shrink: 0;
+    }
+    .mini-top-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    #device-list { padding: 8px 12px; overflow-y: auto; flex: 1; }
+
+    .device-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 12px;
+      margin-bottom: 8px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 10px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .device-row:active { border-color: var(--accent); }
+    .device-row.active { border-color: var(--accent); }
+    .device-row svg { width: 20px; height: 20px; color: var(--muted); flex-shrink: 0; }
+    .device-name { font-size: 13px; color: var(--ink); flex: 1; }
+    .device-check { width: 16px; height: 16px; color: var(--accent); flex-shrink: 0; }
+
+    .device-empty { text-align: center; color: var(--muted-2); font-size: 13px; margin-top: 40px; }
+
+    #stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 14px 20px 0;
+      height: 130px;
+      text-align: center;
+    }
+
+    #art {
+      width: 56px;
+      height: 56px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent-2), var(--accent));
+      background-size: cover;
+      background-position: center;
+      flex-shrink: 0;
+    }
+
+    #track-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--ink);
+      max-width: 400px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #track-artist {
+      font-size: 12px;
+      color: var(--muted);
+      max-width: 400px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #not-configured, #not-playing {
+      font-size: 13px;
+      color: var(--muted-2);
+    }
+
+    #controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 6px 0;
+    }
+
+    .ctrl-btn {
+      width: 54px;
+      height: 54px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ctrl-btn:active { background: #212c1d; border-color: var(--accent); }
+    .ctrl-btn svg { width: 22px; height: 22px; }
+    #play-pause-btn { width: 64px; height: 64px; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    #play-pause-btn svg { width: 26px; height: 26px; }
+
+    #volume-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 24px 0;
+    }
+    #volume-row svg { width: 16px; height: 16px; color: var(--muted-2); flex-shrink: 0; }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      flex: 1;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--hairline);
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--accent-2);
+      cursor: pointer;
+      box-shadow: 0 0 8px rgba(232, 182, 74, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+<div id="top-bar">
+  <a id="back-btn" href="/screen.html">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="10,3 5,8 10,13"></polyline>
+    </svg>
+    Screen
+  </a>
+  <div id="top-title">Spotify</div>
+  <button id="device-btn" title="Output device">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+      <line x1="8" y1="21" x2="16" y2="21"></line>
+      <line x1="12" y1="17" x2="12" y2="21"></line>
+    </svg>
+  </button>
+</div>
+
+<div id="device-overlay">
+  <div class="mini-top-bar">
+    <button id="device-close-btn" style="background:none;border:none;color:var(--accent);padding:12px 8px;min-height:44px;font-size:13px;font-weight:600;letter-spacing:1px;-webkit-tap-highlight-color:transparent;">Close</button>
+    <div class="mini-top-title">Output Device</div>
+    <div style="width:44px;"></div>
+  </div>
+  <div id="device-list"></div>
+</div>
+
+<div id="stage">
+  <div id="not-configured" style="display:none;">Spotify not connected.</div>
+  <div id="not-playing" style="display:none;">Nothing is playing.</div>
+  <div id="now-playing" style="display:none; display:flex; flex-direction:column; align-items:center; gap:6px;">
+    <div id="art"></div>
+    <div id="track-title">—</div>
+    <div id="track-artist">—</div>
+  </div>
+</div>
+
+<div id="controls" style="display:none;">
+  <button class="ctrl-btn" id="skip-btn" title="Skip">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4l10 8-10 8V4zM18 4h2v16h-2V4z"/></svg>
+  </button>
+  <button class="ctrl-btn" id="play-pause-btn" title="Play/Pause">
+    <svg id="play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+    <svg id="pause-icon" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+  </button>
+</div>
+
+<div id="volume-row" style="display:none;">
+  <svg viewBox="0 0 16 16" fill="currentColor"><path d="M9 2L4.5 5.5H1v5h3.5L9 14V2z"/></svg>
+  <input type="range" id="volume-slider" min="0" max="100" value="50" step="1">
+</div>
+
+<script>
+  let isPlaying = false;
+  let pollTimer = null;
+
+  async function control(action, value) {
+    try {
+      await fetch('/api/spotify/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, value }),
+      });
+    } catch {}
+  }
+
+  function render(data) {
+    document.getElementById('not-configured').style.display = 'none';
+    document.getElementById('not-playing').style.display = 'none';
+    document.getElementById('now-playing').style.display = 'none';
+    document.getElementById('controls').style.display = 'none';
+    document.getElementById('volume-row').style.display = 'none';
+
+    if (!data.configured) {
+      document.getElementById('not-configured').style.display = 'block';
+      return;
+    }
+    if (!data.playing && !data.track) {
+      document.getElementById('not-playing').style.display = 'block';
+      document.getElementById('controls').style.display = 'flex';
+      isPlaying = false;
+      updatePlayIcon();
+      return;
+    }
+
+    document.getElementById('now-playing').style.display = 'flex';
+    document.getElementById('controls').style.display = 'flex';
+    document.getElementById('track-title').textContent = data.track || '—';
+    document.getElementById('track-artist').textContent = data.artist || '—';
+    document.getElementById('art').style.backgroundImage = data.image ? `url(${data.image})` : 'none';
+    isPlaying = !!data.playing;
+    updatePlayIcon();
+
+    if (data.volume !== null && data.volume !== undefined) {
+      document.getElementById('volume-row').style.display = 'flex';
+      if (!_draggingVolume) document.getElementById('volume-slider').value = data.volume;
+    }
+  }
+
+  function updatePlayIcon() {
+    document.getElementById('play-icon').style.display  = isPlaying ? 'none' : 'block';
+    document.getElementById('pause-icon').style.display = isPlaying ? 'block' : 'none';
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/spotify/now');
+      render(await res.json());
+    } catch {
+      document.getElementById('not-configured').style.display = 'block';
+    }
+  }
+
+  document.getElementById('play-pause-btn').addEventListener('click', async () => {
+    isPlaying = !isPlaying;
+    updatePlayIcon();
+    await control(isPlaying ? 'play' : 'pause');
+    poll();
+  });
+
+  document.getElementById('skip-btn').addEventListener('click', async () => {
+    await control('skip');
+    setTimeout(poll, 900);
+  });
+
+  let _draggingVolume = false;
+  const volumeSlider = document.getElementById('volume-slider');
+  volumeSlider.addEventListener('pointerdown', () => { _draggingVolume = true; });
+  volumeSlider.addEventListener('change', async e => {
+    await control('volume', parseInt(e.target.value));
+    _draggingVolume = false;
+  });
+
+  // ── Device switcher ─────────────────────────────────────────────────────────
+  const DEVICE_ICONS = {
+    computer: '<path d="M4 4h16v10H4zM9 20h6M12 14v6"/>',
+    smartphone: '<rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/>',
+    speaker: '<rect x="6" y="2" width="12" height="20" rx="2"/><circle cx="12" cy="8" r="2"/><circle cx="12" cy="15" r="3"/>',
+    tablet: '<rect x="5" y="3" width="14" height="18" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/>',
+  };
+
+  function deviceIcon(type) {
+    const path = DEVICE_ICONS[(type || '').toLowerCase()] || DEVICE_ICONS.speaker;
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
+  }
+
+  async function loadDevices() {
+    const list = document.getElementById('device-list');
+    list.innerHTML = '<div class="device-empty">Loading…</div>';
+    try {
+      const res = await fetch('/api/spotify/devices');
+      const data = await res.json();
+      if (!data.devices || !data.devices.length) {
+        list.innerHTML = '<div class="device-empty">No devices found. Open Spotify somewhere first.</div>';
+        return;
+      }
+      list.innerHTML = data.devices.map(d => `
+        <div class="device-row${d.isActive ? ' active' : ''}" data-id="${d.id}">
+          ${deviceIcon(d.type)}
+          <div class="device-name">${d.name.replace(/</g, '&lt;')}</div>
+          ${d.isActive ? '<svg class="device-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+        </div>
+      `).join('');
+
+      list.querySelectorAll('.device-row').forEach(row => {
+        row.addEventListener('click', async () => {
+          const id = row.dataset.id;
+          list.innerHTML = '<div class="device-empty">Switching…</div>';
+          await control('transfer', id);
+          document.getElementById('device-overlay').classList.remove('open');
+          poll();
+        });
+      });
+    } catch {
+      list.innerHTML = '<div class="device-empty">Could not reach the server.</div>';
+    }
+  }
+
+  document.getElementById('device-btn').addEventListener('click', () => {
+    document.getElementById('device-overlay').classList.add('open');
+    loadDevices();
+  });
+  document.getElementById('device-close-btn').addEventListener('click', () => {
+    document.getElementById('device-overlay').classList.remove('open');
+  });
+
+  poll();
+  pollTimer = setInterval(poll, 5000);
+</script>
+</body>
+</html>

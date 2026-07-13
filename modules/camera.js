@@ -1,7 +1,7 @@
 /**
- * Camera module for frog — Pi Camera 3 via libcamera-still + Claude Vision
+ * Camera module for frog — Pi Camera 3 via rpicam-still + Claude Vision
  *
- * On Pi: captures a JPEG with libcamera-still, sends to Claude Vision API.
+ * On Pi: captures a JPEG with rpicam-still, sends to Claude Vision API.
  * On Windows dev machine: returns a placeholder message gracefully.
  *
  * Usage:
@@ -29,7 +29,7 @@ function capture() {
             reject(new Error('No camera hardware detected (not running on Pi)'));
             return;
         }
-        execFile('libcamera-still', [
+        execFile('rpicam-still', [
             '--output', CAPTURE_PATH,
             '--width',  '1280',
             '--height', '720',

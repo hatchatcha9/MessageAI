@@ -7,13 +7,27 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-ink: #16220c;
+      --accent-2: #e8b64a;
+      --water: #5fc9d1;
+      --danger: #ef4444;
+    }
+
     body {
       width: 480px;
       height: 320px;
       overflow: hidden;
-      background: #0a0a0f;
-      color: #fff;
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--ground);
+      color: var(--ink);
+      font-family: -apple-system, 'Segoe UI', 'Noto Sans', sans-serif;
       user-select: none;
     }
 
@@ -37,7 +51,7 @@
       font-size: 18px;
       font-weight: 700;
       letter-spacing: 2px;
-      color: #6ee7f7;
+      color: var(--accent);
     }
 
     #status-badge {
@@ -50,8 +64,8 @@
       text-transform: uppercase;
       padding: 4px 10px;
       border-radius: 20px;
-      background: #1a1a2e;
-      color: #888;
+      background: var(--surface);
+      color: var(--muted);
       transition: all 0.3s ease;
     }
 
@@ -59,7 +73,7 @@
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: #444;
+      background: var(--muted-2);
       transition: background 0.3s ease;
     }
 
@@ -85,21 +99,22 @@
     #clock {
       font-size: 44px;
       font-weight: 200;
-      color: #e8e8e8;
+      color: var(--ink);
       letter-spacing: 2px;
       line-height: 1;
+      font-variant-numeric: tabular-nums;
     }
 
     #date {
       font-size: 14px;
-      color: #777;
+      color: var(--muted);
       letter-spacing: 1px;
     }
 
     #wake-hint {
       margin-top: 2px;
       font-size: 12px;
-      color: #555;
+      color: var(--muted-2);
       letter-spacing: 1px;
     }
 
@@ -111,25 +126,25 @@
       width: 72px;
       height: 72px;
       border-radius: 50%;
-      background: #0d1f2a;
-      border: 2px solid #1e3a4a;
+      background: var(--surface);
+      border: 2px solid var(--hairline);
       cursor: pointer;
       margin-top: 6px;
       transition: background 0.15s, border-color 0.15s, transform 0.1s;
       -webkit-tap-highlight-color: transparent;
     }
     #tap-btn:active {
-      background: #0d3040;
-      border-color: #6ee7f7;
+      background: #212c1d;
+      border-color: var(--accent);
       transform: scale(0.93);
     }
-    #tap-btn svg { width: 28px; height: 28px; color: #4a8a9a; }
-    #tap-btn.triggered svg { color: #6ee7f7; }
+    #tap-btn svg { width: 28px; height: 28px; color: var(--muted); }
+    #tap-btn.triggered svg { color: var(--accent); }
 
     #last-response {
       margin-top: 4px;
       font-size: 12px;
-      color: #6b7280;
+      color: var(--muted);
       font-style: italic;
       max-width: 420px;
       text-align: center;
@@ -152,8 +167,8 @@
       gap: 8px;
       margin-top: 4px;
       padding: 4px 12px;
-      background: #111118;
-      border: 1px solid #1e1e2e;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
       border-radius: 12px;
       min-width: 160px;
       justify-content: center;
@@ -162,7 +177,8 @@
     #weather-temp {
       font-size: 20px;
       font-weight: 300;
-      color: #e8e8e8;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
     }
 
     #weather-icon {
@@ -178,13 +194,13 @@
 
     #weather-desc {
       font-size: 12px;
-      color: #999;
+      color: var(--muted);
       text-transform: capitalize;
     }
 
     #weather-city {
       font-size: 11px;
-      color: #666;
+      color: var(--muted-2);
     }
 
     /* ── Listening state ── */
@@ -205,7 +221,7 @@
     .wave-bar {
       width: 5px;
       border-radius: 3px;
-      background: #6ee7f7;
+      background: var(--accent);
       height: 8px;
       transition: height 0.08s ease-out, opacity 0.08s ease-out;
       opacity: 0.4;
@@ -213,7 +229,7 @@
 
     #listen-label {
       font-size: 14px;
-      color: #6ee7f7;
+      color: var(--accent);
       letter-spacing: 2px;
       text-transform: uppercase;
     }
@@ -229,8 +245,8 @@
     #spinner {
       width: 36px;
       height: 36px;
-      border: 3px solid #1a1a2e;
-      border-top: 3px solid #a78bfa;
+      border: 3px solid var(--hairline);
+      border-top: 3px solid var(--accent-2);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
     }
@@ -241,7 +257,7 @@
 
     #user-text {
       font-size: 15px;
-      color: #aaa;
+      color: var(--muted);
       font-style: italic;
       max-width: 420px;
       line-height: 1.4;
@@ -258,7 +274,7 @@
 
     #user-said {
       font-size: 12px;
-      color: #666;
+      color: var(--muted-2);
       font-style: italic;
       max-width: 440px;
       overflow: hidden;
@@ -268,7 +284,7 @@
 
     #response-text {
       font-size: 16px;
-      color: #e8e8e8;
+      color: var(--ink);
       max-width: 440px;
       line-height: 1.5;
       max-height: 180px;
@@ -286,7 +302,7 @@
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: #a78bfa;
+      background: var(--water);
       animation: bounce 0.8s ease-in-out infinite;
     }
     .speak-dot:nth-child(2) { animation-delay: 0.15s; }
@@ -304,13 +320,14 @@
       align-items: center;
       flex-shrink: 0;
       padding-top: 6px;
-      border-top: 1px solid #111;
+      border-top: 1px solid var(--hairline);
     }
 
     #footer-clock {
       font-size: 12px;
-      color: #666;
+      color: var(--muted-2);
       min-width: 54px;
+      font-variant-numeric: tabular-nums;
     }
 
     #footer-nav {
@@ -325,25 +342,25 @@
       justify-content: center;
       width: 50px;
       height: 50px;
-      color: #4a4a6a;
+      color: var(--muted-2);
       text-decoration: none;
       border-radius: 10px;
-      border: 1px solid #1a1a2e;
+      border: 1px solid var(--hairline);
       transition: color 0.15s, background 0.15s;
       -webkit-tap-highlight-color: transparent;
     }
-    .footer-nav-btn:active { color: #6ee7f7; background: #1a1a2e; border-color: #6ee7f7; }
+    .footer-nav-btn:active { color: var(--accent); background: var(--surface); border-color: var(--accent); }
     .footer-nav-btn svg { width: 20px; height: 20px; }
 
     #connection-dot {
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: #1f5c1f;
+      background: #2c4020;
       transition: background 0.3s;
     }
-    #connection-dot.connected { background: #22c55e; }
-    #connection-dot.error     { background: #ef4444; }
+    #connection-dot.connected { background: var(--accent); }
+    #connection-dot.error     { background: var(--danger); }
 
     /* ── Battery indicator ── */
     #battery-indicator {
@@ -351,14 +368,14 @@
       align-items: center;
       gap: 5px;
       font-size: 11px;
-      color: #555;
+      color: var(--muted-2);
     }
 
     #battery-bar-wrap {
       position: relative;
       width: 22px;
       height: 11px;
-      border: 1.5px solid #444;
+      border: 1.5px solid var(--muted-2);
       border-radius: 2px;
     }
     #battery-bar-wrap::after {
@@ -369,35 +386,36 @@
       transform: translateY(-50%);
       width: 2.5px;
       height: 5px;
-      background: #444;
+      background: var(--muted-2);
       border-radius: 0 1px 1px 0;
     }
 
     #battery-fill {
       height: 100%;
       border-radius: 1px;
-      background: #22c55e;
+      background: var(--accent);
       transition: width 0.5s ease, background 0.5s ease;
     }
-    #battery-fill.low      { background: #ef4444; }
-    #battery-fill.medium   { background: #f59e0b; }
-    #battery-fill.charging { background: #6ee7f7; }
+    #battery-fill.low      { background: var(--danger); }
+    #battery-fill.medium   { background: var(--accent-2); }
+    #battery-fill.charging { background: var(--accent); }
 
     #battery-pct {
       font-size: 11px;
-      color: #777;
+      color: var(--muted);
       min-width: 26px;
+      font-variant-numeric: tabular-nums;
     }
 
     /* ── State colours ── */
-    body.listening #status-dot  { background: #6ee7f7; box-shadow: 0 0 6px #6ee7f7; }
-    body.listening #status-badge { color: #6ee7f7; background: #0d2b30; }
+    body.listening #status-dot  { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    body.listening #status-badge { color: var(--accent); background: rgba(158,232,90,0.12); }
 
-    body.thinking #status-dot   { background: #a78bfa; box-shadow: 0 0 6px #a78bfa; }
-    body.thinking #status-badge  { color: #a78bfa; background: #1a1230; }
+    body.thinking #status-dot   { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+    body.thinking #status-badge  { color: var(--accent-2); background: rgba(232,182,74,0.12); }
 
-    body.speaking #status-dot   { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
-    body.speaking #status-badge  { color: #4ade80; background: #0d2b1a; }
+    body.speaking #status-dot   { background: var(--water); box-shadow: 0 0 6px var(--water); }
+    body.speaking #status-badge  { color: var(--water); background: rgba(95,201,209,0.12); }
   </style>
 </head>
 <body class="idle">
@@ -488,10 +506,20 @@
           <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"></rect>
         </svg>
       </div>
-      <!-- Chat -->
-      <a class="footer-nav-btn" href="/chat.html" title="Chat">
+      <!-- Calendar -->
+      <a class="footer-nav-btn" href="/calendar.html" title="Calendar">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 2H2a1 1 0 00-1 1v8a1 1 0 001 1h3l3 2 3-2h3a1 1 0 001-1V3a1 1 0 00-1-1z"></path>
+          <rect x="2" y="3" width="12" height="11" rx="1.5"></rect>
+          <line x1="2" y1="6.5" x2="14" y2="6.5"></line>
+          <line x1="5" y1="1.5" x2="5" y2="4"></line>
+          <line x1="11" y1="1.5" x2="11" y2="4"></line>
+        </svg>
+      </a>
+      <!-- Spotify -->
+      <a class="footer-nav-btn" href="/spotify.html" title="Spotify">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="6.5"></circle>
+          <path d="M4.5 6.5c2.5-1 4.5-1 7 0M4.8 8.7c2-.8 3.6-.8 5.6 0M5.2 10.7c1.6-.6 2.8-.6 4.4 0" stroke-linecap="round"></path>
         </svg>
       </a>
       <!-- Settings -->
@@ -716,7 +744,21 @@
     _updateTapBtn(state);
   };
 
+  // Debounce — the resistive digitizer can register a single physical tap as two
+  // rapid click events (contact bounce). Without this, a bounce queues a second
+  // trigger server-side that silently fires later (e.g. right after the next response).
+  let _lastTapAt = 0;
+
   async function _handleTap() {
+    const now = Date.now();
+    if (now - _lastTapAt < 600) return;
+    _lastTapAt = now;
+
+    // While thinking there's nothing to stop and nothing to (usefully) trigger yet —
+    // queuing a trigger here would just fire late, opening the mic unprompted after
+    // the response finishes. Ignore taps until we're listening/speaking/idle.
+    if (_currentState === 'thinking') return;
+
     const btn = document.getElementById('tap-btn');
     btn.classList.add('triggered');
     try {

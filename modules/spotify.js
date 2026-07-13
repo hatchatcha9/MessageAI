@@ -103,6 +103,55 @@ async function play(query) {
     }
 }
 
+// Returns the list of available Spotify Connect devices (phone, computer, etc).
+async function getDevices() {
+    if (!isConfigured()) return [];
+
+    try {
+        const api = await getApi();
+        if (!api) return [];
+        const res = await api.getMyDevices();
+        return res.body.devices || [];
+    } catch (err) {
+        console.error('[Spotify] getDevices error:', err.message);
+        return [];
+    }
+}
+
+// Move playback to a different device (phone, computer, this Pi, etc).
+async function transferPlayback(deviceId) {
+    if (!isConfigured()) return 'Spotify not configured.';
+    if (!deviceId) return 'No device specified.';
+
+    try {
+        const api = await getApi();
+        if (!api) return 'Spotify not configured.';
+        await api.transferMyPlayback([deviceId], { play: true });
+        return 'Switched playback device.';
+    } catch (err) {
+        console.error('[Spotify] transferPlayback error:', err.message);
+        return 'I had trouble switching the playback device.';
+    }
+}
+
+// Resume playback from wherever it was paused (no search/context change).
+async function resume() {
+    if (!isConfigured()) return 'Spotify not configured.';
+
+    try {
+        const api = await getApi();
+        if (!api) return 'Spotify not configured.';
+        await api.play();
+        return getCurrentTrack();
+    } catch (err) {
+        console.error('[Spotify] resume error:', err.message);
+        if (err.statusCode === 403 || err.statusCode === 404) {
+            return 'No active Spotify device found. Open Spotify on a device first.';
+        }
+        return 'I had trouble resuming Spotify.';
+    }
+}
+
 // Pause playback.
 async function pause() {
     if (!isConfigured()) return 'Spotify not configured.';
@@ -154,4 +203,4 @@ async function setVolume(pct) {
     }
 }
 
-module.exports = { getCurrentTrack, play, pause, skip, setVolume };
+module.exports = { getCurrentTrack, play, resume, pause, skip, setVolume, isConfigured, getApi, getDevices, transferPlayback };

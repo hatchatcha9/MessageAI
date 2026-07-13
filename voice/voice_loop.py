@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 frog Voice Loop
-- Listens for wake word "Hey Jarvis" (or press Enter in dev mode)
+- Listens for wake word "Hey Frog" (or press Enter in dev mode)
 - Records speech until silence
 - Sends to frog server for processing
 - Speaks the response aloud
@@ -24,16 +24,20 @@ import sounddevice as sd
 from faster_whisper import WhisperModel
 
 # Non-blocking Enter key detection (works on Windows + Linux)
+# Only needed for DEV_MODE's "press Enter to speak" — and critically, must not
+# start at all when stdin isn't a real TTY (e.g. under systemd, stdin is /dev/null).
+# readline() on an EOF stdin returns '' immediately without raising, so an
+# unconditional loop here spins a full CPU core forever.
 _enter_flag = threading.Event()
 def _stdin_reader():
     while True:
-        try:
-            sys.stdin.readline()
-            _enter_flag.set()
-        except Exception:
+        line = sys.stdin.readline()
+        if not line:  # EOF — no real stdin to read from (e.g. under systemd)
             break
-_stdin_thread = threading.Thread(target=_stdin_reader, daemon=True)
-_stdin_thread.start()
+        _enter_flag.set()
+if sys.stdin.isatty():
+    _stdin_thread = threading.Thread(target=_stdin_reader, daemon=True)
+    _stdin_thread.start()
 
 def _enter_pressed():
     if _enter_flag.is_set():
@@ -257,9 +261,9 @@ def speak(text):
                 wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(48000)
                 wf.writeframes(stereo.tobytes())
             dur = len(resampled) / 48000
-            print(f"[frog] Playing {dur:.1f}s on 'USB PnP Audio Device: Audio (hw:2,0)'")
+            print(f"[frog] Playing {dur:.1f}s on 'dmixer' (shared, so Spotify Connect can coexist)")
             _stop_event.clear()
-            proc = subprocess.Popen(['aplay', '-D', 'hw:Device,0', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.Popen(['aplay', '-D', 'dmixer', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             while proc.poll() is None:
                 if check_stop_signal():
                     proc.terminate()
@@ -535,10 +539,26 @@ def check_battery_warning():
         pass
 
 # ---------- Wake Word ----------
+# Custom-trained model (e.g. via openWakeWord's automatic_model_training.ipynb)
+# goes here as a .onnx file — colocated with this script, deployed separately.
+WAKEWORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wakeword')
+
+def _find_wakeword_model():
+    """Return the path to a custom-trained wake word .onnx model, or None if not deployed yet."""
+    if not os.path.isdir(WAKEWORD_DIR):
+        return None
+    for fname in sorted(os.listdir(WAKEWORD_DIR)):
+        if fname.endswith('.onnx'):
+            return os.path.join(WAKEWORD_DIR, fname)
+    return None
+
 def wait_for_wake_word():
     """
     In DEV_MODE: just press Enter.
-    On Pi: uses openwakeword to detect 'hey pi'.
+    Otherwise: listens for a custom-trained wake word (openwakeword) if a model is
+    deployed in WAKEWORD_DIR, interleaved with screen-tap polling either way.
+    Falls back to tap-only if openwakeword isn't installed or no model is deployed —
+    this keeps tap-to-speak working even before the wake word model exists.
     """
     if DEV_MODE:
         # Poll for pending speech every 2s while waiting for Enter
@@ -559,25 +579,15 @@ def wait_for_wake_word():
                 return ("user", None)
             time.sleep(0.5)
 
-    if IS_PI:
-        # On Pi: poll for screen tap trigger (tap the screen UI to speak)
-        print("[frog] Waiting for screen tap...")
-        while True:
-            if check_touch_trigger():
-                print("[frog] Touch trigger detected!")
-                _play_beep()
-                return ("user", None)
-            pending = check_pending_speech()
-            if pending:
-                return ("pending", pending)
-            time.sleep(0.3)
     try:
         from openwakeword.model import Model
-        import openwakeword
-        _oww_models_dir = os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
-        _jarvis_path = os.path.join(_oww_models_dir, "hey_jarvis_v0.1.onnx")
-        oww = Model(wakeword_model_paths=[_jarvis_path])
-        print("[frog] Waiting for wake word 'Hey Jarvis'...")
+        model_path = _find_wakeword_model()
+        if model_path is None:
+            raise FileNotFoundError(f"no .onnx model in {WAKEWORD_DIR}")
+        model_name = os.path.splitext(os.path.basename(model_path))[0]
+
+        oww = Model(wakeword_model_paths=[model_path])
+        print(f"[frog] Waiting for wake word 'Hey Frog' (model: {model_name})...")
         chunk_size = 1280
         _poll_counter = 0
         with sd.InputStream(samplerate=16000, channels=CHANNELS, dtype='int16', blocksize=chunk_size) as stream:
@@ -586,7 +596,7 @@ def wait_for_wake_word():
                 if chunk.ndim > 1:
                     chunk = chunk.mean(axis=1).astype(np.int16)
                 oww.predict(chunk.flatten())
-                scores = oww.prediction_buffer.get("hey_jarvis_v0.1", [0])
+                scores = oww.prediction_buffer.get(model_name, [0])
                 if scores and scores[-1] > 0.3:
                     print("[frog] Wake word detected!")
                     _play_beep()
@@ -600,10 +610,17 @@ def wait_for_wake_word():
                     pending = check_pending_speech()
                     if pending:
                         return ("pending", pending)
-    except ImportError:
-        print("[frog] openwakeword not installed, falling back to Enter key.")
-        input("[frog] Press Enter to speak...")
-        return ("user", None)
+    except (ImportError, FileNotFoundError) as e:
+        print(f"[frog] Wake word unavailable ({e}) — falling back to screen tap only.")
+        while True:
+            if check_touch_trigger():
+                print("[frog] Touch trigger detected!")
+                _play_beep()
+                return ("user", None)
+            pending = check_pending_speech()
+            if pending:
+                return ("pending", pending)
+            time.sleep(0.3)
 
 # ---------- Conversation window ----------
 def wait_for_tap(timeout=30):
@@ -611,7 +628,7 @@ def wait_for_tap(timeout=30):
     After a response, stay tap-ready for `timeout` seconds.
     Returns True if user tapped (keep chatting), False if timed out (go to wake word).
     """
-    print(f"[frog] Conversation window open ({timeout}s) — tap mic or say 'Hey Jarvis'")
+    print(f"[frog] Conversation window open ({timeout}s) — tap mic or say 'Hey Frog'")
     deadline = time.time() + timeout
     while time.time() < deadline:
         if check_touch_trigger():
@@ -668,8 +685,10 @@ def main():
     print("========================================")
     if DEV_MODE:
         print("  Mode: Development (press Enter to speak)")
+    elif _find_wakeword_model():
+        print("  Mode: Wake word ('Hey Frog') + screen tap")
     else:
-        print("  Mode: Wake word ('Hey Jarvis')")
+        print("  Mode: Screen tap only (no wake word model deployed yet)")
     print(f"  Server: {SERVER_URL}")
     print("========================================\n")
 

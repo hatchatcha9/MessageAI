@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=480, initial-scale=1.0">
+  <title>frog — Calendar</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-2: #e8b64a;
+    }
+
+    body {
+      width: 480px;
+      background: var(--ground);
+      color: var(--ink);
+      font-family: -apple-system, 'Segoe UI', 'Noto Sans', sans-serif;
+      font-size: 14px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+      padding-bottom: 24px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #top-bar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      padding: 0 14px;
+      background: #151d13;
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    #back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 12px 8px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #back-btn:active { opacity: 0.6; }
+    #back-btn svg { width: 18px; height: 18px; }
+
+    #top-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    #top-spacer { width: 44px; }
+
+    #content { padding: 4px 12px 0; }
+
+    .empty-state {
+      margin-top: 60px;
+      text-align: center;
+      color: var(--muted-2);
+      font-size: 13px;
+      letter-spacing: 0.5px;
+    }
+
+    .day-block {
+      margin: 12px 0;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-left: 2px solid var(--accent);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .day-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: var(--accent);
+      padding: 12px 16px 10px;
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    .event-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--hairline);
+    }
+    .event-row:last-child { border-bottom: none; }
+
+    .event-time {
+      width: 76px;
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-2);
+      font-variant-numeric: tabular-nums;
+    }
+    .event-time.all-day { color: var(--muted-2); }
+
+    .event-title {
+      font-size: 13px;
+      color: var(--ink);
+    }
+  </style>
+</head>
+<body>
+
+<div id="top-bar">
+  <a id="back-btn" href="/screen.html">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="10,3 5,8 10,13"></polyline>
+    </svg>
+    Screen
+  </a>
+  <div id="top-title">Calendar</div>
+  <div id="top-spacer"></div>
+</div>
+
+<div id="content">
+  <div id="list"></div>
+</div>
+
+<script>
+  function formatDayLabel(dateStr) {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+
+    const isToday = date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+    const isTomorrow = date.getFullYear() === tomorrow.getFullYear() && date.getMonth() === tomorrow.getMonth() && date.getDate() === tomorrow.getDate();
+    if (isToday) return 'Today';
+    if (isTomorrow) return 'Tomorrow';
+
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${days[date.getDay()]}, ${months[date.getMonth()]} ${date.getDate()}`;
+  }
+
+  function formatTime(iso) {
+    const d = new Date(iso);
+    const h = d.getHours(), m = d.getMinutes();
+    const period = h < 12 ? 'AM' : 'PM';
+    const h12 = h % 12 || 12;
+    return m === 0 ? `${h12} ${period}` : `${h12}:${String(m).padStart(2, '0')} ${period}`;
+  }
+
+  async function load() {
+    const list = document.getElementById('list');
+    try {
+      const res = await fetch('/api/calendar/events');
+      const data = await res.json();
+
+      if (!data.configured) {
+        list.innerHTML = '<div class="empty-state">Calendar not connected.</div>';
+        return;
+      }
+      if (data.error) {
+        list.innerHTML = `<div class="empty-state">${data.error}</div>`;
+        return;
+      }
+      if (!data.days.length) {
+        list.innerHTML = '<div class="empty-state">No events in the next 7 days.</div>';
+        return;
+      }
+
+      list.innerHTML = data.days.map(day => `
+        <div class="day-block">
+          <div class="day-label">${formatDayLabel(day.date)}</div>
+          ${day.events.map(ev => `
+            <div class="event-row">
+              <div class="event-time${ev.allDay ? ' all-day' : ''}">${ev.allDay ? 'All day' : formatTime(ev.time)}</div>
+              <div class="event-title">${ev.title.replace(/</g, '&lt;')}</div>
+            </div>
+          `).join('')}
+        </div>
+      `).join('');
+    } catch (e) {
+      list.innerHTML = '<div class="empty-state">Could not reach the server.</div>';
+    }
+  }
+
+  // ── Drag-to-scroll (touchscreen reports as mouse, not touch) ───────────────
+  (function enableDragScroll() {
+    const SKIP = 'button, a, input';
+    let dragging = false, startY = 0, startScroll = 0;
+
+    document.body.addEventListener('pointerdown', e => {
+      if (e.target.closest(SKIP)) return;
+      dragging = true;
+      startY = e.clientY;
+      startScroll = window.scrollY;
+    });
+    document.body.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      window.scrollTo(0, startScroll - (e.clientY - startY));
+    });
+    const stopDrag = () => { dragging = false; };
+    document.body.addEventListener('pointerup', stopDrag);
+    document.body.addEventListener('pointercancel', stopDrag);
+    document.body.addEventListener('pointerleave', stopDrag);
+  })();
+
+  load();
+  setInterval(load, 60 * 1000);
+</script>
+</body>
+</html>
