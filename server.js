@@ -26,6 +26,12 @@ if (TWILIO_ENABLED) {
     try { doordash = require('./doordash');   } catch (e) { console.warn('[DoorDash] Module unavailable:', e.message); }
 }
 
+// DoorDash browsing (search/menu/cart) for the touchscreen UI — available regardless of
+// TWILIO_ENABLED, same as calendar/spotify. Only search/menu/cart are used here; checkout
+// and placeOrder are intentionally never called from the /api/food/* routes below.
+let doordashUI = null;
+try { doordashUI = require('./doordash'); } catch (e) { console.warn('[Food] doordash module unavailable:', e.message); }
+
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
 
@@ -2851,6 +2857,163 @@ app.get('/api/spotify/devices', async (req, res) => {
         console.error('[Spotify] /api/spotify/devices error:', err.message);
         res.status(502).json({ configured: true, error: 'Could not reach Spotify.', devices: [] });
     }
+});
+
+// Food (DoorDash) — used by food.html for direct (non-voice) restaurant/menu browsing
+// and cart building. Deliberately stops at the cart: checkoutCurrentCart/placeOrder are
+// never called from these routes, so nothing here can spend real money.
+app.get('/api/food/status', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const address = db.getUserAddress(user.id);
+    const creds = db.getDoorDashCredentials(user.id) || (process.env.DOORDASH_EMAIL ? { email: process.env.DOORDASH_EMAIL, password: process.env.DOORDASH_PASSWORD } : null);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    res.json({
+        available: !!doordashUI,
+        configured: !!creds,
+        hasAddress: !!address,
+        restaurant: current ? { id: current.id, name: current.name } : null,
+    });
+});
+
+app.get('/api/food/search', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const query = (req.query.q || '').trim().toLowerCase();
+    if (!query) return res.status(400).json({ error: 'Missing search query.' });
+
+    const address = db.getUserAddress(user.id);
+    if (!address) return res.status(400).json({ error: 'No delivery address saved yet.' });
+
+    const credentials = db.getDoorDashCredentials(user.id) || {
+        email: process.env.DOORDASH_EMAIL,
+        password: process.env.DOORDASH_PASSWORD,
+    };
+
+    try {
+        const cached = db.getCachedSearchResults(user.id, query);
+        if (cached && cached.length > 0) {
+            return res.json({ restaurants: cached, cached: true });
+        }
+        const result = await doordashUI.searchRestaurantsNearAddress(credentials, address, query);
+        if (!result.success) return res.status(502).json({ error: result.error || 'Search failed.' });
+        db.cacheSearchResults(user.id, query, result.restaurants);
+        res.json({ restaurants: result.restaurants, cached: false });
+    } catch (err) {
+        console.error('[Food] /api/food/search error:', err.message);
+        res.status(502).json({ error: err.message || 'Search failed.' });
+    }
+});
+
+app.post('/api/food/select', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const { id, name, url } = req.body || {};
+    if (!url || !id) return res.status(400).json({ error: 'Missing restaurant id/url.' });
+
+    try {
+        let menuItems = db.getCachedRestaurantMenu(user.id, id);
+
+        // A search/menu cache hit means the DATA is cached, not that the browser has a live
+        // page — e.g. after a server restart, or if the search itself was a cache hit and
+        // never touched the browser. prewarmBrowser() launches it if needed (no-op if already up).
+        await doordashUI.prewarmBrowser().catch(() => {});
+
+        // Always navigate the browser here — a cached menu doesn't guarantee the browser
+        // still has a live page on this restaurant, and cart/add assumes the page is
+        // already on the right store.
+        const menuResult = await doordashUI.selectRestaurantFromSearch(url);
+        if (!menuResult.success) return res.status(502).json({ error: menuResult.error || 'Could not load menu.' });
+        const restaurantName = menuResult.restaurantName || name;
+        const finalUrl = menuResult.url || url;
+
+        if (!menuItems) {
+            menuItems = await doordashUI.extractMenuItems();
+            if (menuItems && menuItems.length > 0) db.cacheRestaurantMenu(user.id, id, menuItems);
+        }
+
+        db.clearCart(user.id);
+        doordashUI.clearBrowserCart().catch(() => {});
+        db.cacheCurrentRestaurant(user.id, { id, name: restaurantName, url: finalUrl, source: 'doordash', menu: menuItems || [] });
+
+        // Keep voice/SMS state in sync so switching between touchscreen and voice doesn't desync.
+        const prefs = db.getUserPreferences(user.id);
+        prefs.currentRestaurant = id;
+        prefs.currentRestaurantSource = 'doordash';
+        prefs.currentRestaurantUrl = finalUrl;
+        delete prefs.pendingDoordashItem;
+        delete prefs.pendingDoordashOptions;
+        delete prefs.pendingDoordashSelections;
+        delete prefs.pendingQueuedItems;
+        db.setUserPreferences(user.id, prefs);
+
+        res.json({ restaurant: { id, name: restaurantName, url: finalUrl }, menu: menuItems || [] });
+    } catch (err) {
+        console.error('[Food] /api/food/select error:', err.message);
+        res.status(502).json({ error: err.message || 'Could not load menu.' });
+    }
+});
+
+app.get('/api/food/cart', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    const cart = db.getCart(user.id);
+    const items = (current && cart.items[current.id]) ? cart.items[current.id] : [];
+    const total = items.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
+    res.json({ restaurant: current ? { id: current.id, name: current.name } : null, items, total });
+});
+
+app.post('/api/food/cart/add', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    if (!current) return res.status(400).json({ error: 'No restaurant selected.' });
+
+    const { itemIndex, item } = req.body || {};
+    if (!item || !item.name || itemIndex === undefined) return res.status(400).json({ error: 'Missing item.' });
+
+    try {
+        // skipOptionsCheck + selectFirst: auto-pick the first choice in any required option
+        // group (size, seasoning, etc.) instead of blocking — most menu items have at least
+        // one required group, so blocking on needsOptions would make this view mostly unusable.
+        // The result still lands in the cart only, never checkout.
+        const addResult = await doordashUI.addItemByIndex(itemIndex, { selectFirst: true, skipOptionsCheck: true, restaurantUrl: current.url }, item);
+        if (addResult && addResult.needsOptions) {
+            return res.status(409).json({
+                error: 'This item needs a choice this quick view couldn\'t auto-fill — use voice or SMS for it.',
+                needsOptions: true,
+                requiredOptions: addResult.requiredOptions || [],
+            });
+        }
+        if (addResult && addResult.success === false) {
+            // If the page drifted off the store (e.g. a prior request's error recovery
+            // navigated away), get back to a known-good state so the *next* tap has a
+            // chance, even though this one still reports the failure to the user.
+            if (current.url) doordashUI.navigateToRestaurantPage(current.url).catch(() => {});
+            return res.status(502).json({ error: addResult.error || 'Could not add item.' });
+        }
+        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, price: item.price || 0, source: 'doordash' });
+        const cart = db.getCart(user.id);
+        res.json({ items: cart.items[current.id] || [] });
+    } catch (err) {
+        console.error('[Food] /api/food/cart/add error:', err.message);
+        res.status(502).json({ error: err.message || 'Could not add item.' });
+    }
+});
+
+app.post('/api/food/cart/remove', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    if (!current) return res.status(400).json({ error: 'No restaurant selected.' });
+    const { itemId } = req.body || {};
+    const items = db.removeFromCart(user.id, current.id, itemId);
+    res.json({ items: items[current.id] || [] });
+});
+
+app.post('/api/food/cart/clear', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    db.clearCart(user.id);
+    if (doordashUI) doordashUI.clearBrowserCart().catch(() => {});
+    res.json({ items: [] });
 });
 
 app.get('/api/health', (req, res) => {

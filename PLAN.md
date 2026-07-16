@@ -1,24 +1,24 @@
 # frog — Raspberry Pi Voice AI Assistant
 # 2-Hour Daily Work Plan
 
-## Project State (as of 2026-05-08)
+## Project State (updated 2026-07-16 — most of this plan is done; see notes inline)
 
 **What works:**
-- `server.js` — Express server with Claude, weather (OpenWeather), reminders (in-memory), news (NewsAPI), DoorDash food ordering
-- `voice/voice_loop.py` — Whisper STT + Kokoro TTS, mic recording with speech/silence detection
-- `public/screen.html` — 480×320 touchscreen UI (idle/listening/thinking/speaking states via SSE)
+- `server.js` — Express server with Claude, weather (OpenWeather), reminders (speaks aloud via pending-speech queue), news (NewsAPI), calendar, Spotify, GPS, camera, battery, todo, and DoorDash browsing (search/menu/cart) via `/api/food/*`
+- `voice/voice_loop.py` — Whisper STT + Piper/Kokoro TTS, mic recording with speech/silence detection (thresholds now tunable via `settings.json` + `scripts/calibrate.py`, not hardcoded)
+- `public/screen.html`, `calendar.html`, `spotify.html`, `settings.html`, `food.html` — pond/terrarium-themed 480×320 touchscreen UI
+- Deployed to physical Pi hardware (Days 4/6/7 below are done)
 
-**Known issues:**
-- Mic thresholds untested — `SPEECH_THRESHOLD=200`, `SILENCE_THRESHOLD=80` (ambient RMS is 0–69)
-- Wake word is `hey_jarvis` placeholder — needs replacing with "Hey Frog" or similar
-- Reminders fire but don't speak aloud — callback only `console.log`s
-- All code still says "PiAI" internally — needs renaming to "frog"
-- Old SMS/DoorDash code still lives in server.js alongside voice code
+**Still open:**
+- Wake word is still `hey_jarvis` (openWakeWord built-in) — a custom "Hey Frog" model needs training via openWakeWord's `automatic_model_training.ipynb` on Google Colab. Blocked on Google account sign-in in the automation browser — needs a human to complete the Colab login/training run, then drop the resulting `.onnx` into `voice/wakeword/`. See Day 2 below.
+- DoorDash browser session currently shows an "Enter your delivery address / Sign in for saved address" prompt when adding items to cart (search + menu browsing work fine). Needs the DoorDash account re-confirmed/re-logged-in in the `browser-data/` Chrome profile — not something to do unattended since it may trigger OTP/2FA.
+- Old SMS/DoorDash command flow still lives in `server.js` behind `TWILIO_ENABLED` (Day 5 cleanup below never got done — low priority, not blocking anything)
 
 ---
 
-## Day 1 — Test & Fix Voice Loop ✅ / 🔲
+## Day 1 — Test & Fix Voice Loop ✅ DONE
 **Goal:** Get a full working end-to-end voice conversation.
+Thresholds are tunable via `settings.json` (`speechThreshold`, `silenceThreshold`) with `scripts/calibrate.py` to measure real mic RMS — no longer hardcoded.
 
 ### Tasks
 - [ ] Start server: `cd C:\Users\hatch\projects\frog && node server.js`
@@ -44,43 +44,26 @@
 
 ---
 
-## Day 2 — Wake Word "Hey Frog"
+## Day 2 — Wake Word "Hey Frog" 🔲 STILL OPEN (blocked)
 **Goal:** Replace press-Enter DEV_MODE with an always-on wake word.
 
+`voice_loop.py` already has the plumbing done: `wait_for_wake_word()` looks for a `.onnx` file in `voice/wakeword/`, loads it via openwakeword if present, and falls back to tap-only otherwise (see `_find_wakeword_model()`). The only remaining step is producing that `.onnx` file.
+
 ### Tasks
-- [ ] Install openwakeword: `pip install openwakeword`
-- [ ] Test openwakeword's built-in models — `hey_jarvis` is the best available built-in
-- [ ] Decide: use `hey_jarvis` temporarily OR train/download a custom "hey frog" model
-  - Custom model option: https://github.com/dscripka/openWakeWord#custom-models
-  - Built-in option: ship with `hey_jarvis` and swap later on Pi
-- [ ] Update `voice_loop.py`: set `DEV_MODE=false` default when openwakeword is available
-- [ ] Add a short audio cue (beep or "I'm listening") when wake word fires
+- [x] openwakeword integration + fallback logic already in `voice_loop.py`
+- [ ] Train a custom "Hey Frog" model via openWakeWord's `automatic_model_training.ipynb` on Google Colab (free GPU): https://github.com/dscripka/openWakeWord#custom-models
+  - **Blocked:** requires signing into a Google account in the browser to run the Colab notebook — needs to be done by a human, not headless/unattended (2026-07-16 attempt: no authenticated Google session available).
+- [ ] Drop the resulting `.onnx` into `voice/wakeword/`
 - [ ] Test: say the wake word, pause, speak, get response
 
 **Done when:** You can trigger the assistant hands-free without pressing Enter.
 
 ---
 
-## Day 3 — Rename + Reminder Voice Delivery
+## Day 3 — Rename + Reminder Voice Delivery ✅ DONE
 **Goal:** Make reminders actually speak when they fire, and rename frog throughout.
 
-### Rename tasks
-- [ ] In `server.js`: rename "PiAI" → "frog" in all log messages and comments
-- [ ] In `voice/voice_loop.py`: rename "PiAI" → "frog" in all print statements
-- [ ] In `public/screen.html`: rename any "PiAI" references
-- [ ] In `package.json`: update description
-
-### Reminder voice delivery
-Currently `reminders.js` fires a callback that only `console.log`s. It needs to trigger the voice loop to speak.
-
-**Approach:** Add a `/api/reminder-fired` endpoint to the server. The reminder callback POSTs to it. The voice loop polls this endpoint and speaks the reminder message.
-
-- [ ] In `server.js`: add a reminder queue + `/api/reminder-fired` GET endpoint that returns pending reminders
-- [ ] Update reminder callback in `processCommands` to push to the queue instead of console.log
-- [ ] In `voice/voice_loop.py`: add a background thread that polls `/api/reminder-fired` every 5 seconds and calls `speak()` when a reminder is pending
-- [ ] Test: set a 1-minute reminder, wait, hear it spoken aloud
-
-**Done when:** Reminders speak themselves out loud without user input.
+Renaming is done (no "PiAI" left in code, only in this file's history above). Reminders push to a pending-speech queue (`pushPendingSpeech()` in `server.js`) that the voice loop polls and speaks — same mechanism ended up covering timers too (`[TIMER:]` command).
 
 ---
 
@@ -102,51 +85,21 @@ Currently `reminders.js` fires a callback that only `console.log`s. It needs to 
 
 ---
 
-## Day 5 — Code Cleanup + More Voice Features
+## Day 5 — Code Cleanup + More Voice Features 🟡 MOSTLY DONE
 **Goal:** Clean up dead code and add 2–3 more useful voice commands.
 
-### Cleanup
-- [ ] Move SMS/DoorDash-specific logic into a `modules/doordash_sms.js` and guard it behind `TWILIO_ENABLED`
-- [ ] Clean the voice system prompt — remove SMS command hints that don't apply to voice
-- [ ] Remove the old `PLAN.md` SMS content (this file replaces it)
-
-### New voice features (pick 2)
-- [ ] **Define word** — "define serendipity" → dictionary lookup (free API: dictionaryapi.dev)
-- [ ] **Timer** — "set a 5 minute timer" → same as reminder but says "your timer is done"
-- [ ] **Joke** — "tell me a joke" → Claude tells a short spoken joke
-- [ ] **Wikipedia summary** — "tell me about black holes" → Wikipedia API first paragraph
-- [ ] **Math** — "what is 15 percent of 47 dollars" → Claude calculates and answers
-
-**Done when:** Voice assistant has at least 2 new useful commands and code is cleaner.
+New features shipped, well beyond the original 2-pick list: timer, calendar, Spotify, camera, GPS, battery, todo. Cleanup item not done:
+- [ ] Move SMS/DoorDash-specific logic into a `modules/doordash_sms.js` and guard it behind `TWILIO_ENABLED` (low priority — not blocking anything, `TWILIO_ENABLED=false` already keeps it dormant)
 
 ---
 
-## Day 6 — Hardware Arrives (Pi Setup)
-*Expected: ~1 week after ordering. Adjust date when parts arrive.*
-
-### Tasks
-- [ ] Flash Raspberry Pi OS Lite (64-bit) to CM4 eMMC using `rpiboot` + Raspberry Pi Imager
-- [ ] Run `./scripts/install.sh` on the Pi
-- [ ] Copy `.env` from Windows dev machine to Pi
-- [ ] Test voice loop on Pi hardware (same steps as Day 1)
-- [ ] Tune performance: switch Whisper model to `tiny.en` if `base.en` is too slow on Pi
-
-**Done when:** frog runs on the actual Pi and responds via the physical speaker + mic.
+## Day 6 — Hardware Arrives (Pi Setup) ✅ DONE
+`setup_pi.sh` exists and frog is deployed and running on the physical Pi.
 
 ---
 
-## Day 7 — Hardware Polish
-**Goal:** Make frog production-ready on the Pi.
-
-### Tasks
-- [ ] Configure correct audio device (USB mic, WM8960 audio HAT)
-- [ ] Set default audio input/output in `/etc/asound.conf`
-- [ ] Test wake word on physical mic (may need threshold tuning)
-- [ ] Connect touchscreen — test screen.html at Pi's IP in Chromium kiosk mode
-- [ ] Enable auto-start on boot via systemd
-- [ ] Test GPS module if hardware arrived (`modules/gps.js`)
-
-**Done when:** Pi boots, frog starts automatically, wake word works, screen shows states.
+## Day 7 — Hardware Polish ✅ DONE
+Touchscreen, audio, and auto-start are working on the deployed Pi. Wake word on physical mic is still pending the same Colab blocker as Day 2.
 
 ---
 
