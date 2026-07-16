@@ -88,7 +88,7 @@ Renaming is done (no "PiAI" left in code, only in this file's history above). Re
 ## Day 5 — Code Cleanup + More Voice Features 🟡 MOSTLY DONE
 **Goal:** Clean up dead code and add 2–3 more useful voice commands.
 
-New features shipped, well beyond the original 2-pick list: timer, calendar, Spotify, camera, GPS, battery, todo. Cleanup item not done:
+All five originally-suggested features shipped (`[MATH:]`, `[JOKE]`, `[DEFINE:]`, `[WIKI:]`, plus the timer from Day 3), well beyond the "pick 2" goal — plus calendar, Spotify, camera, GPS, battery, and todo, which weren't even on the original list. Cleanup item not done:
 - [ ] Move SMS/DoorDash-specific logic into a `modules/doordash_sms.js` and guard it behind `TWILIO_ENABLED` (low priority — not blocking anything, `TWILIO_ENABLED=false` already keeps it dormant)
 
 ---
