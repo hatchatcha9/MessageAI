@@ -10,7 +10,7 @@
 - Deployed to physical Pi hardware (Days 4/6/7 below are done)
 
 **Still open:**
-- Wake word is still `hey_jarvis` (openWakeWord built-in) — a custom "Hey Frog" model needs training via openWakeWord's `automatic_model_training.ipynb` on Google Colab. Blocked on Google account sign-in in the automation browser — needs a human to complete the Colab login/training run, then drop the resulting `.onnx` into `voice/wakeword/`. See Day 2 below.
+- Wake word is still `hey_jarvis` (openWakeWord built-in) — custom "Hey Frog" training is in progress in Colab (data generation + augmentation done, training not yet run). Paused 2026-07-16 mid-fix on a sample-rate issue. See Day 2 below for the exact resume point and notebook link.
 - DoorDash browser session currently shows an "Enter your delivery address / Sign in for saved address" prompt when adding items to cart (search + menu browsing work fine). Needs the DoorDash account re-confirmed/re-logged-in in the `browser-data/` Chrome profile — not something to do unattended since it may trigger OTP/2FA.
 - Old SMS/DoorDash command flow still lives in `server.js` behind `TWILIO_ENABLED` (Day 5 cleanup below never got done — low priority, not blocking anything)
 
@@ -44,17 +44,34 @@ Thresholds are tunable via `settings.json` (`speechThreshold`, `silenceThreshold
 
 ---
 
-## Day 2 — Wake Word "Hey Frog" 🔲 STILL OPEN (blocked)
+## Day 2 — Wake Word "Hey Frog" 🟡 IN PROGRESS (paused 2026-07-16, resume here)
 **Goal:** Replace press-Enter DEV_MODE with an always-on wake word.
 
 `voice_loop.py` already has the plumbing done: `wait_for_wake_word()` looks for a `.onnx` file in `voice/wakeword/`, loads it via openwakeword if present, and falls back to tap-only otherwise (see `_find_wakeword_model()`). The only remaining step is producing that `.onnx` file.
 
+**Notebook:** https://colab.research.google.com/drive/1FW7IP-l9RgvFLAl9_ScfgxhGFfBS0SOU (a copy of openWakeWord's `automatic_model_training.ipynb`, saved to Roman's Drive, target phrase set to "hey frog", T4 GPU runtime). Data generation (Step 1) and augmentation (Step 2) both completed successfully. Training (Step 3) has not run yet — one data-format issue was still being fixed when the session paused.
+
+### What was fixed to get this far (all of it is baked into the notebook's cells already — just needs "Run all" or resuming from where it stopped)
+The notebook is old enough that several of its pinned dependencies/upstream repos have drifted out of compatibility with current Colab (Python 3.12). In order, the fixes applied:
+1. `piper-phonemize` has no Python 3.12 wheel on PyPI anymore → installed `piper-phonemize-fix` instead (same `piper_phonemize` import name, drop-in).
+2. `torch_audiomentations==0.11.0` calls `torchaudio.set_audio_backend()`, removed in the newer torchaudio Colab ships → sed-patched that one line to a no-op in the installed package.
+3. `piper-sample-generator` (cloned from `main`) was refactored into a package and no longer exposes a flat `generate_samples.py` → `git checkout ded9350` (last commit before the "Move to package" refactor) inside `piper-sample-generator/`.
+4. The Debian-packaged system `pkg_resources` (used by the `pronouncing` package) hits multiple removed Python-2-era APIs (`pkgutil.ImpImporter`, `find_module`) on Python 3.12, and current setuptools (83.0.0) has dropped `pkg_resources` entirely → `pip install "setuptools==69.5.1"` (last version confirmed to still ship `pkg_resources` while being 3.12-compatible).
+5. `generate_samples()` at the `ded9350` commit needs an explicit `model` argument that openwakeword's current `train.py` doesn't pass → patched `train.py` (regex over all 4 call sites) to inject `model="piper-sample-generator/models/en_US-libritts_r-medium.pt"`.
+6. Missing the `piper` package itself (`from piper import PiperVoice, SynthesisConfig`) → `pip install piper-tts`.
+7. **(in progress when paused)** The piper LibriTTS model synthesizes at 22050 Hz, not the 16000 Hz `augment_clips` expects → wrote a `fix_sr()` helper (cell just above the last one) that resamples any non-16kHz `.wav` under `my_custom_model/hey_frog/` in place via `scipy.signal.resample_poly`. **The function-definition cell was typed but its Ctrl+Enter run didn't actually fire (confirmed empty output) — the very next step is: run that cell, then run the cell below it that calls `fix_sr()` over all the files (~2-3 min for ~2000+ files), confirm "resampled: N" prints without error, then re-run Step 2 (augment_clips) and Step 3 (train_model, `--train_model`, 10,000 steps, not yet attempted).**
+
 ### Tasks
 - [x] openwakeword integration + fallback logic already in `voice_loop.py`
-- [ ] Train a custom "Hey Frog" model via openWakeWord's `automatic_model_training.ipynb` on Google Colab (free GPU): https://github.com/dscripka/openWakeWord#custom-models
-  - **Blocked:** requires signing into a Google account in the browser to run the Colab notebook — needs to be done by a human, not headless/unattended (2026-07-16 attempt: no authenticated Google session available).
-- [ ] Drop the resulting `.onnx` into `voice/wakeword/`
+- [x] Google sign-in completed, Colab notebook set up, GPU runtime connected
+- [x] Step 1 (generate_clips) — done, ~1 min
+- [x] Step 2 (augment_clips) — done as of the last successful run, but needs re-running after the sample-rate fix above
+- [ ] Fix sample rate (22050→16000) on all generated clips — function written, not yet executed (see above)
+- [ ] Step 3 (train_model, 10,000 steps) — not yet attempted
+- [ ] Download the resulting `.onnx` from `my_custom_model/hey_frog/` and drop it into `voice/wakeword/` on this machine, then `scp` it to the Pi (`~/frog/voice/wakeword/` — see `setup_pi.sh` for the scp pattern used for `.env`)
 - [ ] Test: say the wake word, pause, speak, get response
+
+**Note on Colab session persistence:** the notebook autosaves to Drive continuously, so no code/progress is lost by closing the tab. The T4 runtime itself may disconnect after a period of inactivity — if so, just reconnect and re-run from the sample-rate-fix cell onward (Steps 1-2's outputs/files persist on the runtime's disk only until it's reset, so if the runtime *did* fully reset, cells 1 through the config cell would need re-running first, then generate_clips again — check by running `!ls my_custom_model/hey_frog/` first to see if the generated clips are still there).
 
 **Done when:** You can trigger the assistant hands-free without pressing Enter.
 
