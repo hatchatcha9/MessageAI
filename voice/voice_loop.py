@@ -312,13 +312,30 @@ def _play_wav(path):
     sd.wait()
 
 # ---------- STT ----------
+# Nudges Whisper's decoding toward frog's actual command vocabulary — spelled out as
+# a natural transcript rather than a keyword list, since that's what biases word
+# choice most effectively. Costs nothing at inference time.
+_WHISPER_PROMPT = (
+    "Hey Frog. What's the weather. Set a timer for five minutes. Remind me to call mom. "
+    "What's on my calendar. Play some music on Spotify. Skip this song. Check the wifi. "
+    "Turn up the volume. Shut down. Restart. Tell me a joke. Define a word. "
+    "What's the latest news. What's two plus two. Look that up on Wikipedia. "
+    "What's the stock price of Apple. Where am I."
+)
+
 def transcribe(audio_np):
     """Run Whisper on a numpy int16 audio array. Returns text string."""
     audio_f32 = audio_np.astype(np.float32) / 32768.0
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
     _save_wav(wav_path, audio_np)
-    segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1, vad_filter=False)
+    # vad_filter trims non-speech before decoding — without it, a mostly-silent/noisy
+    # clip can send Whisper into a slow repetitive-hallucination loop instead of
+    # cleanly returning empty text. condition_on_previous_text=False avoids the same
+    # failure mode across segments; each utterance here is independent anyway.
+    segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1,
+                                      vad_filter=True, condition_on_previous_text=False,
+                                      initial_prompt=_WHISPER_PROMPT)
     text = " ".join(s.text for s in segments).strip()
     os.unlink(wav_path)
     return text
@@ -552,46 +569,75 @@ def _find_wakeword_model():
             return os.path.join(WAKEWORD_DIR, fname)
     return None
 
-def wait_for_wake_word():
+_oww_model = None
+_oww_model_name = None
+
+def _get_wakeword_model():
     """
-    In DEV_MODE: just press Enter.
-    Otherwise: listens for a custom-trained wake word (openwakeword) if a model is
-    deployed in WAKEWORD_DIR, interleaved with screen-tap polling either way.
+    Load the openWakeWord ONNX model once and reuse it. Rebuilding it on every
+    listen cycle (previously: every wake-word wait AND every 30s conversation
+    window) added real CPU load and startup lag right as each window opened —
+    exactly when a "Hey Frog" said early in the window would get missed.
+    Raises the same exceptions as before (ImportError, FileNotFoundError) on
+    first call if openwakeword or the model file isn't available.
+    """
+    global _oww_model, _oww_model_name
+    if _oww_model is not None:
+        return _oww_model, _oww_model_name
+    from openwakeword.model import Model
+    model_path = _find_wakeword_model()
+    if model_path is None:
+        raise FileNotFoundError(f"no .onnx model in {WAKEWORD_DIR}")
+    _oww_model_name = os.path.splitext(os.path.basename(model_path))[0]
+    _oww_model = Model(wakeword_model_paths=[model_path])
+    return _oww_model, _oww_model_name
+
+def _wait_for_trigger(deadline=None):
+    """
+    Shared listener: waits for the wake word, a screen tap, or a pending reminder.
+    If `deadline` (a time.time()-style timestamp) is given, gives up and returns
+    None once it passes — used for the post-response conversation window. With
+    deadline=None, blocks forever (the normal idle wait).
     Falls back to tap-only if openwakeword isn't installed or no model is deployed —
     this keeps tap-to-speak working even before the wake word model exists.
     """
     if DEV_MODE:
-        # Poll for pending speech every 2s while waiting for Enter
         import select, sys
         print("\n[frog] Press Enter to speak (or Ctrl+C to quit)...", end='', flush=True)
-        while True:
+        while deadline is None or time.time() < deadline:
             pending = check_pending_speech()
             if pending:
-                print()  # newline after the prompt
+                print()
                 return ("pending", pending)
             if check_touch_trigger():
                 print()
                 _play_beep()
                 return ("user", None)
-            # Non-blocking check for Enter key (Windows-compatible via threading)
             if _enter_pressed():
                 _play_beep()
                 return ("user", None)
             time.sleep(0.5)
+        return None
 
     try:
-        from openwakeword.model import Model
-        model_path = _find_wakeword_model()
-        if model_path is None:
-            raise FileNotFoundError(f"no .onnx model in {WAKEWORD_DIR}")
-        model_name = os.path.splitext(os.path.basename(model_path))[0]
-
-        oww = Model(wakeword_model_paths=[model_path])
-        print(f"[frog] Waiting for wake word 'Hey Frog' (model: {model_name})...")
+        oww, model_name = _get_wakeword_model()
+        # openWakeWord zeroes out predictions for the first 5 frames after reset() —
+        # a built-in warm-up guard against false triggers. Reusing the same cached
+        # model across sessions means that guard would otherwise only ever fire once
+        # (on the very first call), leaving every later session — including the one
+        # right after a response, still carrying acoustic context from the wake
+        # phrase that just fired — unprotected. reset() only clears its small score
+        # buffer, not the loaded ONNX session, so this is cheap.
+        oww.reset()
         chunk_size = 1280
         _poll_counter = 0
+        # Mic and speaker share one small USB audio card with no echo cancellation —
+        # opening the wake-word listener right as TTS playback ends lets its own
+        # trailing audio bleed into the mic and register as a false trigger. Give it
+        # a moment to clear first.
+        time.sleep(0.7)
         with sd.InputStream(samplerate=16000, channels=CHANNELS, dtype='int16', blocksize=chunk_size) as stream:
-            while True:
+            while deadline is None or time.time() < deadline:
                 chunk, _ = stream.read(chunk_size)
                 if chunk.ndim > 1:
                     chunk = chunk.mean(axis=1).astype(np.int16)
@@ -610,9 +656,10 @@ def wait_for_wake_word():
                     pending = check_pending_speech()
                     if pending:
                         return ("pending", pending)
+        return None
     except (ImportError, FileNotFoundError) as e:
         print(f"[frog] Wake word unavailable ({e}) — falling back to screen tap only.")
-        while True:
+        while deadline is None or time.time() < deadline:
             if check_touch_trigger():
                 print("[frog] Touch trigger detected!")
                 _play_beep()
@@ -621,26 +668,36 @@ def wait_for_wake_word():
             if pending:
                 return ("pending", pending)
             time.sleep(0.3)
+        return None
+
+def wait_for_wake_word():
+    """
+    In DEV_MODE: just press Enter.
+    Otherwise: listens for a custom-trained wake word (openwakeword) if a model is
+    deployed in WAKEWORD_DIR, interleaved with screen-tap polling either way.
+    """
+    if not DEV_MODE and _find_wakeword_model():
+        model_name = os.path.splitext(os.path.basename(_find_wakeword_model()))[0]
+        print(f"[frog] Waiting for wake word 'Hey Frog' (model: {model_name})...")
+    return _wait_for_trigger(deadline=None)
 
 # ---------- Conversation window ----------
 def wait_for_tap(timeout=30):
     """
-    After a response, stay tap-ready for `timeout` seconds.
-    Returns True if user tapped (keep chatting), False if timed out (go to wake word).
+    After a response, keep listening for the wake word / a screen tap for
+    `timeout` seconds. Returns True if triggered (keep chatting), a
+    ("pending", text) tuple for a due reminder, or False if timed out (go back
+    to the normal idle wake-word wait).
     """
     print(f"[frog] Conversation window open ({timeout}s) — tap mic or say 'Hey Frog'")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if check_touch_trigger():
-            print("[frog] Tap detected — continuing conversation")
-            _play_beep()
-            return True
-        pending = check_pending_speech()
-        if pending:
-            return ("pending", pending)
-        time.sleep(0.2)
-    print("[frog] Conversation window closed — back to wake word")
-    return False
+    result = _wait_for_trigger(deadline=time.time() + timeout)
+    if result is None:
+        print("[frog] Conversation window closed — back to wake word")
+        return False
+    if isinstance(result, tuple) and result[0] == "pending":
+        return result
+    print("[frog] Continuing conversation")
+    return True
 
 # ---------- Single-instance lock ----------
 import atexit

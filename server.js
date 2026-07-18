@@ -3433,6 +3433,47 @@ app.post('/api/voice/clear', (req, res) => {
     }
 });
 
+// Voice endpoint — SSE version used by voice_loop.py's stream_and_speak().
+// Claude itself isn't streamed (processCommands needs the full response to parse
+// bracketed commands), so this waits for the complete reply then emits it as
+// sentence-by-sentence SSE events — lets the Pi start speaking sentence 1 while
+// later sentences are still being written to the response, instead of one long
+// block of TTS.
+app.get('/api/voice/stream', async (req, res) => {
+    const message = req.query.message;
+    if (!message) return res.status(400).json({ error: 'message required' });
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    console.log(`[Voice] Received (stream): ${message}`);
+    broadcastScreenState('thinking', { userText: message });
+
+    try {
+        const { response } = await handleMessage(PI_DEVICE_ID, message, true);
+        console.log(`[Voice] Response (stream): ${response.substring(0, 100)}...`);
+
+        // Split on sentence-ending punctuation followed by whitespace + a capital/
+        // digit/quote — avoids breaking mid-decimal ("3.5 miles" has no space after
+        // the '.', so it's never a split point).
+        const sentences = response.split(/(?<=[.!?])\s+(?=[A-Z0-9"'(])/).map(s => s.trim()).filter(Boolean);
+        if (sentences.length === 0) sentences.push(response.trim());
+
+        for (let i = 0; i < sentences.length - 1; i++) {
+            res.write(`data: ${JSON.stringify({ type: 'sentence', text: sentences[i] })}\n\n`);
+        }
+        res.write(`data: ${JSON.stringify({ type: 'done', remaining: sentences[sentences.length - 1] || '' })}\n\n`);
+    } catch (error) {
+        console.error('[Voice] Stream error:', error);
+        broadcastScreenState('idle');
+        res.write(`data: ${JSON.stringify({ type: 'error' })}\n\n`);
+    }
+
+    res.end();
+});
+
 // Voice endpoint — used by voice_loop.py
 // Accepts: { message: string }
 // Returns: { response: string }
