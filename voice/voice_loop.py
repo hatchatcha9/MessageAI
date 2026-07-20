@@ -235,7 +235,7 @@ def check_stop_signal():
     return False
 
 def speak(text):
-    """Convert text to speech and play it."""
+    """Convert text to speech and play it. Returns False if interrupted by a stop signal, True otherwise."""
     print(f"[frog] Speaking: {text[:80]}...")
     sd.stop()  # cut off any audio still playing before starting new speech
     try:
@@ -264,15 +264,17 @@ def speak(text):
             print(f"[frog] Playing {dur:.1f}s on 'dmixer' (shared, so Spotify Connect can coexist)")
             _stop_event.clear()
             proc = subprocess.Popen(['aplay', '-D', 'dmixer', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            interrupted = False
             while proc.poll() is None:
                 if check_stop_signal():
                     proc.terminate()
                     print("[frog] Stopped by user.")
+                    interrupted = True
                     break
                 time.sleep(0.1)
             os.unlink(play_path)
             print("[frog] Done speaking")
-            return
+            return not interrupted
         else:
             # Use Kokoro TTS (Windows dev machine)
             sample_rate = 24000
@@ -281,7 +283,7 @@ def speak(text):
                 chunks.append(chunk)
             if not chunks:
                 print("[frog] WARN: Kokoro returned no audio chunks")
-                return
+                return True
             audio = np.concatenate(chunks)
 
         # Clear stop event after generation, right before playback
@@ -295,13 +297,15 @@ def speak(text):
             if check_stop_signal():
                 print("[frog] Stopped by user.")
                 sd.stop()
-                return
+                return False
             sd.play(audio[i:i + block], samplerate=sample_rate)
             sd.wait()
             i += block
         print("[frog] Done speaking")
+        return True
     except Exception as e:
         print(f"[frog] TTS error: {e}")
+        return True
 
 def _play_wav(path):
     import wave
@@ -464,9 +468,8 @@ def stream_and_speak(text, user_text=None):
                     if sentence:
                         full_response.append(sentence)
                         set_screen_state('speaking', user_text=user_text, ai_text=' '.join(full_response))
-                        speak(sentence)
-                        if check_stop_signal():
-                            break
+                        if not speak(sentence):
+                            break  # interrupted by stop signal — don't speak remaining queued sentences
 
                 elif data.get('type') == 'done':
                     remaining = data.get('remaining', '').strip()
