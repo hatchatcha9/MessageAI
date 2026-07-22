@@ -338,11 +338,72 @@
       font-weight: 700;
       margin-bottom: 6px;
     }
-    #cart-note {
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.4;
+    #checkout-estimate {
+      margin-bottom: 8px;
+      padding: 8px 10px;
+      background: var(--ground);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
     }
+    #checkout-estimate.hidden { display: none; }
+    .est-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: var(--muted);
+      padding: 2px 0;
+    }
+    .est-row.est-total {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+      border-top: 1px solid var(--hairline);
+      margin-top: 4px;
+      padding-top: 5px;
+    }
+    .est-hint {
+      font-size: 10.5px;
+      color: var(--muted-2);
+      line-height: 1.4;
+      margin-top: 6px;
+    }
+    #checkout-btn {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: none;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 14px;
+      font-weight: 700;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #checkout-btn:active { background: var(--accent-2); }
+    #checkout-btn.confirm { background: var(--accent-2); }
+    #checkout-btn:disabled { opacity: 0.6; }
+    #checkout-cancel {
+      display: block;
+      width: 100%;
+      text-align: center;
+      margin-top: 6px;
+      padding: 6px;
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 12px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #checkout-cancel.hidden { display: none; }
+    #checkout-msg {
+      font-size: 12px;
+      line-height: 1.4;
+      padding: 8px 10px;
+      border-radius: 8px;
+      margin-bottom: 8px;
+    }
+    #checkout-msg.hidden { display: none; }
+    #checkout-msg.success { background: #16261a; border: 1px solid #2a4a30; color: var(--accent); }
+    #checkout-msg.error { background: #2a1a16; border: 1px solid #4a2a20; color: #e89e6a; }
 
     /* ── Floating cart bar ── */
     #cart-bar {
@@ -421,8 +482,17 @@
     </div>
     <div id="cart-list"></div>
     <div id="cart-footer">
-      <div id="cart-total-row"><span>Total</span><span id="cart-total">$0.00</span></div>
-      <div id="cart-note">This is a preview cart — checkout isn't wired up here yet. Say "place my order" to Frog to finish through voice.</div>
+      <div id="cart-total-row"><span>Subtotal</span><span id="cart-total">$0.00</span></div>
+      <div id="checkout-msg" class="hidden"></div>
+      <div id="checkout-estimate" class="hidden">
+        <div class="est-row"><span>Delivery</span><span id="est-delivery">$0.00</span></div>
+        <div class="est-row"><span>Est. service fee</span><span id="est-service">$0.00</span></div>
+        <div class="est-row"><span>Est. tax</span><span id="est-tax">$0.00</span></div>
+        <div class="est-row est-total"><span>Est. total</span><span id="est-total">$0.00</span></div>
+        <div class="est-hint">Estimate only — DoorDash sets the real delivery fee, tax, and tip at checkout.</div>
+      </div>
+      <button id="checkout-btn">Place Order</button>
+      <button id="checkout-cancel" class="hidden">Cancel</button>
     </div>
   </div>
 
@@ -785,6 +855,8 @@
     }
     const total = cartItems.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
     document.getElementById('cart-total').textContent = money(total);
+    document.getElementById('checkout-btn').style.display = cartItems.length === 0 ? 'none' : '';
+    resetCheckoutUI();
   }
 
   async function removeItem(itemId) {
@@ -800,6 +872,81 @@
       updateCartBar();
     } catch {}
   }
+
+  // ── Checkout (two-tap: estimate/confirm, then the real charge) ────────────
+  const checkoutBtn = document.getElementById('checkout-btn');
+  const checkoutCancel = document.getElementById('checkout-cancel');
+  const checkoutEstimate = document.getElementById('checkout-estimate');
+  const checkoutMsg = document.getElementById('checkout-msg');
+  let checkoutConfirming = false;
+
+  function resetCheckoutUI() {
+    checkoutConfirming = false;
+    checkoutBtn.textContent = 'Place Order';
+    checkoutBtn.classList.remove('confirm');
+    checkoutBtn.disabled = false;
+    checkoutCancel.classList.add('hidden');
+    checkoutEstimate.classList.add('hidden');
+    checkoutMsg.classList.add('hidden');
+  }
+
+  function estimateTotal() {
+    const subtotal = cartItems.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
+    const delivery = 2.99;
+    const service = subtotal * 0.15;
+    const tax = subtotal * 0.08;
+    return { subtotal, delivery, service, tax, total: subtotal + delivery + service + tax };
+  }
+
+  checkoutBtn.addEventListener('click', async () => {
+    if (!checkoutConfirming) {
+      const est = estimateTotal();
+      document.getElementById('est-delivery').textContent = money(est.delivery);
+      document.getElementById('est-service').textContent = money(est.service);
+      document.getElementById('est-tax').textContent = money(est.tax);
+      document.getElementById('est-total').textContent = money(est.total);
+      checkoutEstimate.classList.remove('hidden');
+      checkoutCancel.classList.remove('hidden');
+      checkoutBtn.textContent = `Confirm — ${money(est.total)}`;
+      checkoutBtn.classList.add('confirm');
+      checkoutConfirming = true;
+      return;
+    }
+    checkoutBtn.disabled = true;
+    checkoutBtn.textContent = 'Placing order…';
+    checkoutMsg.classList.add('hidden');
+    try {
+      const res = await fetch('/api/food/checkout', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        checkoutMsg.textContent = data.error || 'Could not place order.';
+        checkoutMsg.className = 'error';
+        resetCheckoutUI();
+        checkoutMsg.classList.remove('hidden');
+        return;
+      }
+      if (data.dryRun) {
+        checkoutMsg.textContent = data.message;
+        checkoutMsg.className = 'success';
+        resetCheckoutUI();
+        checkoutMsg.classList.remove('hidden');
+        return;
+      }
+      cartItems = [];
+      renderCart();
+      updateCartBar();
+      checkoutMsg.textContent = `Order placed! ${data.restaurant} — ${money(data.total)}. Say "order status" to Frog to check on delivery.`;
+      checkoutMsg.className = 'success';
+      checkoutMsg.classList.remove('hidden');
+    } catch {
+      checkoutMsg.textContent = 'Could not reach the server.';
+      checkoutMsg.className = 'error';
+      resetCheckoutUI();
+      checkoutMsg.classList.remove('hidden');
+    }
+  });
+
+  checkoutCancel.addEventListener('click', resetCheckoutUI);
 
   document.getElementById('cart-btn').addEventListener('click', loadCart);
   document.getElementById('cart-bar').addEventListener('click', loadCart);

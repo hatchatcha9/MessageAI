@@ -2924,9 +2924,9 @@ app.get('/api/spotify/devices', async (req, res) => {
     }
 });
 
-// Food (DoorDash) — used by food.html for direct (non-voice) restaurant/menu browsing
-// and cart building. Deliberately stops at the cart: checkoutCurrentCart/placeOrder are
-// never called from these routes, so nothing here can spend real money.
+// Food (DoorDash) — used by food.html for direct (non-voice) restaurant/menu browsing,
+// cart building, and checkout. /api/food/checkout below is the one route in this group
+// that spends real money — food.html requires a second confirm tap before calling it.
 
 // Some restaurants (e.g. Costa Vida) list size variants of the same dish as fully
 // separate menu entries — "Small Salad" and "Salads" showed up 21 menu slots apart,
@@ -3155,6 +3155,60 @@ app.post('/api/food/cart/clear', (req, res) => {
     db.clearCart(user.id);
     if (doordashUI) doordashUI.clearBrowserCart().catch(() => {});
     res.json({ items: [] });
+});
+
+// Places a real DoorDash order — mirrors the voice [PLACE_ORDER] handler above (same
+// checkoutCurrentCart() call, same order-record bookkeeping) but returns structured
+// JSON instead of a spoken sentence. food.html requires a confirm tap before calling
+// this; nothing upstream of here should call it without the user having seen the total.
+app.post('/api/food/checkout', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    if (!current) return res.status(400).json({ error: 'No restaurant selected.' });
+
+    const cart = db.getCart(user.id);
+    const items = cart.items[current.id] || [];
+    if (items.length === 0) return res.status(400).json({ error: 'Your cart is empty.' });
+
+    const address = db.getUserAddress(user.id);
+    if (!address) return res.status(400).json({ error: 'No delivery address on file — add one in Settings first.' });
+
+    // Note: deliberately not gated on db.hasDoorDashCredentials() — that only reflects
+    // whether the voice [SETUP_DOORDASH:] flow was ever used to store encrypted
+    // credentials, which is unrelated to whether the browser's own persistent profile
+    // is actually logged in (it is, on this device — confirmed by every search/add
+    // this session). checkoutCurrentCart() below fails on its own with a clear error
+    // if the browser session isn't actually authenticated.
+    try {
+        const result = await doordashUI.checkoutCurrentCart();
+
+        if (result.dryRun) {
+            return res.json({ dryRun: true, message: 'Dry run complete — checkout page loaded and Place Order button found. No real order was placed.' });
+        }
+        if (!result.success) {
+            return res.status(502).json({ error: formatCheckoutError(result.error) });
+        }
+
+        const subtotal = items.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
+        const deliveryFee = 2.99;
+        const serviceFee = subtotal * 0.15;
+        const tax = subtotal * 0.08;
+        const total = subtotal + deliveryFee + serviceFee + tax;
+
+        db.createOrder(user.id, current.id, current.name, items, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
+        db.clearCart(user.id);
+        const prefs = db.getUserPreferences(user.id);
+        prefs.currentRestaurant = null;
+        prefs.currentRestaurantSource = null;
+        prefs.currentRestaurantUrl = null;
+        db.setUserPreferences(user.id, prefs);
+
+        res.json({ success: true, total: total.toFixed(2), restaurant: current.name });
+    } catch (err) {
+        console.error('[Food] /api/food/checkout error:', err.message);
+        res.status(502).json({ error: formatCheckoutError(err?.message || String(err)) });
+    }
 });
 
 app.get('/api/health', (req, res) => {
