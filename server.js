@@ -3211,6 +3211,44 @@ app.post('/api/food/checkout', async (req, res) => {
     }
 });
 
+// DoorDash account — settings.html's on-screen-keyboard alternative to the voice
+// [SETUP_DOORDASH:] command. Unlike that command (which only stores credentials for
+// later), this actually drives doordash.js's login() to authenticate the browser's
+// persistent profile right away, so it also doubles as the fix for a stale/expired
+// browser session (isLoggedIn()'s cookie-presence check can pass even when DoorDash's
+// server has actually invalidated the session — signing in fresh here re-establishes it).
+app.get('/api/doordash/account', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    if (db.hasDoorDashCredentials(user.id)) {
+        const creds = db.getDoorDashCredentials(user.id);
+        res.json({ linked: true, email: creds.email });
+    } else {
+        res.json({ linked: false, email: null });
+    }
+});
+
+app.post('/api/doordash/account', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const { email, password } = req.body || {};
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!email || !emailRegex.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (!password) return res.status(400).json({ error: 'Enter a password.' });
+
+    try {
+        await doordashUI.prewarmBrowser().catch(() => {});
+        const result = await doordashUI.login(email, password);
+        if (!result || !result.success) {
+            return res.status(502).json({ error: (result && (result.error || result.message)) || 'Sign-in failed.' });
+        }
+        const user = db.getOrCreateUser(PI_DEVICE_ID);
+        db.setDoorDashCredentials(user.id, email, password);
+        res.json({ success: true, message: `Signed in as ${email}.`, email });
+    } catch (err) {
+        console.error('[Food] /api/doordash/account error:', err.message);
+        res.status(502).json({ error: err.message || 'Sign-in failed.' });
+    }
+});
+
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'ok',
