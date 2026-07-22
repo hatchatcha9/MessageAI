@@ -7456,6 +7456,15 @@ async function clearBrowserCart() {
             console.log('[DoorDash] Not on DoorDash, skipping browser cart clear');
             return;
         }
+        // The decrement buttons below only exist in the DOM when the cart panel is actually
+        // showing (open sidebar, or the /cart/ page itself) — on any other DoorDash page
+        // (store page, search results, etc.) this silently found 0 buttons and reported a
+        // false "cleared" success without touching the real cart. Navigate to /cart/ first
+        // so the clear is reliable regardless of what page the browser happened to be on.
+        if (!url.includes('/cart/')) {
+            await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+            await new Promise(r => setTimeout(r, 1500));
+        }
         // Click all minus (-) buttons in the cart until no items remain
         let attempts = 0;
         while (attempts < 30) {
