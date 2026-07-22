@@ -3236,7 +3236,7 @@ app.post('/api/doordash/account', async (req, res) => {
 
     try {
         await doordashUI.prewarmBrowser().catch(() => {});
-        const result = await doordashUI.login(email, password);
+        const result = await doordashUI.login(email, password, { force: true });
         if (!result || !result.success) {
             return res.status(502).json({ error: (result && (result.error || result.message)) || 'Sign-in failed.' });
         }
@@ -3246,6 +3246,37 @@ app.post('/api/doordash/account', async (req, res) => {
     } catch (err) {
         console.error('[Food] /api/doordash/account error:', err.message);
         res.status(502).json({ error: err.message || 'Sign-in failed.' });
+    }
+});
+
+// Some DoorDash accounts require phone/SMS verification instead of accepting a
+// password directly (login() lands on that page and returns success:true without ever
+// actually authenticating — see the doordash.js comment above sendPhoneLoginCode).
+// These two routes complete that flow: send triggers the SMS, submit enters the code
+// the user reads back after receiving it.
+app.post('/api/doordash/phone-code/send', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const { phone } = req.body || {};
+    if (!phone) return res.status(400).json({ error: 'Enter a phone number.' });
+    try {
+        const result = await doordashUI.sendPhoneLoginCode(phone);
+        if (!result.success) return res.status(502).json({ error: result.error || 'Could not send code.' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(502).json({ error: err.message || 'Could not send code.' });
+    }
+});
+
+app.post('/api/doordash/phone-code/submit', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: 'Enter the 6-digit code.' });
+    try {
+        const result = await doordashUI.submitPhoneLoginCode(code);
+        if (!result.success) return res.status(502).json({ error: result.error || 'Code was not accepted.' });
+        res.json({ success: true, message: result.message });
+    } catch (err) {
+        res.status(502).json({ error: err.message || 'Code was not accepted.' });
     }
 });
 

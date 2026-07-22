@@ -1099,12 +1099,17 @@ async function isLoggedIn() {
 /**
  * Login to DoorDash
  */
-async function login(email, password) {
+async function login(email, password, options = {}) {
+    const { force = false } = options;
     try {
         console.log('[DoorDash] Starting login...');
 
-        // Check if already logged in
-        if (await isLoggedIn()) {
+        // Check if already logged in — skippable via force: isLoggedIn()'s cookie-presence
+        // signal (dd_session_id/dd_cx_logged_in) can still read true after DoorDash has
+        // actually invalidated the session server-side, so a caller that's deliberately
+        // re-authenticating with fresh credentials (e.g. a "sign in" button) needs a way
+        // to bypass this false-positive short-circuit and force the real login form flow.
+        if (!force && await isLoggedIn()) {
             return { success: true, message: 'Already logged in' };
         }
 
@@ -1344,11 +1349,14 @@ async function login(email, password) {
         // Wait for page to settle
         await delay(3000);
 
-        // Check current URL - if we're not on login page, likely success
+        // Check current URL - if we're not on login page, likely success. Also must not
+        // be sitting on identity.doordash.com (the phone-OTP verification domain) — that
+        // URL never contains "/login" either, so without this it was previously reported
+        // as a false "success" while actually still waiting on an unentered SMS code.
         const finalUrl = page.url();
         console.log(`[DoorDash] Final URL: ${finalUrl}`);
 
-        if (!finalUrl.includes('/login') && !finalUrl.includes('/consumer/login')) {
+        if (!finalUrl.includes('/login') && !finalUrl.includes('/consumer/login') && !finalUrl.includes('identity.doordash.com')) {
             console.log('[DoorDash] No longer on login page - assuming success');
             await takeScreenshot('login-complete');
             return { success: true, message: 'Login successful' };
@@ -1509,6 +1517,102 @@ async function login(email, password) {
     } catch (error) {
         console.error('[DoorDash] Login error:', error.message);
         await takeScreenshot('login-exception');
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Submits a US phone number on DoorDash's "Login with phone number" page (the page
+ * login() lands on when the account requires OTP rather than accepting a password
+ * directly) and waits for the 6-digit code entry screen to appear. Call
+ * submitPhoneLoginCode() next with the code once the user has it.
+ */
+async function sendPhoneLoginCode(phone) {
+    try {
+        const digits = String(phone).replace(/\D/g, '').replace(/^1/, ''); // strip country code
+        console.log(`[DoorDash] Sending login code to phone ending ${digits.slice(-4)}...`);
+
+        const phoneInput = await page.waitForSelector('input[type="tel"]:not([maxlength="1"]), input[name*="phone" i], input[placeholder*="phone" i]', { timeout: 10000 });
+        await phoneInput.click({ force: true });
+        await phoneInput.fill(digits);
+        await delay(500);
+
+        const clicked = await page.evaluate(() => {
+            const btns = [...document.querySelectorAll('button')];
+            const btn = btns.find(b => b.textContent.trim() === 'Continue' && b.offsetParent !== null);
+            if (btn) { btn.click(); return true; }
+            return false;
+        });
+        if (!clicked) await page.keyboard.press('Enter');
+
+        await delay(2000);
+        await takeScreenshot('phone-code-sent');
+
+        // Wait for a code-entry field (single input or the 6 separate digit boxes)
+        await page.waitForSelector('input[maxlength="1"], input[placeholder*="code" i], input[autocomplete="one-time-code"]', { timeout: 15000 });
+        console.log('[DoorDash] Code-entry screen appeared');
+        return { success: true };
+    } catch (error) {
+        console.error('[DoorDash] sendPhoneLoginCode error:', error.message);
+        await takeScreenshot('send-phone-code-error');
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Enters a 6-digit SMS code (read out by the user) on DoorDash's code-entry screen and
+ * verifies real success — checks for an actual logged-in signal, not just "left the
+ * login page", since identity.doordash.com's OTP flow can redirect through several
+ * intermediate URLs that don't contain "/login" while still not being authenticated.
+ */
+async function submitPhoneLoginCode(code) {
+    try {
+        const digits = String(code).replace(/\D/g, '');
+        if (digits.length !== 6) return { success: false, error: `Expected a 6-digit code, got "${code}"` };
+
+        const boxInputs = await page.$$('input[maxlength="1"]');
+        if (boxInputs.length >= 6) {
+            for (let i = 0; i < 6; i++) {
+                await boxInputs[i].click({ force: true });
+                await boxInputs[i].fill(digits[i]);
+                await delay(100);
+            }
+        } else {
+            const singleInput = await page.$('input[placeholder*="code" i], input[autocomplete="one-time-code"]');
+            if (!singleInput) return { success: false, error: 'Could not find the code entry field.' };
+            await singleInput.click({ force: true });
+            await singleInput.fill(digits);
+        }
+        await delay(1000);
+
+        const submitted = await page.evaluate(() => {
+            const btns = [...document.querySelectorAll('button')];
+            const btn = btns.find(b => /verify|submit|continue/i.test(b.textContent) && b.offsetParent !== null);
+            if (btn) { btn.click(); return true; }
+            return false;
+        });
+        if (!submitted) await page.keyboard.press('Enter');
+
+        await delay(3000);
+        await takeScreenshot('phone-code-submitted');
+
+        const url = page.url();
+        if (url.includes('identity.doordash.com') || url.includes('/login')) {
+            // Still on the auth domain — check for a visible error before giving up
+            const errorEl = await page.$('[role="alert"], .error-message');
+            const errorText = errorEl && await errorEl.isVisible() ? await errorEl.textContent() : null;
+            return { success: false, error: errorText || 'Code was not accepted — still on the sign-in page.' };
+        }
+
+        // Real logged-in check, not just "left the auth domain"
+        const loggedIn = await isLoggedIn();
+        if (!loggedIn) return { success: false, error: 'Left the sign-in flow but no logged-in signal found — check manually.' };
+
+        console.log('[DoorDash] Phone code accepted — logged in');
+        return { success: true, message: 'Login successful' };
+    } catch (error) {
+        console.error('[DoorDash] submitPhoneLoginCode error:', error.message);
+        await takeScreenshot('submit-phone-code-error');
         return { success: false, error: error.message };
     }
 }
@@ -7677,6 +7781,8 @@ module.exports = {
     closeBrowser,
     openForManualLogin,
     login,
+    sendPhoneLoginCode,
+    submitPhoneLoginCode,
     setAddress,
     searchRestaurant,
     addItemToCart,
