@@ -54,6 +54,10 @@
       padding: 12px 8px;
       min-height: 44px;
       -webkit-tap-highlight-color: transparent;
+      background: none;
+      border: none;
+      font-family: inherit;
+      cursor: pointer;
     }
     #back-btn:active { opacity: 0.6; }
     #back-btn svg { width: 18px; height: 18px; }
@@ -347,12 +351,12 @@
 <body>
 
 <div id="top-bar">
-  <a id="back-btn" href="/screen.html">
+  <button id="back-btn">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <polyline points="10,3 5,8 10,13"></polyline>
     </svg>
-    Screen
-  </a>
+    <span id="back-btn-label">Screen</span>
+  </button>
   <div id="top-title">Food</div>
   <button id="cart-btn" title="Cart">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -430,7 +434,21 @@
   function showView(id) {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById(id).classList.add('active');
+    // back-btn always steps up one level in search -> menu -> cart, only
+    // leaving the page (to screen.html) from the top-level search view.
+    document.getElementById('back-btn-label').textContent = id === 'view-search' ? 'Screen' : 'Back';
   }
+
+  document.getElementById('back-btn').addEventListener('click', () => {
+    const active = document.querySelector('.view.active').id;
+    if (active === 'view-cart') {
+      showView(currentRestaurant ? 'view-menu' : 'view-search');
+    } else if (active === 'view-menu') {
+      showView('view-search');
+    } else {
+      window.location.href = '/screen.html';
+    }
+  });
 
   function updateCartBar() {
     const count = cartItems.reduce((n, i) => n + (i.quantity || 1), 0);

@@ -32,6 +32,12 @@ if (TWILIO_ENABLED) {
 let doordashUI = null;
 try { doordashUI = require('./doordash'); } catch (e) { console.warn('[Food] doordash module unavailable:', e.message); }
 
+// `doordash` (above) only gets assigned when TWILIO_ENABLED — but the voice command
+// surface (SEARCH/ADD_ITEM_NUM/SHOW_CART/etc.) references `doordash`, not `doordashUI`,
+// so on a voice-only device (TWILIO_ENABLED=false) every one of those calls threw
+// "Cannot read properties of null". Both names load the identical module, so alias them.
+if (!doordash) doordash = doordashUI;
+
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
 
