@@ -315,9 +315,9 @@ const _addToCartTx = db.transaction((userId, restaurantId, item) => {
         cart.items[restaurantId] = [];
     }
 
-    const itemKey = item.name + (item.selectedOptions ? JSON.stringify(item.selectedOptions) : '');
+    const itemKey = item.name + (item.label || '') + (item.selectedOptions ? JSON.stringify(item.selectedOptions) : '');
     const existingIndex = cart.items[restaurantId].findIndex(i => {
-        const existingKey = i.name + (i.selectedOptions ? JSON.stringify(i.selectedOptions) : '');
+        const existingKey = i.name + (i.label || '') + (i.selectedOptions ? JSON.stringify(i.selectedOptions) : '');
         return existingKey === itemKey;
     });
 

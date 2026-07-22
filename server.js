@@ -3132,7 +3132,7 @@ app.post('/api/food/cart/add', async (req, res) => {
             if (current.url) doordashUI.navigateToRestaurantPage(current.url).catch(() => {});
             return res.status(502).json({ error: addResult.error || 'Could not add item.' });
         }
-        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, price: item.price || 0, source: 'doordash' });
+        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, price: item.price || 0, source: 'doordash' });
         const cart = db.getCart(user.id);
         res.json({ items: cart.items[current.id] || [] });
     } catch (err) {
