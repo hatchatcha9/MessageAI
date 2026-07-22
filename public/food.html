@@ -106,29 +106,64 @@
       padding: 10px 12px;
       flex-shrink: 0;
     }
-    #search-input {
+    #mic-btn {
       flex: 1;
-      background: var(--surface);
-      border: 1px solid var(--hairline);
-      border-radius: 8px;
-      color: var(--ink);
-      font-size: 13px;
-      padding: 10px 12px;
-      outline: none;
-    }
-    #search-input::placeholder { color: var(--muted-2); }
-    #search-btn {
-      width: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
       background: var(--accent);
       border: none;
       border-radius: 8px;
       color: var(--accent-ink);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #mic-btn svg { width: 17px; height: 17px; }
+    #mic-btn.listening {
+      background: var(--accent-2);
+      animation: mic-pulse 1s ease-in-out infinite;
+    }
+    @keyframes mic-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
+
+    #browse-btn {
+      width: 40px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      color: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
       -webkit-tap-highlight-color: transparent;
     }
-    #search-btn svg { width: 18px; height: 18px; }
+    #browse-btn svg { width: 17px; height: 17px; }
+
+    .genre-hint {
+      text-align: center;
+      color: var(--muted-2);
+      font-size: 11.5px;
+      padding: 4px 4px 10px;
+    }
+    .genre-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .genre-chip {
+      padding: 11px 4px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 10px;
+      color: var(--ink);
+      font-size: 12.5px;
+      font-weight: 600;
+      text-align: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .genre-chip:active { border-color: var(--accent); color: var(--accent); }
 
     .scroll-list {
       flex: 1;
@@ -160,6 +195,28 @@
     .card:active { border-color: var(--accent); }
 
     .card-main { flex: 1; min-width: 0; }
+
+    .size-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+      width: 100%;
+    }
+    .size-btn {
+      flex: 1;
+      padding: 8px 4px;
+      background: var(--ground);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+      line-height: 1.35;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .size-btn:active { border-color: var(--accent); color: var(--accent); }
     .card-name {
       font-size: 13.5px;
       font-weight: 600;
@@ -312,17 +369,24 @@
   <!-- Search / results -->
   <div class="view active" id="view-search">
     <div id="search-row">
-      <input id="search-input" type="text" placeholder="Search restaurants or cuisine…" autocomplete="off">
-      <button id="search-btn">
+      <button id="mic-btn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="7"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+        </svg>
+        <span id="mic-btn-label">Say a restaurant or cuisine</span>
+      </button>
+      <button id="browse-btn" title="Browse cuisines">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+          <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+          <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+          <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
         </svg>
       </button>
     </div>
-    <div class="scroll-list" id="results-list">
-      <div class="empty-state">Search DoorDash for a restaurant or cuisine — like the Rabbit R1's food ordering, browse and build a cart right here.</div>
-    </div>
+    <div class="scroll-list" id="results-list"></div>
   </div>
 
   <!-- Menu -->
@@ -356,7 +420,11 @@
   let currentMenu = [];
   let cartItems = [];
 
-  function esc(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+  // Used both in text content and interpolated inside double-quoted HTML attributes
+  // (e.g. data-id="${esc(item.id)}") — escaping only '<' left a '"' in the value free
+  // to break out of the attribute and inject arbitrary markup, so quotes and '&' are
+  // escaped too now.
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   function money(n) { return '$' + (parseFloat(n) || 0).toFixed(2); }
 
   function showView(id) {
@@ -380,22 +448,66 @@
     }
   }
 
-  // ── Search ──────────────────────────────────────────────────────────────
-  async function doSearch() {
-    const q = document.getElementById('search-input').value.trim();
-    if (!q) return;
+  // ── Genre picker ────────────────────────────────────────────────────────
+  // This kiosk has no on-screen keyboard, so typing a search query isn't practical —
+  // tapping a cuisine is the fast path. Kept to 12 (3x4 grid) so it fits within
+  // results-list's ~200px of available height without depending on scroll gestures
+  // working on this hardware (the resistive digitizer reports as a plain mouse, and
+  // native touch-scroll needs real Touch events the OS never generates here).
+  const GENRES = ['Pizza', 'Burgers', 'Mexican', 'Chinese', 'Sushi', 'Italian',
+                  'Thai', 'Indian', 'Chicken', 'BBQ', 'Breakfast', 'Dessert'];
+
+  function genreGridHTML() {
+    return `
+      <div class="genre-hint">No keyboard — tap a cuisine to search:</div>
+      <div class="genre-grid">
+        ${GENRES.map(g => `<button class="genre-chip" data-genre="${esc(g)}">${esc(g)}</button>`).join('')}
+      </div>
+    `;
+  }
+  function wireGenreChips(root) {
+    root.querySelectorAll('.genre-chip').forEach(btn => {
+      btn.addEventListener('click', () => doSearch(btn.dataset.genre));
+    });
+  }
+  function showGenreGrid() {
     const list = document.getElementById('results-list');
-    list.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div>Searching DoorDash…</div>';
+    list.innerHTML = genreGridHTML();
+    wireGenreChips(list);
+  }
+  // Appends below existing content (e.g. a "no results" message) instead of
+  // replacing it, so the user can immediately try another cuisine.
+  function showGenreGridBelow() {
+    const list = document.getElementById('results-list');
+    list.insertAdjacentHTML('beforeend', genreGridHTML());
+    wireGenreChips(list);
+  }
+  document.getElementById('browse-btn').addEventListener('click', showGenreGrid);
+
+  // ── Search ──────────────────────────────────────────────────────────────
+  // Sequence token so a slower, older search request can't land after a newer one and
+  // overwrite the results list with stale data — e.g. searching "pizza" then quickly
+  // "sushi" could otherwise show pizza results last if that request happened to
+  // resolve second.
+  let _searchSeq = 0;
+  async function doSearch(query) {
+    const q = (query || '').trim();
+    if (!q) return;
+    const seq = ++_searchSeq;
+    const list = document.getElementById('results-list');
+    list.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div>Searching for "${esc(q)}"…</div>`;
 
     try {
       const res = await fetch('/api/food/search?q=' + encodeURIComponent(q));
       const data = await res.json();
+      if (seq !== _searchSeq) return; // a newer search started while this one was in flight
       if (!res.ok) {
         list.innerHTML = `<div class="err-banner">${esc(data.error || 'Search failed.')}</div>`;
         return;
       }
       if (!data.restaurants || data.restaurants.length === 0) {
         list.innerHTML = '<div class="empty-state">No restaurants found. Try a different search.</div>';
+        showGenreGridBelow();
         return;
       }
       list.innerHTML = data.restaurants.map((r, i) => `
@@ -411,15 +523,78 @@
         card.addEventListener('click', () => selectRestaurant(data.restaurants[parseInt(card.dataset.idx)]));
       });
     } catch {
+      if (seq !== _searchSeq) return;
       list.innerHTML = '<div class="err-banner">Could not reach the server.</div>';
     }
   }
 
-  document.getElementById('search-btn').addEventListener('click', doSearch);
-  document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  // ── Dictate-to-search (no on-screen keyboard on this kiosk) ───────────────
+  // Taps the physical mic via the same server-side mechanism screen.html's
+  // tap-to-speak uses, but voice_loop.py records+transcribes WITHOUT invoking Claude
+  // or speaking a response — it just hands the text back here via polling.
+  let _dictatePoll = null;
+  const micBtn = document.getElementById('mic-btn');
+  const micBtnLabel = document.getElementById('mic-btn-label');
+
+  async function startDictateSearch() {
+    if (_dictatePoll) return; // already listening
+    micBtn.classList.add('listening');
+    micBtnLabel.textContent = 'Listening…';
+    const list = document.getElementById('results-list');
+    list.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div>Listening — say a restaurant or cuisine…</div>';
+
+    try {
+      await fetch('/api/dictate/start', { method: 'POST' });
+    } catch {
+      stopDictateListening();
+      list.innerHTML = '<div class="err-banner">Could not reach the server.</div>';
+      showGenreGridBelow();
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 40; // ~20s at 500ms — generous for silence-wait + transcription time
+    _dictatePoll = setInterval(async () => {
+      attempts++;
+      try {
+        const res = await fetch('/api/dictate/result');
+        const data = await res.json();
+        if (data.ready) {
+          stopDictateListening();
+          if (data.text) {
+            doSearch(data.text);
+          } else {
+            list.innerHTML = '<div class="empty-state">Didn\'t catch that — try again.</div>';
+            showGenreGridBelow();
+          }
+          return;
+        }
+      } catch {
+        // transient — keep polling until maxAttempts
+      }
+      if (attempts >= maxAttempts) {
+        stopDictateListening();
+        list.innerHTML = '<div class="err-banner">Timed out waiting for speech.</div>';
+        showGenreGridBelow();
+      }
+    }, 500);
+  }
+
+  function stopDictateListening() {
+    if (_dictatePoll) { clearInterval(_dictatePoll); _dictatePoll = null; }
+    micBtn.classList.remove('listening');
+    micBtnLabel.textContent = 'Say a restaurant or cuisine';
+  }
+
+  micBtn.addEventListener('click', startDictateSearch);
 
   // ── Menu ────────────────────────────────────────────────────────────────
+  // Same stale-response guard as doSearch() — tapping restaurant A then B before A's
+  // /api/food/select resolves could otherwise let A's slower response land last and
+  // overwrite the UI with the wrong restaurant's menu.
+  let _selectSeq = 0;
   async function selectRestaurant(r) {
+    const seq = ++_selectSeq;
     showView('view-menu');
     document.getElementById('menu-restaurant-name').textContent = r.name;
     document.getElementById('menu-list').innerHTML = '<div class="spinner-wrap"><div class="spinner"></div>Loading menu…</div>';
@@ -431,6 +606,7 @@
         body: JSON.stringify({ id: r.id, name: r.name, url: r.url }),
       });
       const data = await res.json();
+      if (seq !== _selectSeq) return; // a newer selection started while this one was in flight
       if (!res.ok) {
         document.getElementById('menu-list').innerHTML = `<div class="err-banner">${esc(data.error || 'Could not load menu.')}</div>`;
         return;
@@ -441,6 +617,7 @@
       updateCartBar();
       renderMenu();
     } catch {
+      if (seq !== _selectSeq) return;
       document.getElementById('menu-list').innerHTML = '<div class="err-banner">Could not reach the server.</div>';
     }
   }
@@ -451,30 +628,63 @@
       list.innerHTML = '<div class="empty-state">No menu items found.</div>';
       return;
     }
-    list.innerHTML = currentMenu.map((item, i) => `
-      <div class="card">
-        <div class="card-main">
-          <div class="card-name">${esc(item.name)}</div>
-          <div class="card-sub">${money(item.price)}</div>
+    // Some restaurants (e.g. Costa Vida's "Small Salad" / "Salads") list size
+    // variants as separate menu entries; server.js groups those into one item with
+    // a `sizes` list so it shows as a single card with a size picker here instead
+    // of two unrelated-looking rows.
+    list.innerHTML = currentMenu.map((item, i) => {
+      if (item.sizes && item.sizes.length > 1) {
+        return `
+          <div class="card">
+            <div class="card-main">
+              <div class="card-name">${esc(item.name)}</div>
+              <div class="card-sub">Choose a size</div>
+              <div class="size-row">
+                ${item.sizes.map((s, si) => `
+                  <button class="size-btn" data-idx="${i}" data-size="${si}">${esc(s.label)}<br>${money(s.price)}</button>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      return `
+        <div class="card">
+          <div class="card-main">
+            <div class="card-name">${esc(item.name)}</div>
+            <div class="card-sub">${money(item.price)}</div>
+          </div>
+          <button class="add-btn" data-idx="${i}" title="Add">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
         </div>
-        <button class="add-btn" data-idx="${i}" title="Add">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-        </button>
-      </div>
-    `).join('');
+      `;
+    }).join('');
     list.querySelectorAll('.add-btn').forEach(btn => {
-      btn.addEventListener('click', () => addItem(parseInt(btn.dataset.idx), btn));
+      const idx = parseInt(btn.dataset.idx);
+      btn.addEventListener('click', () => addItem(idx, currentMenu[idx], btn));
+    });
+    list.querySelectorAll('.size-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx);
+        const size = currentMenu[idx].sizes[parseInt(btn.dataset.size)];
+        addItem(size.index, size, btn);
+      });
     });
   }
 
-  async function addItem(idx, btn) {
-    const item = currentMenu[idx];
+  // realIndex is the item's true position in DoorDash's own menu (used to actually
+  // click/add it) — for a plain item that's its array index in currentMenu; for a
+  // grouped size variant it's that size's own index, NOT the group's.
+  async function addItem(realIndex, item, btn) {
+    const isSizeBtn = btn.classList.contains('size-btn');
+    const origHTML = isSizeBtn ? btn.innerHTML : null;
     btn.disabled = true;
     try {
       const res = await fetch('/api/food/cart/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ itemIndex: idx, item }),
+        body: JSON.stringify({ itemIndex: realIndex, item }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -488,8 +698,13 @@
       }
       cartItems = data.items || [];
       updateCartBar();
-      btn.classList.add('added');
-      setTimeout(() => { btn.classList.remove('added'); btn.disabled = false; }, 600);
+      if (isSizeBtn) {
+        btn.textContent = 'Added ✓';
+        setTimeout(() => { btn.innerHTML = origHTML; btn.disabled = false; }, 600);
+      } else {
+        btn.classList.add('added');
+        setTimeout(() => { btn.classList.remove('added'); btn.disabled = false; }, 600);
+      }
     } catch {
       alert('Could not reach the server.');
       btn.disabled = false;
@@ -550,6 +765,46 @@
 
   document.getElementById('cart-btn').addEventListener('click', loadCart);
   document.getElementById('cart-bar').addEventListener('click', loadCart);
+
+  // ── Drag-to-scroll ──────────────────────────────────────────────────────
+  // The GeeekPi touchscreen is a resistive digitizer reported to X11 as a plain
+  // mouse pointer (no HTML5 touch events), so a finger drag never triggers native
+  // overflow-y:auto scrolling here — same root cause as the other kiosk pages, but
+  // those don't also have tappable rows inside the scrolling area (restaurant
+  // cards, menu items). A plain copy of that pattern would misfire: ending a
+  // scroll-drag over a card would otherwise still fire that card's click. This
+  // tracks how far each gesture actually moved and, above a small threshold,
+  // suppresses the click that would otherwise land on whatever's under the
+  // finger at release.
+  function enableDragScroll(el) {
+    const DRAG_THRESHOLD = 6; // px
+    let dragging = false, startY = 0, startScroll = 0, moved = false;
+
+    el.addEventListener('pointerdown', e => {
+      dragging = true;
+      moved = false;
+      startY = e.clientY;
+      startScroll = el.scrollTop;
+    });
+    el.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const dy = e.clientY - startY;
+      if (Math.abs(dy) > DRAG_THRESHOLD) moved = true;
+      el.scrollTop = startScroll - dy;
+    });
+    const stopDrag = () => { dragging = false; };
+    el.addEventListener('pointerup', stopDrag);
+    el.addEventListener('pointercancel', stopDrag);
+    el.addEventListener('pointerleave', stopDrag);
+
+    // Capture phase so this runs before any card/button's own click listener.
+    el.addEventListener('click', e => {
+      if (moved) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
+  document.querySelectorAll('.scroll-list, #cart-list').forEach(enableDragScroll);
+
+  showGenreGrid();
 
   // Restore state on load (in case a restaurant/cart is already active from voice/SMS)
   (async () => {

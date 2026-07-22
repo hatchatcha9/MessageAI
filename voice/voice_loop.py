@@ -235,46 +235,60 @@ def check_stop_signal():
     return False
 
 def speak(text):
-    """Convert text to speech and play it. Returns False if interrupted by a stop signal, True otherwise."""
+    """Convert text to speech and play it. Returns False if interrupted by a stop signal
+    (or a TTS error) and True if the full text finished playing normally."""
     print(f"[frog] Speaking: {text[:80]}...")
     sd.stop()  # cut off any audio still playing before starting new speech
+    # Clear here, BEFORE generation, not right before playback — a stop set while this
+    # sentence's TTS was still being generated is a real interrupt for THIS sentence and
+    # must still be visible once the playback loop below checks it. Clearing right before
+    # playback (as this used to) discarded exactly that signal.
+    _stop_event.clear()
     try:
         if IS_PI:
             # Use piper TTS binary then play with aplay (bypasses sounddevice resampling issues)
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                wav_path = f.name
-            subprocess.run(
-                [PIPER_BIN, '--model', PIPER_MODEL, '--output_file', wav_path],
-                input=text.encode(), check=True, capture_output=True
-            )
-            with wave.open(wav_path, 'rb') as wf:
-                src_rate = wf.getframerate()
-                data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
-            os.unlink(wav_path)
-            # Resample mono→48kHz stereo (device native rate) and write temp WAV for aplay
-            n_out = int(len(data) * 48000 / src_rate)
-            resampled = np.interp(np.linspace(0, len(data) - 1, n_out), np.arange(len(data)), data).astype(np.int16)
-            stereo = np.column_stack([resampled, resampled])
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                play_path = f.name
-            with wave.open(play_path, 'wb') as wf:
-                wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(48000)
-                wf.writeframes(stereo.tobytes())
-            dur = len(resampled) / 48000
-            print(f"[frog] Playing {dur:.1f}s on 'dmixer' (shared, so Spotify Connect can coexist)")
-            _stop_event.clear()
-            proc = subprocess.Popen(['aplay', '-D', 'dmixer', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            interrupted = False
-            while proc.poll() is None:
-                if check_stop_signal():
-                    proc.terminate()
-                    print("[frog] Stopped by user.")
-                    interrupted = True
-                    break
-                time.sleep(0.1)
-            os.unlink(play_path)
-            print("[frog] Done speaking")
-            return not interrupted
+            wav_path = None
+            play_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    wav_path = f.name
+                subprocess.run(
+                    [PIPER_BIN, '--model', PIPER_MODEL, '--output_file', wav_path],
+                    input=text.encode(), check=True, capture_output=True
+                )
+                with wave.open(wav_path, 'rb') as wf:
+                    src_rate = wf.getframerate()
+                    data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+                # Resample mono→48kHz stereo (device native rate) and write temp WAV for aplay
+                n_out = int(len(data) * 48000 / src_rate)
+                resampled = np.interp(np.linspace(0, len(data) - 1, n_out), np.arange(len(data)), data).astype(np.int16)
+                stereo = np.column_stack([resampled, resampled])
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    play_path = f.name
+                with wave.open(play_path, 'wb') as wf:
+                    wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(48000)
+                    wf.writeframes(stereo.tobytes())
+                dur = len(resampled) / 48000
+                print(f"[frog] Playing {dur:.1f}s on 'dmixer' (shared, so Spotify Connect can coexist)")
+                proc = subprocess.Popen(['aplay', '-D', 'dmixer', play_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                interrupted = False
+                while proc.poll() is None:
+                    if check_stop_signal():
+                        proc.terminate()
+                        print("[frog] Stopped by user.")
+                        interrupted = True
+                        break
+                    time.sleep(0.1)
+                print("[frog] Done speaking")
+                return not interrupted
+            finally:
+                # Always clean up temp WAVs, even if piper/aplay raised before reaching
+                # their normal unlink point — otherwise they accumulate on the Pi's
+                # small/tmpfs storage every time TTS hits an error.
+                if wav_path and os.path.exists(wav_path):
+                    os.unlink(wav_path)
+                if play_path and os.path.exists(play_path):
+                    os.unlink(play_path)
         else:
             # Use Kokoro TTS (Windows dev machine)
             sample_rate = 24000
@@ -286,8 +300,6 @@ def speak(text):
                 return True
             audio = np.concatenate(chunks)
 
-        # Clear stop event after generation, right before playback
-        _stop_event.clear()
         out_dev = sd.query_devices(sd.default.device[1])['name']
         print(f"[frog] Playing {len(audio)/sample_rate:.1f}s on '{out_dev}'")
         # Play in small blocks so we can interrupt mid-sentence
@@ -305,7 +317,12 @@ def speak(text):
         return True
     except Exception as e:
         print(f"[frog] TTS error: {e}")
-        return True
+        # Treat a real TTS failure the same as an interrupt: the caller (stream_and_speak)
+        # uses this return value to decide whether to keep speaking queued sentences, and
+        # a broken TTS backend will fail identically on every subsequent sentence too — so
+        # returning True here (as before) let the state machine silently "finish" a response
+        # it never actually spoke a word of.
+        return False
 
 def _play_wav(path):
     import wave
@@ -329,20 +346,23 @@ _WHISPER_PROMPT = (
 
 def transcribe(audio_np):
     """Run Whisper on a numpy int16 audio array. Returns text string."""
-    audio_f32 = audio_np.astype(np.float32) / 32768.0
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav_path = f.name
-    _save_wav(wav_path, audio_np)
-    # vad_filter trims non-speech before decoding — without it, a mostly-silent/noisy
-    # clip can send Whisper into a slow repetitive-hallucination loop instead of
-    # cleanly returning empty text. condition_on_previous_text=False avoids the same
-    # failure mode across segments; each utterance here is independent anyway.
-    segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1,
-                                      vad_filter=True, condition_on_previous_text=False,
-                                      initial_prompt=_WHISPER_PROMPT)
-    text = " ".join(s.text for s in segments).strip()
-    os.unlink(wav_path)
-    return text
+    try:
+        _save_wav(wav_path, audio_np)
+        # vad_filter trims non-speech before decoding — without it, a mostly-silent/noisy
+        # clip can send Whisper into a slow repetitive-hallucination loop instead of
+        # cleanly returning empty text. condition_on_previous_text=False avoids the same
+        # failure mode across segments; each utterance here is independent anyway.
+        segments, _ = whisper.transcribe(wav_path, language="en", beam_size=1,
+                                          vad_filter=True, condition_on_previous_text=False,
+                                          initial_prompt=_WHISPER_PROMPT)
+        text = " ".join(s.text for s in segments).strip()
+        return text
+    finally:
+        # Always clean up, even if Whisper raises (decode error, OOM) — otherwise the
+        # temp WAV is orphaned forever on the Pi's small/tmpfs storage.
+        os.unlink(wav_path)
 
 def _save_wav(path, audio_np):
     # audio_np is always mono at this point (mixed down in record_until_silence)
@@ -536,6 +556,27 @@ def check_touch_trigger():
         pass
     return False
 
+def check_dictate_pending():
+    """Poll server for a pending 'dictate to search' request (e.g. food.html's mic
+    button, for a kiosk page with no usable on-screen keyboard)."""
+    try:
+        res = requests.get(f"{SERVER_URL}/api/dictate/pending", timeout=0.5)
+        if res.status_code == 200:
+            return res.json().get("pending", False)
+    except Exception:
+        pass
+    return False
+
+def post_dictate_result(text, error=None):
+    """Deliver a dictation's transcribed text back to whichever page requested it."""
+    try:
+        payload = {"text": text}
+        if error:
+            payload["error"] = error
+        requests.post(f"{SERVER_URL}/api/dictate/result", json=payload, timeout=3)
+    except Exception:
+        pass
+
 # Low battery warning — track last warning time to avoid spamming
 _last_battery_warn = 0
 
@@ -597,10 +638,14 @@ def _get_wakeword_model():
 
 def _wait_for_trigger(deadline=None):
     """
-    Shared listener: waits for the wake word, a screen tap, or a pending reminder.
-    If `deadline` (a time.time()-style timestamp) is given, gives up and returns
-    None once it passes — used for the post-response conversation window. With
-    deadline=None, blocks forever (the normal idle wait).
+    Shared listener: waits for the wake word, a screen tap, a pending reminder, or a
+    dictate-to-search request from a kiosk web page. If `deadline` (a time.time()-style
+    timestamp) is given, gives up and returns None once it passes — used for the
+    post-response conversation window. With deadline=None, blocks forever (the normal
+    idle wait) — dictate/pending-reminder checks are done from INSIDE this function's
+    own polling loops (not just once per outer main() loop iteration) specifically so
+    a dictate request can still be noticed while idly waiting for "Hey Frog", which
+    would otherwise block forever.
     Falls back to tap-only if openwakeword isn't installed or no model is deployed —
     this keeps tap-to-speak working even before the wake word model exists.
     """
@@ -612,6 +657,10 @@ def _wait_for_trigger(deadline=None):
             if pending:
                 print()
                 return ("pending", pending)
+            if check_dictate_pending():
+                print()
+                _play_beep()
+                return ("dictate", None)
             if check_touch_trigger():
                 print()
                 _play_beep()
@@ -656,6 +705,10 @@ def _wait_for_trigger(deadline=None):
                         print("[frog] Touch trigger detected!")
                         _play_beep()
                         return ("user", None)
+                    if check_dictate_pending():
+                        print("[frog] Dictate request detected!")
+                        _play_beep()
+                        return ("dictate", None)
                     pending = check_pending_speech()
                     if pending:
                         return ("pending", pending)
@@ -667,6 +720,10 @@ def _wait_for_trigger(deadline=None):
                 print("[frog] Touch trigger detected!")
                 _play_beep()
                 return ("user", None)
+            if check_dictate_pending():
+                print("[frog] Dictate request detected!")
+                _play_beep()
+                return ("dictate", None)
             pending = check_pending_speech()
             if pending:
                 return ("pending", pending)
@@ -689,15 +746,16 @@ def wait_for_tap(timeout=30):
     """
     After a response, keep listening for the wake word / a screen tap for
     `timeout` seconds. Returns True if triggered (keep chatting), a
-    ("pending", text) tuple for a due reminder, or False if timed out (go back
-    to the normal idle wake-word wait).
+    ("pending", text) tuple for a due reminder, a ("dictate", None) tuple for a
+    dictate-to-search request, or False if timed out (go back to the normal idle
+    wake-word wait).
     """
     print(f"[frog] Conversation window open ({timeout}s) — tap mic or say 'Hey Frog'")
     result = _wait_for_trigger(deadline=time.time() + timeout)
     if result is None:
         print("[frog] Conversation window closed — back to wake word")
         return False
-    if isinstance(result, tuple) and result[0] == "pending":
+    if isinstance(result, tuple) and result[0] in ("pending", "dictate"):
         return result
     print("[frog] Continuing conversation")
     return True
@@ -724,18 +782,44 @@ def _pid_alive(pid):
         return False
 
 def _acquire_lock():
-    if os.path.exists(_LOCK_FILE):
+    """
+    Atomically claim the lock file via O_CREAT|O_EXCL (portable to both Windows and
+    Linux) so two near-simultaneous launches can't both pass a stale-lock check and
+    then both write the file — only one process's exclusive-create can ever succeed.
+    """
+    for attempt in range(2):  # one retry after clearing a confirmed-stale lock
+        try:
+            fd = os.open(_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+            break
+        except FileExistsError:
+            try:
+                with open(_LOCK_FILE) as f:
+                    old_pid = int(f.read().strip())
+                if _pid_alive(old_pid):
+                    print(f"[frog] ERROR: Another instance is already running (PID {old_pid}). Exiting.")
+                    sys.exit(1)
+                os.unlink(_LOCK_FILE)  # stale lock — safe to remove and retry
+            except (OSError, ValueError):
+                try:
+                    os.unlink(_LOCK_FILE)  # unreadable/corrupt lock — safe to remove and retry
+                except OSError:
+                    pass
+    else:
+        print("[frog] ERROR: Could not acquire lock file after retry. Exiting.")
+        sys.exit(1)
+
+    def _release_lock():
+        # Only delete if it still holds OUR pid — a near-simultaneous launch may have
+        # legitimately recreated it after we exited an earlier retry iteration.
         try:
             with open(_LOCK_FILE) as f:
-                old_pid = int(f.read().strip())
-            if _pid_alive(old_pid):
-                print(f"[frog] ERROR: Another instance is already running (PID {old_pid}). Exiting.")
-                sys.exit(1)
+                if int(f.read().strip()) == os.getpid():
+                    os.unlink(_LOCK_FILE)
         except (OSError, ValueError):
-            pass  # stale lock — safe to continue
-    with open(_LOCK_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-    atexit.register(lambda: os.unlink(_LOCK_FILE) if os.path.exists(_LOCK_FILE) else None)
+            pass
+    atexit.register(_release_lock)
 
 # ---------- Main Loop ----------
 def main():
@@ -779,6 +863,26 @@ def main():
                 set_screen_state('speaking', ai_text=pending_text)
                 speak(pending_text)
                 set_screen_state('idle')
+                continue
+
+            if isinstance(trigger, tuple) and trigger[0] == "dictate":
+                # A kiosk page (e.g. food.html's mic button) wants text typed by speech
+                # instead of Claude conversation — record + transcribe using the exact
+                # same pipeline as a normal turn, but never call Claude or speak a
+                # response; just hand the text back via /api/dictate/result.
+                print("[frog] Dictating...")
+                set_screen_state('listening')
+                time.sleep(0.4)
+                dictate_audio = record_until_silence()
+                if dictate_audio is None:
+                    post_dictate_result('', error='no_speech')
+                else:
+                    set_screen_state('thinking')
+                    dictate_text = transcribe(dictate_audio)
+                    print(f"[frog] Dictated: {dictate_text}")
+                    post_dictate_result(dictate_text)
+                set_screen_state('idle')
+                in_conversation = False
                 continue
 
             set_screen_state('listening')

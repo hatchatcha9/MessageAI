@@ -355,6 +355,14 @@
   let _draggingVolume = false;
   const volumeSlider = document.getElementById('volume-slider');
   volumeSlider.addEventListener('pointerdown', () => { _draggingVolume = true; });
+  // pointerup/pointercancel reset too — 'change' alone never fires for a tap without an
+  // actual drag (e.g. a resistive-screen contact bounce that presses the thumb but
+  // registers no value change), which used to leave _draggingVolume stuck true forever:
+  // render()'s "if (!_draggingVolume) ...value = data.volume" guard would then never
+  // update the slider from server state again, permanently desyncing the displayed
+  // volume from reality.
+  volumeSlider.addEventListener('pointerup', () => { _draggingVolume = false; });
+  volumeSlider.addEventListener('pointercancel', () => { _draggingVolume = false; });
   volumeSlider.addEventListener('change', async e => {
     await control('volume', parseInt(e.target.value));
     _draggingVolume = false;

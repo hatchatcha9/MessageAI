@@ -179,7 +179,7 @@
         return;
       }
       if (data.error) {
-        list.innerHTML = `<div class="empty-state">${data.error}</div>`;
+        list.innerHTML = `<div class="empty-state">${data.error.replace(/</g, '&lt;')}</div>`;
         return;
       }
       if (!data.days.length) {

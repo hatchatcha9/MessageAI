@@ -533,7 +533,30 @@ function formatCheckoutError(error) {
 }
 
 // Process commands from AI response
-async function processCommands(response, user, phoneNumber, userMsg = '') {
+// Commands buildSystemPrompt()'s voice branch never documents (SMS/text-flow only:
+// budget filtering, DoorDash credential setup, order-status/scheduling). Until now
+// that separation was prompt-only convention — this function executed any of them
+// identically regardless of mode, so if Claude ever emitted one while voiceMode is
+// true (hallucination, or stray text bleeding in from a search result/page title),
+// it would still fully execute — e.g. scheduling or cancelling a real charge, or
+// walking through a spoken DoorDash-credential flow.
+const VOICE_RESTRICTED_COMMANDS = [
+    'SAVE_BUDGET', 'CLEAR_BUDGET', 'SETUP_DOORDASH', 'CHECK_DOORDASH',
+    'ORDER_STATUS', 'SCHEDULE_ORDER', 'CANCEL_SCHEDULE', 'REMOVE_ITEM',
+    'PLACE_ORDER_SCHEDULED'
+];
+
+async function processCommands(response, user, phoneNumber, userMsg = '', voiceMode = false) {
+    if (voiceMode) {
+        for (const cmd of VOICE_RESTRICTED_COMMANDS) {
+            const stripRe = new RegExp(`\\[${cmd}(?::[^\\]]*)?\\]`, 'gi');
+            const before = response;
+            response = response.replace(stripRe, '');
+            if (response !== before) {
+                console.warn(`[Voice] Blocked SMS-only command in voice mode: [${cmd}]`);
+            }
+        }
+    }
     let cleanResponse = response;
     let actions = [];
     let additionalContext = '';
@@ -978,12 +1001,19 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                 }
 
                 // Phase 1: positional matching — phrase[N] → group[N]
+                // groupIndex must be the group's real position among ALL radiogroup/group-role
+                // elements in the modal (group._origIdx, when the extractor could determine it) —
+                // NOT its position gIdx in this already-filtered (unselected-only) array. The
+                // numeric SELECT_OPTION handler above already does this; this text-phrase handler
+                // was missing the same fix, so a pre-selected group in between would silently
+                // shift every later phrase's selection onto the wrong group in the DOM.
                 for (let gIdx = 0; gIdx < numGroups; gIdx++) {
                     const group = prefsText.pendingDoordashOptions[gIdx];
                     if (!group.options || group.options.length === 0) {
                         console.warn(`[DoorDash] Group ${gIdx} (${group.name}) has no options, skipping`);
                         continue;
                     }
+                    const origIdx = group._origIdx !== undefined ? group._origIdx : gIdx;
                     const phrase = userPhrases[gIdx];
                     const match = matchPhraseInGroup(group, phrase);
                     let matchedOption, matchedIndex;
@@ -996,8 +1026,8 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                     }
                     if (matchedOption) {
                         const cleanOption = matchedOption.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                        selectionsText.push({ groupIndex: gIdx, optionIndex: matchedIndex, optionText: cleanOption });
-                        console.log(`[DoorDash] Group ${gIdx} (${group.name}): Matched "${cleanOption}"`);
+                        selectionsText.push({ groupIndex: origIdx, optionIndex: matchedIndex, optionText: cleanOption });
+                        console.log(`[DoorDash] Group ${origIdx} (${group.name}): Matched "${cleanOption}"`);
                     }
                 }
 
@@ -1006,12 +1036,13 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                 if (userPhrases.length > numGroups && numGroups > 0) {
                     const lastGroupIdx = numGroups - 1;
                     const lastGroup = prefsText.pendingDoordashOptions[lastGroupIdx];
+                    const lastGroupOrigIdx = lastGroup._origIdx !== undefined ? lastGroup._origIdx : lastGroupIdx;
                     for (let pIdx = numGroups; pIdx < userPhrases.length; pIdx++) {
                         const match = matchPhraseInGroup(lastGroup, userPhrases[pIdx]);
                         if (match) {
                             const cleanOption = match.option.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                            selectionsText.push({ groupIndex: lastGroupIdx, optionIndex: match.index, optionText: cleanOption });
-                            console.log(`[DoorDash] Group ${lastGroupIdx} extra (checkbox): Matched "${cleanOption}"`);
+                            selectionsText.push({ groupIndex: lastGroupOrigIdx, optionIndex: match.index, optionText: cleanOption });
+                            console.log(`[DoorDash] Group ${lastGroupOrigIdx} extra (checkbox): Matched "${cleanOption}"`);
                         }
                     }
                 }
@@ -1055,8 +1086,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                                         const qPrefsT = db.getUserPreferences(user.id);
                                         const qAutoSelsT = [], qNeedsInputT = [];
                                         qRes.requiredOptions.forEach((g, gi) => {
-                                            if (g.options.length === 1) qAutoSelsT.push({ groupIndex: gi, optionIndex: 0, optionText: g.options[0] });
-                                            else qNeedsInputT.push({ ...g, _origIdx: gi });
+                                            const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
+                                            if (g.options.length === 1) qAutoSelsT.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                                            else qNeedsInputT.push({ ...g, _origIdx: origIdx });
                                         });
                                         qPrefsT.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
                                         qPrefsT.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000;
@@ -1179,8 +1211,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                                     const qPrefs = db.getUserPreferences(user.id);
                                     const qAutoSels = [], qNeedsInput = [];
                                     qRes.requiredOptions.forEach((g, gi) => {
-                                        if (g.options.length === 1) qAutoSels.push({ groupIndex: gi, optionIndex: 0, optionText: g.options[0] });
-                                        else qNeedsInput.push({ ...g, _origIdx: gi });
+                                        const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
+                                        if (g.options.length === 1) qAutoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                                        else qNeedsInput.push({ ...g, _origIdx: origIdx });
                                     });
                                     qPrefs.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
                                     qPrefs.pendingOptionsExpiry = Date.now() + 30 * 60 * 1000;
@@ -1412,11 +1445,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
                             const groupsNeedingInput = [];
                             for (let gIdx = 0; gIdx < addResult.requiredOptions.length; gIdx++) {
                                 const g = addResult.requiredOptions[gIdx];
+                                const origIdx = g._origIdx !== undefined ? g._origIdx : gIdx;
                                 if (g.options.length === 1) {
-                                    autoSelections.push({ groupIndex: gIdx, optionIndex: 0, optionText: g.options[0] });
+                                    autoSelections.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
                                     console.log(`[DoorDash] Auto-selecting single option for "${g.name}": "${g.options[0]}"`);
                                 } else {
-                                    groupsNeedingInput.push({ ...g, _origIdx: gIdx });
+                                    groupsNeedingInput.push({ ...g, _origIdx: origIdx });
                                 }
                             }
 
@@ -1580,6 +1614,21 @@ async function processCommands(response, user, phoneNumber, userMsg = '') {
             }
             const match = fuzzy[0];
             if (match) {
+                // Remove from the REAL DoorDash browser cart first — previously this
+                // only updated local SQLite state, so checkoutCurrentCart() (which
+                // checks out whatever is actually in the DoorDash cart) still ordered
+                // and charged for an item the assistant had just told the user was
+                // removed. Non-fatal on failure (e.g. no browser session open yet) —
+                // still remove from local state so the assistant's cart display stays
+                // accurate, but log it since it means the two carts are now out of sync.
+                try {
+                    const browserResult = await doordash.removeCartItem(match.name);
+                    if (!browserResult.success) {
+                        console.warn(`[REMOVE_ITEM] Could not remove "${match.name}" from browser cart: ${browserResult.error}`);
+                    }
+                } catch (e) {
+                    console.warn(`[REMOVE_ITEM] Browser cart removal threw for "${match.name}":`, e.message);
+                }
                 db.removeFromCart(user.id, restaurantId, match.id);
                 const updatedCart = db.getCart(user.id);
                 const hasItems = Object.values(updatedCart.items || {}).some(arr => arr.length > 0);
@@ -2453,7 +2502,7 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
             console.log(`[Intercept] Plain number ${num} with pending search → auto-SELECT`);
             db.saveMessage(user.id, 'user', message);
             db.pruneConversationHistory(user.id);
-            const { response: cleanedResponse, actions } = await processCommands(`[SELECT: ${num}]`, user, phoneNumber);
+            const { response: cleanedResponse, actions } = await processCommands(`[SELECT: ${num}]`, user, phoneNumber, '', voiceMode);
             db.saveMessage(user.id, 'assistant', cleanedResponse);
             return { response: cleanedResponse, actions };
         }
@@ -2518,7 +2567,7 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
         // Log commands Claude chose (helps debug wrong command selection)
         const cmdMatches = assistantMessage.match(/\[[A-Z_]+(?::[^\]]+)?\]/g);
         if (cmdMatches) console.log(`[Claude] Commands: ${cmdMatches.join(' | ')}`);
-        const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber, message);
+        const { response: cleanedResponse, actions } = await processCommands(assistantMessage, user, phoneNumber, message, voiceMode);
         assistantMessage = cleanedResponse;
 
         if (voiceMode) {
@@ -2552,14 +2601,24 @@ app.post('/api/message', async (req, res) => {
 
     console.log(`[${phoneNumber}] Received: ${message}`);
 
-    const { response, actions } = await handleMessage(phoneNumber, message);
+    // Without this try/catch, any exception thrown inside handleMessage (e.g. a
+    // corrupt DB field) rejects this async handler with nothing to catch it —
+    // Express doesn't await route handlers, so it becomes an unhandledRejection,
+    // which the global handler above turns into process.exit(1), killing SMS
+    // ordering AND frog's voice assistant (same server) over one bad request.
+    try {
+        const { response, actions } = await handleMessage(phoneNumber, message);
 
-    console.log(`[${phoneNumber}] Replied: ${response}`);
-    if (actions.length) {
-        console.log(`[${phoneNumber}] Actions:`, actions);
+        console.log(`[${phoneNumber}] Replied: ${response}`);
+        if (actions.length) {
+            console.log(`[${phoneNumber}] Actions:`, actions);
+        }
+
+        res.json({ response, actions });
+    } catch (error) {
+        console.error(`[${phoneNumber}] /api/message error:`, error);
+        res.status(500).json({ error: 'Something went wrong processing that message.' });
     }
-
-    res.json({ response, actions });
 });
 } // end if (TWILIO_ENABLED) — /api/message
 
@@ -2862,6 +2921,79 @@ app.get('/api/spotify/devices', async (req, res) => {
 // Food (DoorDash) — used by food.html for direct (non-voice) restaurant/menu browsing
 // and cart building. Deliberately stops at the cart: checkoutCurrentCart/placeOrder are
 // never called from these routes, so nothing here can spend real money.
+
+// Some restaurants (e.g. Costa Vida) list size variants of the same dish as fully
+// separate menu entries — "Small Salad" and "Salads" showed up 21 menu slots apart,
+// each independently clickable/orderable — rather than one item with a size option
+// DoorDash itself presents. Group them here into one display entry with a `sizes`
+// list so food.html can show a single "Salad" card with a size picker instead of two
+// unrelated-looking rows, while still routing the actual add-to-cart call to the
+// correct underlying DoorDash item based on which size was picked.
+const SIZE_WORDS = ['small', 'medium', 'large', 'regular', 'mini', 'half', 'full',
+                     'personal', 'family', 'jumbo', 'individual', 'sm', 'lg', 'xl'];
+
+function _sizeBaseName(name) {
+    const words = (name || '').trim().split(/\s+/);
+    let sizeLabel = null;
+    let rest = (name || '').trim();
+    if (words.length > 1 && SIZE_WORDS.includes(words[0].toLowerCase())) {
+        sizeLabel = words[0];
+        rest = words.slice(1).join(' ');
+    }
+    // Grouping key only (never displayed) — lowercase + naive plural strip so e.g.
+    // "Salads" and "Small Salad" land in the same bucket.
+    let base = rest.toLowerCase().trim();
+    if (base.endsWith('s') && base.length > 3) base = base.slice(0, -1);
+    return { base, sizeLabel };
+}
+
+function groupSizeVariants(menuItems) {
+    if (!Array.isArray(menuItems)) return menuItems;
+    const groups = new Map();
+    for (const item of menuItems) {
+        const { base, sizeLabel } = _sizeBaseName(item.name);
+        if (!groups.has(base)) groups.set(base, []);
+        groups.get(base).push({ ...item, _sizeLabel: sizeLabel });
+    }
+
+    const result = [];
+    for (const members of groups.values()) {
+        const hasSizeWord = members.some(m => m._sizeLabel);
+        if (members.length > 1 && hasSizeWord) {
+            // Prefer the member with no size prefix as the display name (that's how the
+            // restaurant names the item by default); fall back to stripping the size
+            // word from whichever member if every variant has one.
+            const unprefixed = members.find(m => !m._sizeLabel);
+            const displayName = unprefixed
+                ? unprefixed.name
+                : members[0].name.replace(new RegExp(`^${members[0]._sizeLabel}\\s+`, 'i'), '');
+            const sizes = members
+                .map(m => ({
+                    label: m._sizeLabel ? (m._sizeLabel.charAt(0).toUpperCase() + m._sizeLabel.slice(1).toLowerCase()) : 'Regular',
+                    price: m.price,
+                    index: m.index,
+                    id: m.id,
+                    name: m.name,
+                }))
+                .sort((a, b) => (a.price || 0) - (b.price || 0));
+            result.push({
+                id: `group-${members[0].id}`,
+                index: members[0].index, // display/key only — adding always uses sizes[].index
+                name: displayName,
+                price: sizes[0].price, // lowest — shown as the card's headline price
+                description: (unprefixed || members[0]).description || '',
+                sizes,
+            });
+        } else {
+            for (const m of members) {
+                const { _sizeLabel, ...clean } = m;
+                result.push(clean);
+            }
+        }
+    }
+    return result;
+}
+
 app.get('/api/food/status', (req, res) => {
     const user = db.getOrCreateUser(PI_DEVICE_ID);
     const address = db.getUserAddress(user.id);
@@ -2928,7 +3060,10 @@ app.post('/api/food/select', async (req, res) => {
 
         if (!menuItems) {
             menuItems = await doordashUI.extractMenuItems();
-            if (menuItems && menuItems.length > 0) db.cacheRestaurantMenu(user.id, id, menuItems);
+            if (menuItems && menuItems.length > 0) {
+                menuItems = groupSizeVariants(menuItems);
+                db.cacheRestaurantMenu(user.id, id, menuItems);
+            }
         }
 
         db.clearCart(user.id);
@@ -3090,6 +3225,64 @@ app.post('/api/settings', (req, res) => {
     }
 });
 
+// Delivery address — separate from settings.json above because it's stored per-DB-user
+// (db.setUserAddress/getUserAddress, keyed by PI_DEVICE_ID) rather than as device config.
+// Used by settings.html's on-screen-keyboard address field.
+app.get('/api/address', (req, res) => {
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    res.json({ address: db.getUserAddress(user.id) || '' });
+});
+
+app.post('/api/address', (req, res) => {
+    try {
+        const address = (req.body?.address || '').trim();
+        const user = db.getOrCreateUser(PI_DEVICE_ID);
+        db.setUserAddress(user.id, address);
+        console.log(`[Settings] Address updated: ${address}`);
+        res.json({ address });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ── Voice dictation (kiosk web pages -> physical mic -> text, no TTS) ───────────
+// Lets a page with no usable on-screen keyboard (this kiosk's resistive touchscreen
+// has none) fill a field by speech instead: POST /api/dictate/start requests it,
+// voice_loop.py notices via GET /api/dictate/pending (checked from inside its
+// wake-word/tap polling loops, not just once per outer loop iteration — otherwise a
+// request made while Frog is idly waiting for "Hey Frog" could never be noticed,
+// since that wait blocks indefinitely), records+transcribes using the exact same
+// pipeline as a normal conversation turn, then POSTs the text back via
+// /api/dictate/result WITHOUT speaking a response or invoking Claude — the caller
+// polls GET /api/dictate/result for it.
+let _dictateRequested = false;
+let _dictateResult = null; // { text, error, ts } | null
+
+app.post('/api/dictate/start', (req, res) => {
+    _dictateRequested = true;
+    _dictateResult = null;
+    res.json({ ok: true });
+});
+
+app.get('/api/dictate/pending', (req, res) => {
+    const pending = _dictateRequested;
+    _dictateRequested = false; // one-shot, same pattern as /api/voice/stop
+    res.json({ pending });
+});
+
+app.post('/api/dictate/result', (req, res) => {
+    const { text, error } = req.body || {};
+    _dictateResult = { text: text || '', error: error || null, ts: Date.now() };
+    res.json({ ok: true });
+});
+
+app.get('/api/dictate/result', (req, res) => {
+    if (!_dictateResult) return res.json({ ready: false });
+    const result = _dictateResult;
+    _dictateResult = null; // consume-once so a later unrelated poll can't reuse it
+    res.json({ ready: true, text: result.text, error: result.error });
+});
+
 // Serve the simulator UI
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -3176,20 +3369,31 @@ async function pollOrderStatuses() {
                 }
             }
 
-            // Fall back to time-based estimate if real status unavailable
+            // Fall back to time-based estimate if real status unavailable. Only the
+            // first four buckets are confident guesses about a normal delivery
+            // timeline — past 50 minutes we no longer have any real signal (creds
+            // missing, or the real DoorDash check keeps failing/returning 'unknown'),
+            // so we must not keep asserting a firm 'delivered': a delayed order is
+            // common and this used to falsely tell the user it arrived. 'likely_delivered'
+            // is a soft, non-terminal guess (real status checks keep retrying), and only
+            // past a much longer ceiling do we give up entirely via 'stopped_tracking'.
             if (!newStatus) {
                 if (minutesAgo < 5) newStatus = 'placed';
                 else if (minutesAgo < 20) newStatus = 'preparing';
                 else if (minutesAgo < 35) newStatus = 'picked_up';
                 else if (minutesAgo < 50) newStatus = 'on_the_way';
-                else newStatus = 'delivered';
+                else if (minutesAgo < 120) newStatus = 'likely_delivered';
+                else newStatus = 'stopped_tracking';
             }
 
             if (newStatus === order.last_known_status) continue;
 
             db.updateOrderLastStatus(order.id, newStatus);
-            if (newStatus === 'delivered') {
-                db.updateOrderStatus(order.id, 'delivered');
+            // Only these are truly terminal — stop polling/re-checking real status for them.
+            // 'likely_delivered' deliberately does NOT set order.status, so a real
+            // status check (if creds exist) keeps getting a chance to confirm/correct it.
+            if (newStatus === 'delivered' || newStatus === 'stopped_tracking') {
+                db.updateOrderStatus(order.id, newStatus);
             }
 
             const phone = order.user_phone;
@@ -3208,6 +3412,12 @@ async function pollOrderStatuses() {
                     break;
                 case 'delivered':
                     message = `Your ${order.restaurant_name} order has been delivered! Enjoy your food!`;
+                    break;
+                case 'likely_delivered':
+                    message = `Your ${order.restaurant_name} order should have arrived by now — hope it's good! Let me know if it hasn't shown up.`;
+                    break;
+                case 'stopped_tracking':
+                    message = `I've lost track of your ${order.restaurant_name} order's status — it's been a while, so please check the DoorDash app directly if it hasn't arrived yet.`;
                     break;
             }
 
@@ -3228,10 +3438,27 @@ setInterval(() => pollOrderStatuses().catch(err => console.error('[StatusPoll] U
 const _scheduledOrdersFired = new Map();
 
 // Scheduled order execution (every minute)
+// This deployment serves one user (Draper, Utah — see CLAUDE.md), so scheduling is
+// pinned to their timezone rather than being per-user configurable. Using the IANA
+// zone (not a fixed UTC offset) means DST transitions are handled automatically.
+// Without this, comparing against now.getHours()/getMinutes() compares against
+// whatever timezone the Node process itself runs in — UTC in production (Docker
+// default, no TZ env var set) — so "order at 6pm" would fire ~6-7 hours early.
+const SCHEDULING_TIMEZONE = 'America/Denver';
+
+function _minutesOfDayInTimeZone(date, timeZone) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone, hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(date);
+    const hour = parseInt(parts.find(p => p.type === 'hour').value, 10) % 24; // Intl can format midnight as "24"
+    const minute = parseInt(parts.find(p => p.type === 'minute').value, 10);
+    return hour * 60 + minute;
+}
+
 async function checkScheduledOrders() {
     try {
         const now = new Date();
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        const currentMinutes = _minutesOfDayInTimeZone(now, SCHEDULING_TIMEZONE);
 
         const usersWithScheduled = db.db.prepare(`
             SELECT * FROM users
@@ -3263,47 +3490,70 @@ async function checkScheduledOrders() {
                     if (Date.now() - t > 10 * 60 * 1000) _scheduledOrdersFired.delete(k);
                 }
 
-                console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
-
-                // Clear scheduled order atomically — only proceed if we own the clear
-                prefs.scheduledOrder = null;
-                db.db.prepare('UPDATE users SET preferences = ? WHERE id = ?').run(JSON.stringify(prefs), userRow.id);
-
                 const phone = userPhone || userRow.phone_number;
 
-                // Create order record from snapshot
-                const restaurantIds = Object.keys(cart || {});
-                if (restaurantIds.length === 0) continue;
+                // Route the whole fire-and-place flow through the same per-user lock
+                // that serializes handleMessage() calls (withUserLock, above). Previously
+                // this entire block — including the prefs read/clear and the final
+                // db.setCart(userRow.id, {}) — ran completely outside that lock, so a
+                // concurrent SMS/voice conversation building a *different* order could
+                // race it: read stale prefs, or have its own just-added cart items wiped
+                // by this function's unconditional cart clear once doordash.placeFullOrder
+                // (which can take many seconds) finally resolved.
+                await withUserLock(phone, async () => {
+                    console.log(`[Scheduler] Placing scheduled order for user ${userRow.id} at ${time}`);
 
-                const creds = db.getDoorDashCredentials(userRow.id) || {
-                    email: process.env.DOORDASH_EMAIL,
-                    password: process.env.DOORDASH_PASSWORD
-                };
+                    // Re-read + clear the scheduled flag now that we actually hold the
+                    // lock, in case it changed (cancelled/rescheduled) between the initial
+                    // scan above and lock acquisition.
+                    const freshUser = db.db.prepare('SELECT preferences FROM users WHERE id = ?').get(userRow.id);
+                    let freshPrefs;
+                    try { freshPrefs = JSON.parse(freshUser?.preferences || '{}'); } catch { freshPrefs = {}; }
+                    if (!freshPrefs.scheduledOrder || freshPrefs.scheduledOrder.time !== time) return; // cancelled/changed under us
+                    freshPrefs.scheduledOrder = null;
+                    db.db.prepare('UPDATE users SET preferences = ? WHERE id = ?').run(JSON.stringify(freshPrefs), userRow.id);
 
-                // DoorDash order — attempt automation
-                const orderItems = [];
-                restaurantIds.forEach(rid => {
-                    (cart[rid] || []).forEach(item => {
-                        orderItems.push({ restaurant: rid, name: item.name, options: item.selectedOptions || {}, quantity: item.quantity || 1 });
+                    // Create order record from snapshot
+                    const restaurantIds = Object.keys(cart || {});
+                    if (restaurantIds.length === 0) return;
+
+                    const creds = db.getDoorDashCredentials(userRow.id) || {
+                        email: process.env.DOORDASH_EMAIL,
+                        password: process.env.DOORDASH_PASSWORD
+                    };
+
+                    // DoorDash order — attempt automation
+                    const orderItems = [];
+                    restaurantIds.forEach(rid => {
+                        (cart[rid] || []).forEach(item => {
+                            orderItems.push({ restaurant: rid, name: item.name, options: item.selectedOptions || {}, quantity: item.quantity || 1 });
+                        });
                     });
+
+                    // Clear browser cart so stale items from previous sessions don't get mixed in
+                    await doordash.clearBrowserCart().catch(e => console.warn('[Scheduler] clearBrowserCart failed:', e.message));
+
+                    const result = await doordash.placeFullOrder(creds, {
+                        restaurantName: scheduledRestaurantName || restaurantIds[0],
+                        items: orderItems,
+                        address,
+                        tipPercent: 15
+                    });
+
+                    if (result.success) {
+                        // Only remove the restaurant(s) actually ordered from the cart —
+                        // not db.setCart(userRow.id, {}) — so anything the user added to a
+                        // different (or the same) restaurant while this automation was
+                        // running survives instead of being silently deleted.
+                        const liveCart = db.getCart(userRow.id);
+                        const remaining = { ...liveCart.items };
+                        restaurantIds.forEach(rid => { delete remaining[rid]; });
+                        db.setCart(userRow.id, remaining);
+                        await sendSMS(phone, `Scheduled order placed! ETA: ${result.eta || '30-45 min'}`);
+                    } else {
+                        await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
+                    }
                 });
-
-                // Clear browser cart so stale items from previous sessions don't get mixed in
-                await doordash.clearBrowserCart().catch(e => console.warn('[Scheduler] clearBrowserCart failed:', e.message));
-
-                const result = await doordash.placeFullOrder(creds, {
-                    restaurantName: scheduledRestaurantName || restaurantIds[0],
-                    items: orderItems,
-                    address,
-                    tipPercent: 15
-                });
-
-                if (result.success) {
-                    db.setCart(userRow.id, {});
-                    await sendSMS(phone, `Scheduled order placed! ETA: ${result.eta || '30-45 min'}`);
-                } else {
-                    await sendSMS(phone, `Couldn't place your scheduled order automatically. Please order manually.`);
-                }
             } catch (err) {
                 console.error(`[Scheduler] Error for user ${userRow.id}:`, err?.message || String(err));
             }
@@ -3448,6 +3698,28 @@ app.get('/api/voice/stream', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
+    // handleMessage below can take many seconds (Claude + possible DoorDash browser
+    // automation) — voice_loop.py's request can time out or the whole process can be
+    // killed while we're still awaiting it. Without tracking that, a res.write() on
+    // the now-dead socket throws/emits 'error' with no listener, which the global
+    // uncaughtException/unhandledRejection handlers turn into process.exit(1) over a
+    // routine client disconnect. Mirrors the req.on('close')/res.on('error') pattern
+    // already used by /api/screen/events above.
+    let clientGone = false;
+    req.on('close', () => { clientGone = true; });
+    res.on('error', (err) => {
+        clientGone = true;
+        console.error('[Voice] Stream socket error:', err.message);
+    });
+    const safeWrite = (payload) => {
+        if (clientGone || res.writableEnded) return;
+        try {
+            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        } catch (e) {
+            clientGone = true;
+        }
+    };
+
     console.log(`[Voice] Received (stream): ${message}`);
     broadcastScreenState('thinking', { userText: message });
 
@@ -3462,16 +3734,18 @@ app.get('/api/voice/stream', async (req, res) => {
         if (sentences.length === 0) sentences.push(response.trim());
 
         for (let i = 0; i < sentences.length - 1; i++) {
-            res.write(`data: ${JSON.stringify({ type: 'sentence', text: sentences[i] })}\n\n`);
+            safeWrite({ type: 'sentence', text: sentences[i] });
         }
-        res.write(`data: ${JSON.stringify({ type: 'done', remaining: sentences[sentences.length - 1] || '' })}\n\n`);
+        safeWrite({ type: 'done', remaining: sentences[sentences.length - 1] || '' });
     } catch (error) {
         console.error('[Voice] Stream error:', error);
         broadcastScreenState('idle');
-        res.write(`data: ${JSON.stringify({ type: 'error' })}\n\n`);
+        safeWrite({ type: 'error' });
     }
 
-    res.end();
+    if (!clientGone && !res.writableEnded) {
+        try { res.end(); } catch (e) {}
+    }
 });
 
 // Voice endpoint — used by voice_loop.py

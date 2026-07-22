@@ -142,6 +142,11 @@ async function resume() {
         const api = await getApi();
         if (!api) return 'Spotify not configured.';
         await api.play();
+
+        // Same brief pause skip() already uses below — Spotify needs a moment to
+        // actually start playback before getCurrentTrack() reflects it, otherwise this
+        // can report stale "Nothing is playing" right after a successful resume.
+        await new Promise(r => setTimeout(r, 800));
         return getCurrentTrack();
     } catch (err) {
         console.error('[Spotify] resume error:', err.message);

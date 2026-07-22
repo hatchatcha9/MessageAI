@@ -481,12 +481,22 @@
 
   const healthAge = document.getElementById('health-age');
 
+  // trueLabel/falseLabel above are always our own literal strings, but infoBadge()
+  // and the GPS badges below inject server-sourced text (reverse-geocoded location,
+  // memory stats) via innerHTML — escape it so it can't break out of the title
+  // attribute or inject markup into the health panel.
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function badge(ok, trueLabel, falseLabel) {
     return `<span class="health-badge ${ok ? 'badge-ok' : 'badge-err'}">${ok ? (trueLabel || 'OK') : (falseLabel || 'MISSING')}</span>`;
   }
 
   function infoBadge(text) {
-    return `<span class="health-badge badge-info" title="${text}">${text}</span>`;
+    const safe = escHtml(text);
+    return `<span class="health-badge badge-info" title="${safe}">${safe}</span>`;
   }
 
   function setRowBadge(rowId, html) {
@@ -515,9 +525,10 @@
       const gpsLabel = d.gps.fix
         ? (d.gps.location ? d.gps.location : 'FIX')
         : (d.gps.active ? 'NO FIX' : 'OFF');
+      const gpsLabelSafe = escHtml(gpsLabel);
       setRowBadge('row-gps', d.gps.fix
-        ? `<span class="health-badge badge-ok">${gpsLabel}</span>`
-        : `<span class="health-badge badge-err">${gpsLabel}</span>`);
+        ? `<span class="health-badge badge-ok">${gpsLabelSafe}</span>`
+        : `<span class="health-badge badge-err">${gpsLabelSafe}</span>`);
 
       setRowBadge('row-camera', badge(d.camera.available, 'OK', 'NONE'));
 

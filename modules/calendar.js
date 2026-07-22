@@ -150,8 +150,14 @@ async function getUpcoming(auth, days = 7) {
 
         // Sort by date and build spoken summary
         const dayKeys   = Object.keys(byDay).sort();
-        const todayKey     = dayKey(new Date());
-        const tomorrowKey  = dayKey(new Date(Date.now() + 24 * 60 * 60 * 1000));
+        const today = new Date();
+        const todayKey     = dayKey(today);
+        // Calendar-day arithmetic (add 1 to the day-of-month field), not
+        // Date.now() + 24h in raw milliseconds — on the ~2 nights/year Utah's DST
+        // change creates a 23- or 25-hour day, +24h in ms can land on the wrong side
+        // of local midnight and mislabel "Tomorrow" (event grouping above is
+        // unaffected — this only affects which label a day gets).
+        const tomorrowKey  = dayKey(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
 
         const sentences = dayKeys.map(key => {
             const { date, events: dayEvents } = byDay[key];

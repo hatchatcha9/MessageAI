@@ -1653,16 +1653,31 @@ async function addItemToCart(itemName, options = {}) {
     try {
         console.log(`[DoorDash] Adding item: ${itemName}`);
 
-        // Find menu item by name
+        // Find menu item by name — score-based (exact > startsWith-with-boundary >
+        // startsWith > includes), taking the BEST match across all items instead of the
+        // first substring hit. This is the legacy chain scheduled orders still run
+        // through (server.js checkScheduledOrders -> placeFullOrder); without this, an
+        // unanchored .includes() first-match (e.g. "Fries" matching "Chili Cheese
+        // Fries" before the real "Fries" entry) can silently add the wrong menu item —
+        // the same bug class already fixed via score-based matching in
+        // applyOptionSelections()/addItemByIndex() for the primary ordering path.
         const menuItems = await page.$$(SELECTORS.menu.item);
         let targetItem = null;
+        let bestItemScore = 0;
+        const targetName = itemName.toLowerCase().trim();
 
         for (const item of menuItems) {
             try {
                 const name = await item.$eval(SELECTORS.menu.itemName, el => el.textContent);
-                if (name.toLowerCase().includes(itemName.toLowerCase())) {
+                const n = name.toLowerCase().trim();
+                let score = 0;
+                if (n === targetName) score = 4;
+                else if (n.startsWith(targetName + ' ') || targetName.startsWith(n + ' ')) score = 3;
+                else if (n.startsWith(targetName) || targetName.startsWith(n)) score = 2;
+                else if (n.includes(targetName)) score = 1;
+                if (score > bestItemScore) {
+                    bestItemScore = score;
                     targetItem = item;
-                    break;
                 }
             } catch (e) {
                 continue;
@@ -1677,23 +1692,38 @@ async function addItemToCart(itemName, options = {}) {
         await targetItem.click();
         await delay(1500);
 
-        // Handle required options
+        // Handle required options — same score-based matching as the item lookup above
+        // (exact > startsWith-with-boundary > startsWith > includes), picking the BEST
+        // match across all option items instead of the first substring hit (e.g. "White
+        // Rice" no longer gets eclipsed by "SUB - White Rice" just because it appeared
+        // first in the modal).
         if (options.protein || options.size || options.customizations) {
             const optionValue = options.protein || options.size || options.customizations;
+            const targetOpt = optionValue.toLowerCase().trim();
 
-            // Find and select the option
             const optionItems = await page.$$(SELECTORS.customization.optionItem);
+            let bestOptItem = null;
+            let bestOptScore = 0;
             for (const optItem of optionItems) {
                 try {
                     const optText = await optItem.textContent();
-                    if (optText.toLowerCase().includes(optionValue.toLowerCase())) {
-                        await optItem.click();
-                        await delay(500);
-                        break;
+                    const t = optText.toLowerCase().trim();
+                    let score = 0;
+                    if (t === targetOpt) score = 4;
+                    else if (t.startsWith(targetOpt + ' ') || targetOpt.startsWith(t + ' ')) score = 3;
+                    else if (t.startsWith(targetOpt) || targetOpt.startsWith(t)) score = 2;
+                    else if (t.includes(targetOpt)) score = 1;
+                    if (score > bestOptScore) {
+                        bestOptScore = score;
+                        bestOptItem = optItem;
                     }
                 } catch (e) {
                     continue;
                 }
+            }
+            if (bestOptItem) {
+                await bestOptItem.click();
+                await delay(500);
             }
         }
 
@@ -1943,6 +1973,7 @@ async function placeOrder() {
 
         // Wait for confirmation page URL pattern
         let confirmationDetected = false;
+        let retriedPlaceOrderClick = false;
         const maxWaitTime = 30000;
         const startTime = Date.now();
 
@@ -1986,14 +2017,27 @@ async function placeOrder() {
                 };
             }
 
-            // Check if Place Order button is still visible (order didn't go through)
+            // Check if Place Order button is still visible (order didn't go through).
+            // Retry AT MOST ONCE (retriedPlaceOrderClick), and only when the button
+            // still looks genuinely clickable (not disabled/mid-submit) — this loop
+            // polls every ~1s for up to 30s, and a slow post-submit page transition
+            // (payment processing, redirect lag) is common; re-clicking on every single
+            // iteration that the button happened to still be visible could place a
+            // SECOND real, charged order for something that had already gone through.
             const stillOnCheckout = await page.$(SELECTORS.checkout.placeOrder);
-            if (stillOnCheckout && await stillOnCheckout.isVisible()) {
-                // Button still there - try clicking again
-                if (Date.now() - startTime > 5000) {
-                    console.log('[DoorDash] Place Order button still visible, retrying click...');
+            if (stillOnCheckout && await stillOnCheckout.isVisible() && !retriedPlaceOrderClick && Date.now() - startTime > 5000) {
+                const looksDisabled = await stillOnCheckout.evaluate(el =>
+                    el.disabled === true ||
+                    el.getAttribute('aria-disabled') === 'true' ||
+                    el.getAttribute('aria-busy') === 'true'
+                ).catch(() => false);
+                if (!looksDisabled) {
+                    console.log('[DoorDash] Place Order button still visible and enabled, retrying click once...');
                     await stillOnCheckout.click();
+                    retriedPlaceOrderClick = true;
                     await delay(2000);
+                } else {
+                    console.log('[DoorDash] Place Order button visible but appears disabled/busy — not re-clicking (avoiding duplicate submit)');
                 }
             }
 
@@ -5005,6 +5049,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
     if (!page || !context) {
         return { success: false, browserNotOpen: true };
     }
+    // Declared here, NOT inside the try block below, so the catch block can still
+    // reference _cartMutationHandler to unregister the request listener. A const/let
+    // declared inside try{} is block-scoped to that block and invisible in the paired
+    // catch{} — referencing it there used to throw a ReferenceError that replaced the
+    // real error on every single exception this function could throw, masking it
+    // (and skipping the browser-crash-recovery logic that catch block also runs).
+    let _learnedItemId = '', _learnedMenuId = '';
+    let _cartMutationHandler = null;
     try {
         const itemName = cachedItem?.name || `item ${index + 1}`;
         console.log(`[DoorDash] Adding item: ${itemName} (index ${index})...`);
@@ -5122,8 +5174,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
         // Intercept outgoing addCartItemV2 mutations to learn item IDs for future fast-path adds.
         // DoorDash's GraphQL mutation body contains the itemId/menuId/storeId — capture it.
-        let _learnedItemId = '', _learnedMenuId = '';
-        const _cartMutationHandler = (req) => {
+        _cartMutationHandler = (req) => {
             if (req.method() !== 'POST') return;
             const url = req.url();
             // Log ALL POST requests during add for debugging
@@ -5255,9 +5306,23 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // Escaping ® / ™ since regex doesn't need them literally.
             try {
                 const safePattern = searchName.replace(/[®™©]/g, '.').replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\./g, '.');
-                const loc = page.locator('[data-anchor-id="MenuItem"], article, [role="button"]')
-                    .filter({ hasText: new RegExp(safePattern, 'i') })
+                // hasText with a bare unanchored pattern + .first() picks whichever matching
+                // card comes first in DOM order — if one item's name is a substring of
+                // another's (e.g. "Fries" inside "Chili Cheese Fries"), that could be the
+                // WRONG card. Try an anchored match first (name at the start of the card's
+                // text, followed by a boundary — space/end/digit/$ — as card text is
+                // typically "ItemName\n$X.XX" or "ItemName 350 cal"), same exact/prefix
+                // priority the TreeWalker fallback below already uses; only fall back to
+                // the bare substring pattern if nothing matches anchored.
+                const anchoredPattern = '^\\s*' + safePattern + '(\\s|$|\\d|\\$)';
+                let loc = page.locator('[data-anchor-id="MenuItem"], article, [role="button"]')
+                    .filter({ hasText: new RegExp(anchoredPattern, 'i') })
                     .first();
+                if (await loc.count() === 0) {
+                    loc = page.locator('[data-anchor-id="MenuItem"], article, [role="button"]')
+                        .filter({ hasText: new RegExp(safePattern, 'i') })
+                        .first();
+                }
                 await loc.scrollIntoViewIfNeeded({ timeout: 4000 });
                 await delay(200);
                 await loc.click({ timeout: 5000 });
@@ -5784,7 +5849,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
     } catch (error) {
         console.error('[DoorDash] Add item error:', error.message);
-        page.off('request', _cartMutationHandler);
+        if (_cartMutationHandler) page.off('request', _cartMutationHandler);
         stopDebugScreenshots();
         // Chrome crashed — reset browser state so next call gets a fresh session
         if (error.message.includes('Target crashed') || error.message.includes('Session closed') || error.message.includes('Target page, context or browser has been closed')) {
@@ -5817,6 +5882,14 @@ async function extractRequiredOptions() {
             if (!modal) return [];
 
             const groups = [];
+            // applyOptionSelections() later indexes into modal.querySelectorAll('[role="radiogroup"],
+            // [role="group"]') using groupIndex. This heuristic scan below finds "sections" by text/
+            // rect matching (a different, looser notion of "group"), then filters to only unselected
+            // ones — so a plain array position among the filtered results does NOT line up with that
+            // same section's real position among ALL radiogroup/group-role elements once a
+            // pre-selected group gets excluded. Record each section's real position here as _origIdx
+            // so downstream code (server.js) can use it instead of the filtered-array position.
+            const allRoleGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
 
             // Find all section containers in the modal
             // DoorDash sections typically have a header with the section name and a subtitle with "Required" or "Optional"
@@ -5933,12 +6006,19 @@ async function extractRequiredOptions() {
                 }
 
                 if (options.length > 0) {
-                    groups.push({
+                    const groupObj = {
                         name: sectionName,
                         options: options.map(o => o.name),
                         required: true,
                         hasSelection: options.some(o => o.selected)
-                    });
+                    };
+                    let origIdx = -1;
+                    for (let i = 0; i < allRoleGroups.length; i++) {
+                        const rg = allRoleGroups[i];
+                        if (rg === div || rg.contains(div) || div.contains(rg)) { origIdx = i; break; }
+                    }
+                    if (origIdx >= 0) groupObj._origIdx = origIdx;
+                    groups.push(groupObj);
                 }
             }
 
@@ -5995,7 +6075,13 @@ async function extractRequiredOptions() {
 
                 // Strategy A: Find [role="radiogroup"] elements — the most reliable indicator
                 const radioGroups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                let _rgIdx = -1;
                 for (const rg of radioGroups) {
+                    // This counter increments once per radioGroups entry regardless of any
+                    // `continue` below, so it always equals this element's real position in
+                    // modal.querySelectorAll('[role="radiogroup"], [role="group"]') — the exact
+                    // indexing space applyOptionSelections() uses later. Recorded as _origIdx.
+                    _rgIdx++;
                     // Check header area for "optional" — look at heading's parent to catch sibling "(Optional)" spans
                     const labelId = rg.getAttribute('aria-labelledby');
                     const labelEl = labelId ? document.getElementById(labelId) : null;
@@ -6075,7 +6161,7 @@ async function extractRequiredOptions() {
                         rg.querySelector('input:checked') !== null ||
                         rg.querySelector('[data-anchor-id="DecrementQuantity"]') !== null;
                     seen.add(groupName.toLowerCase());
-                    groups.push({ name: groupName, options: options, required: true, hasSelection: isSelected, isStepperType: options.length > 0 && rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]').length > 0 });
+                    groups.push({ name: groupName, options: options, required: true, hasSelection: isSelected, isStepperType: options.length > 0 && rg.querySelectorAll('[data-anchor-id="IncrementQuantity"]').length > 0, _origIdx: _rgIdx });
                 }
 
                 // Strategy B: Look for divs that contain "Required" text (looser than before)
@@ -6083,6 +6169,14 @@ async function extractRequiredOptions() {
                 if (groups.length === 0 || groups.length < reqCount) {
                     const allDivs = modal.querySelectorAll('div, section, fieldset');
                     for (const div of allDivs) {
+                        // Map this section back to its real position among ALL radiogroup/group-role
+                        // elements (same indexing space applyOptionSelections() uses) — see comment on
+                        // the structured-extraction block above for why this matters.
+                        let _origIdxB = -1;
+                        for (let i = 0; i < radioGroups.length; i++) {
+                            const rg = radioGroups[i];
+                            if (rg === div || rg.contains(div) || div.contains(rg)) { _origIdxB = i; break; }
+                        }
                         const ownText = Array.from(div.childNodes)
                             .filter(n => n.nodeType === Node.TEXT_NODE)
                             .map(n => n.textContent.trim()).join(' ').toLowerCase();
@@ -6128,7 +6222,9 @@ async function extractRequiredOptions() {
                             Array.from(div.querySelectorAll('label[for]')).some(l => { const inp = document.getElementById(l.htmlFor); return inp && inp.checked; }) ||
                             div.querySelector('input:checked') !== null;
                         seen.add(groupName.toLowerCase());
-                        groups.push({ name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected });
+                        const groupObjB = { name: groupName, options: options.slice(0, 10), required: true, hasSelection: isSelected };
+                        if (_origIdxB >= 0) groupObjB._origIdx = _origIdxB;
+                        groups.push(groupObjB);
                     }
                 }
 
@@ -6861,8 +6957,8 @@ async function clickAddToOrderButton() {
 
         // Check if modal closed
         let modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
-        if (!modalStillOpen) {
-            console.log('[DoorDash] Modal closed - item added successfully!');
+        if (!modalStillOpen || await _isPostAddConfirmation()) {
+            console.log('[DoorDash] Modal closed (or shows post-add confirmation) - item added successfully!');
             return true;
         }
 
@@ -6887,8 +6983,8 @@ async function clickAddToOrderButton() {
         await delay(2000);
         await takeScreenshot('after-add-button-click');
         modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
-        if (!modalStillOpen) {
-            console.log('[DoorDash] Modal closed after JS dispatch - item added successfully!');
+        if (!modalStillOpen || await _isPostAddConfirmation()) {
+            console.log('[DoorDash] Modal closed after JS dispatch (or shows post-add confirmation) - item added successfully!');
             return true;
         } else {
             console.log('[DoorDash] Modal still open after click');
@@ -6896,6 +6992,26 @@ async function clickAddToOrderButton() {
     }
 
     return false;
+}
+
+// After a successful add, DoorDash sometimes replaces the item-customization modal
+// with a DIFFERENT dialog — an upsell/cross-sell confirmation showing "Continue to
+// store" (seen on Costa Vida's Salads item, which has "Recommended Desserts/
+// Beverages/Sides" option groups) — rather than closing the modal entirely. The
+// [role="dialog"] check above then still sees SOME dialog present and reports
+// failure, even though the item was actually added (confirmed via the addCartItem
+// GraphQL call already having fired), causing the caller to keep retrying against a
+// modal whose "Add" button no longer exists. Recognize this state as success too.
+async function _isPostAddConfirmation() {
+    return await page.evaluate(() => {
+        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+        if (!modal) return false;
+        const texts = Array.from(modal.querySelectorAll('button')).map(b => (b.textContent || '').trim().toLowerCase());
+        return texts.some(t =>
+            t.includes('continue to store') || t.includes('continue shopping') ||
+            t === 'done' || t.includes('view cart')
+        );
+    }).catch(() => false);
 }
 
 // Error types for better handling
@@ -7251,6 +7367,82 @@ async function openForManualLogin() {
  * Clear the DoorDash browser cart by clicking all remove/decrement buttons
  * Called when user does CLEAR_CART to keep DB and browser in sync
  */
+/**
+ * Remove a single item from the DoorDash browser cart by name (best match against
+ * the current cart's item names — same score priority used elsewhere in this file:
+ * exact > startsWith-with-boundary > startsWith). Repeatedly clicks that item's own
+ * decrement button until its row disappears, removing the whole line regardless of
+ * quantity — matching db.removeFromCart()'s "delete this cart-line entirely" semantics
+ * in server.js's [REMOVE_ITEM] handler.
+ *
+ * Needed because that handler previously only updated local SQLite cart state —
+ * nothing here ever removed the item from the real DoorDash cart, so
+ * checkoutCurrentCart() (which checks out whatever is actually in the browser cart)
+ * still ordered and charged for an item the assistant had told the user was removed.
+ */
+async function removeCartItem(itemName) {
+    if (!page || !context) {
+        console.log('[DoorDash] removeCartItem: no browser open, nothing to remove');
+        return { success: false, error: 'No browser session open' };
+    }
+    try {
+        const url = page.url();
+        if (!url.includes('doordash.com')) {
+            return { success: false, error: 'Not on DoorDash' };
+        }
+
+        const target = itemName.toLowerCase().trim();
+        let removedAny = false;
+
+        for (let attempt = 0; attempt < 20; attempt++) {
+            const clicked = await page.evaluate((target) => {
+                function score(name) {
+                    name = name.toLowerCase().trim();
+                    if (name === target) return 3;
+                    if (name.startsWith(target + ' ') || target.startsWith(name + ' ')) return 2;
+                    if (name.startsWith(target) || target.startsWith(name)) return 1;
+                    return 0;
+                }
+                const cartItemEls = Array.from(document.querySelectorAll('[data-anchor-id*="CartItem"]'))
+                    .filter(el => el.tagName !== 'BUTTON');
+
+                let best = null, bestScore = 0;
+                for (const el of cartItemEls) {
+                    const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"]')
+                        || el.querySelector('span[class*="name"], p[class*="name"]');
+                    const name = nameEl ? nameEl.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
+                    if (!name) continue;
+                    const s = score(name);
+                    if (s > bestScore) { bestScore = s; best = el; }
+                }
+                if (!best || bestScore === 0) return false;
+
+                const decBtn = best.querySelector(
+                    '[data-anchor-id*="CartItemDecrement"], [data-anchor-id*="Decrement"], ' +
+                    'button[aria-label*="Remove"], button[aria-label*="remove"], button[aria-label*="-"]'
+                );
+                if (!decBtn) return false;
+                decBtn.click();
+                return true;
+            }, target);
+
+            if (!clicked) break;
+            removedAny = true;
+            await new Promise(r => setTimeout(r, 300));
+        }
+
+        if (removedAny) {
+            console.log(`[DoorDash] removeCartItem: removed "${itemName}" from browser cart`);
+            return { success: true };
+        }
+        console.log(`[DoorDash] removeCartItem: no matching item found for "${itemName}"`);
+        return { success: false, error: 'Item not found in browser cart' };
+    } catch (e) {
+        console.log('[DoorDash] removeCartItem error:', e.message);
+        return { success: false, error: e.message };
+    }
+}
+
 async function clearBrowserCart() {
     _activeCartId = ''; // reset HTTP cart ID so next add starts a fresh cart
     if (!page || !context) {
@@ -7510,6 +7702,7 @@ module.exports = {
     addItemByIndex: locked(addItemByIndex),
     navigateToRestaurantPage: locked(navigateToRestaurantPage),
     clearBrowserCart: locked(clearBrowserCart),
+    removeCartItem: locked(removeCartItem),
     readBrowserCart: locked(readBrowserCart),
     getOrderStatus: locked(getOrderStatus),
     exportCookies,

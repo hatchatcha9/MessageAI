@@ -190,7 +190,13 @@ function setUserPreferences(userId, preferences) {
 
 function getUserPreferences(userId) {
     const user = db.prepare('SELECT preferences FROM users WHERE id = ?').get(userId);
-    return user ? JSON.parse(user.preferences || '{}') : {};
+    if (!user) return {};
+    try {
+        return JSON.parse(user.preferences || '{}');
+    } catch (e) {
+        console.error(`[db] Corrupt preferences JSON for user ${userId}, resetting to {}:`, e.message);
+        return {};
+    }
 }
 
 // Conversation functions
@@ -200,10 +206,16 @@ function saveMessage(userId, role, content) {
 }
 
 function getConversationHistory(userId, limit = 20) {
+    // created_at is second-resolution (SQLite CURRENT_TIMESTAMP), and the fast-intercept
+    // paths in server.js save the user message and assistant reply back-to-back with no
+    // intervening await — same-second ties are routine, not rare. Without id as a
+    // secondary sort key, SQLite's tie order is undefined, so Claude could occasionally
+    // be shown its own past reply *before* the user message that prompted it. id is
+    // AUTOINCREMENT, so it's a reliable insertion-order tiebreaker.
     const messages = db.prepare(`
         SELECT role, content FROM conversations
         WHERE user_id = ?
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT ?
     `).all(userId, limit);
 
@@ -383,12 +395,19 @@ function updateOrderLastStatus(orderId, status) {
 }
 
 function getActiveOrders() {
+    // 'stopped_tracking' = pollOrderStatuses() gave up after a real status was never
+    // confirmed and the order is well past any plausible delivery window (see
+    // server.js) — excluded here for the same reason 'delivered'/'cancelled' are, so
+    // it doesn't keep getting polled forever. The window below is just an outer safety
+    // bound (pollOrderStatuses finalizes every order to a terminal status well before
+    // this via its own give-up threshold); it should never actually be what drops an
+    // order from tracking.
     return db.prepare(`
         SELECT o.*, u.phone_number as user_phone
         FROM orders o
         JOIN users u ON o.user_id = u.id
-        WHERE o.status NOT IN ('delivered', 'cancelled')
-        AND o.placed_at > datetime('now', '-4 hours')
+        WHERE o.status NOT IN ('delivered', 'cancelled', 'stopped_tracking')
+        AND o.placed_at > datetime('now', '-6 hours')
         ORDER BY o.placed_at DESC
     `).all();
 }

@@ -661,7 +661,12 @@
   }
 
   // ── Demo mode (preview.html sends postMessage) ──
+  // preview.html embeds this page in an iframe on the same origin and posts with
+  // target '*' — restrict to same-origin senders here so an unrelated page that
+  // somehow gets a reference to this window (e.g. if it were ever framed elsewhere)
+  // can't spoof the idle/listening/thinking/speaking display state.
   window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin) return;
     if (e.data && e.data.type === 'demo-state') {
       setState(e.data.state, e.data);
     }
