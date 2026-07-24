@@ -1585,16 +1585,34 @@ async function submitPhoneLoginCode(code) {
         }
         await delay(1000);
 
-        const submitted = await page.evaluate(() => {
-            const btns = [...document.querySelectorAll('button')];
-            const btn = btns.find(b => /verify|submit|continue/i.test(b.textContent) && b.offsetParent !== null);
-            if (btn) { btn.click(); return true; }
-            return false;
-        });
-        if (!submitted) await page.keyboard.press('Enter');
+        // Clicking Submit can trigger an immediate navigation, which destroys this
+        // evaluate's execution context mid-call and throws — that's a navigation
+        // *starting*, not a failure, so treat it as "submitted" and move on.
+        let submitted = false;
+        try {
+            submitted = await page.evaluate(() => {
+                const btns = [...document.querySelectorAll('button')];
+                const btn = btns.find(b => /verify|submit|continue/i.test(b.textContent) && b.offsetParent !== null);
+                if (btn) { btn.click(); return true; }
+                return false;
+            });
+        } catch (evalError) {
+            if (/context was destroyed|Target closed|Execution context/i.test(evalError.message)) {
+                console.log('[DoorDash] Page navigated during submit click (likely success) — continuing to verify');
+                submitted = true;
+            } else {
+                throw evalError;
+            }
+        }
+        if (!submitted) {
+            try { await page.keyboard.press('Enter'); } catch (_) { /* page may already be navigating */ }
+        }
 
+        // Let any in-flight navigation actually settle before inspecting the page —
+        // this is the same race that broke the evaluate() call above.
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         await delay(3000);
-        await takeScreenshot('phone-code-submitted');
+        await takeScreenshot('phone-code-submitted').catch(() => {});
 
         const url = page.url();
         if (url.includes('identity.doordash.com') || url.includes('/login')) {
