@@ -5377,9 +5377,9 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log('[DoorDash] Attempting to add to cart...');
             for (let attempt = 0; attempt < 3; attempt++) {
                 await delay(500);
-                const added = await clickAddToOrderButton();
+                const clickResult = await clickAddToOrderButton();
 
-                if (added) {
+                if (clickResult.success) {
                     console.log('[DoorDash] Item added to cart successfully!');
                     stopDebugScreenshots();
                     await takeScreenshot('item-added');
@@ -5392,7 +5392,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
                         }
                     }
-                    return { success: true };
+                    return { success: true, price: clickResult.price };
                 }
 
                 console.log(`[DoorDash] Add attempt ${attempt + 1} failed, trying to select more options...`);
@@ -5798,9 +5798,9 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log('[DoorDash] Attempting to add to cart...');
             for (let attempt = 0; attempt < 3; attempt++) {
                 await delay(500);
-                const added = await clickAddToOrderButton();
+                const clickResult = await clickAddToOrderButton();
 
-                if (added) {
+                if (clickResult.success) {
                     console.log('[DoorDash] Item added to cart successfully!');
                     stopDebugScreenshots();
                     await takeScreenshot('item-added');
@@ -5813,7 +5813,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
                         }
                     }
-                    return { success: true };
+                    return { success: true, price: clickResult.price };
                 }
 
                 // If not added, try auto-selecting remaining options
@@ -6963,6 +6963,11 @@ async function applyOptionSelections(selections) {
  * Click the "Add to Order" button in the modal
  * Returns true if successful (modal closed)
  */
+function _parsePriceFromButtonText(text) {
+    const m = (text || '').match(/\$(\d+(?:\.\d{2})?)/);
+    return m ? parseFloat(m[1]) : null;
+}
+
 async function clickAddToOrderButton() {
     console.log('[DoorDash] Looking for Add to Order button...');
     await takeScreenshot('looking-for-add-button');
@@ -7081,7 +7086,7 @@ async function clickAddToOrderButton() {
         let modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
         if (!modalStillOpen || await _isPostAddConfirmation()) {
             console.log('[DoorDash] Modal closed (or shows post-add confirmation) - item added successfully!');
-            return true;
+            return { success: true, price: _parsePriceFromButtonText(buttonCoords.text) };
         }
 
         // Fallback: JS click directly on the button element (bypasses pointer-event overlays)
@@ -7107,13 +7112,13 @@ async function clickAddToOrderButton() {
         modalStillOpen = await page.$('[role="dialog"], [aria-modal="true"]');
         if (!modalStillOpen || await _isPostAddConfirmation()) {
             console.log('[DoorDash] Modal closed after JS dispatch (or shows post-add confirmation) - item added successfully!');
-            return true;
+            return { success: true, price: _parsePriceFromButtonText(buttonCoords.text) };
         } else {
             console.log('[DoorDash] Modal still open after click');
         }
     }
 
-    return false;
+    return { success: false, price: null };
 }
 
 // After a successful add, DoorDash sometimes replaces the item-customization modal

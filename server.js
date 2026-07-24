@@ -3132,7 +3132,40 @@ app.post('/api/food/cart/add', async (req, res) => {
             if (current.url) doordashUI.navigateToRestaurantPage(current.url).catch(() => {});
             return res.status(502).json({ error: addResult.error || 'Could not add item.' });
         }
-        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, price: item.price || 0, source: 'doordash' });
+        // The menu-grid scrape (extractMenuItems) can show a starting/base price for
+        // items with a hidden default size — DoorDash may add a pricier default variant
+        // (e.g. "Regular") than what the tile displayed. Since this price feeds directly
+        // into the pre-checkout estimate/confirm total, prefer the real price read straight
+        // off DoorDash's own "Add to cart - $X" button at the moment of the click
+        // (addItemByIndex's price field) over the scraped estimate.
+        let realPrice = item.price || 0;
+        if (addResult && typeof addResult.price === 'number' && addResult.price > 0) {
+            if (Math.abs(addResult.price - realPrice) > 0.01) {
+                console.log(`[Food] Price correction for "${item.name}": scraped $${realPrice} -> real DoorDash price $${addResult.price} (from add button)`);
+            }
+            realPrice = addResult.price;
+        } else {
+            // No-modal quick-add path doesn't expose a button price — fall back to
+            // reading DoorDash's own cart DOM as a second attempt at the real price.
+            try {
+                const browserCart = await doordashUI.readBrowserCart();
+                if (browserCart && browserCart.length > 0) {
+                    const target = (item.name || '').toLowerCase().trim();
+                    const match = browserCart.find(c => (c.name || '').toLowerCase().trim() === target)
+                        || browserCart.find(c => target && (c.name || '').toLowerCase().includes(target));
+                    if (match && match.price > 0) {
+                        if (Math.abs(match.price - realPrice) > 0.01) {
+                            console.log(`[Food] Price correction for "${item.name}": scraped $${realPrice} -> real DoorDash price $${match.price} (from cart scrape)`);
+                        }
+                        realPrice = match.price;
+                    }
+                }
+            } catch (e) {
+                console.log('[Food] readBrowserCart price-verify failed, using scraped estimate:', e.message);
+            }
+        }
+
+        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, price: realPrice, source: 'doordash' });
         const cart = db.getCart(user.id);
         res.json({ items: cart.items[current.id] || [] });
     } catch (err) {
