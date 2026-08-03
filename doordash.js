@@ -7583,26 +7583,48 @@ async function clearBrowserCart() {
             console.log('[DoorDash] Not on DoorDash, skipping browser cart clear');
             return;
         }
-        // The decrement buttons below only exist in the DOM when the cart panel is actually
-        // showing (open sidebar, or the /cart/ page itself) — on any other DoorDash page
-        // (store page, search results, etc.) this silently found 0 buttons and reported a
-        // false "cleared" success without touching the real cart. Navigate to /cart/ first
-        // so the clear is reliable regardless of what page the browser happened to be on.
-        if (!url.includes('/cart/')) {
-            await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-            await new Promise(r => setTimeout(r, 1500));
+        // The drawer opened from a store page only reflects that store's in-progress
+        // selection, NOT the account's real committed cart — confirmed live: opening the
+        // drawer from a store page showed "0 items", while opening it from /home showed a
+        // real $123 cart (Small Salad/Salads/Chips & Queso) that this function had been
+        // silently failing to touch. Navigate to /home first so the drawer we interact with
+        // is the real one. https://www.doordash.com/cart/ (the old approach here) is also a
+        // DEAD route — confirmed it returns DoorDash's own "page not found" error.
+        await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await new Promise(r => setTimeout(r, 5000));
+        const opened = await page.evaluate(() => {
+            const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]')
+                || document.querySelector('[aria-label*="cart" i]');
+            if (btn) { btn.click(); return true; }
+            return false;
+        });
+        // Hydration of the drawer's item list lags well behind domcontentloaded on this
+        // Pi (confirmed live: a fixed 1.2s wait here saw 0 decrement buttons even though a
+        // real $123 cart existed) — poll for a decrement button to actually exist instead
+        // of guessing a fixed delay, up to 20s.
+        if (opened) {
+            for (let i = 0; i < 20; i++) {
+                const ready = await page.evaluate(() => !!document.querySelector('[data-testid="stepper-decrement-button"]'));
+                if (ready) break;
+                await new Promise(r => setTimeout(r, 1000));
+            }
         }
         // Click all minus (-) buttons in the cart until no items remain
         let attempts = 0;
         while (attempts < 30) {
             const removed = await page.evaluate(() => {
-                // Find quantity decrement buttons (data-anchor-id contains "Decrement" or aria-label contains "remove" or "-")
+                // Confirmed live via DOM dump: the real decrement control is
+                // data-testid="stepper-decrement-button" / aria-label="remove one from
+                // cart" — none of the previous guesses (data-anchor-id*="Decrement" etc.)
+                // ever matched, which is why this silently removed 0 real items for a
+                // long time despite reporting success.
                 const selectors = [
+                    '[data-testid="stepper-decrement-button"]',
+                    '[aria-label="remove one from cart"]',
                     '[data-anchor-id*="CartItemDecrement"]',
                     '[data-anchor-id*="Decrement"]',
                     'button[aria-label*="Remove"]',
                     'button[aria-label*="remove"]',
-                    'button[aria-label*="-"]',
                 ];
                 for (const sel of selectors) {
                     const btns = document.querySelectorAll(sel);
@@ -7659,34 +7681,48 @@ async function readBrowserCart() {
             return items;
         }
 
-        // Fallback: navigate to /cart/
-        console.log('[DoorDash] readBrowserCart: no sidebar items, navigating to /cart/');
-        const prevUrl = page.url();
-        await page.goto('https://www.doordash.com/cart/', { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await new Promise(r => setTimeout(r, 2000));
+        // Fallback: navigate to /home and open the cart drawer via the header icon. The
+        // drawer opened from a store page only reflects that store's in-progress selection,
+        // not the account's real committed cart — confirmed live: a store-page drawer showed
+        // "0 items" while the /home drawer showed a real $123 stray cart. DoorDash's cart is
+        // a slide-out panel, not a standalone page — https://www.doordash.com/cart/ (the old
+        // approach here) is a DEAD route, confirmed to return DoorDash's own "page not found"
+        // error.
+        console.log('[DoorDash] readBrowserCart: no sidebar items, navigating to /home to open cart drawer');
+        await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await new Promise(r => setTimeout(r, 3000));
+        const opened = await page.evaluate(() => {
+            const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]')
+                || document.querySelector('[aria-label*="cart" i]');
+            if (btn) { btn.click(); return true; }
+            return false;
+        });
+        if (!opened) {
+            console.log('[DoorDash] readBrowserCart: no cart icon found on current page');
+            return null;
+        }
+        await new Promise(r => setTimeout(r, 1200));
 
-        const cartPageItems = await page.evaluate(() => {
+        const drawerItems = await page.evaluate(() => {
             const results = [];
-            // On the cart page, look for product names and prices
-            const rows = document.querySelectorAll('[data-anchor-id*="CartItem"]:not(button), [data-testid*="cart-item"]');
-            for (const row of rows) {
-                const texts = Array.from(row.querySelectorAll('span, p, div'))
-                    .map(e => e.childNodes.length === 1 && e.childNodes[0].nodeType === 3 ? e.textContent.trim() : '')
-                    .filter(t => t.length > 1);
-                const priceMatch = texts.find(t => /^\$[\d.]+$/.test(t));
-                const name = texts.find(t => !/^\$/.test(t) && t.length > 2 && !/^\d+$/.test(t));
-                if (name) results.push({ name, quantity: 1, price: parseFloat((priceMatch || '$0').replace('$', '')) });
+            const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
+            for (const el of cartItemEls) {
+                if (el.tagName === 'BUTTON') continue;
+                const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"]')
+                    || el.querySelector('span[class*="name"], p[class*="name"]');
+                const qtyEl = el.querySelector('[data-anchor-id*="CartItemQuantity"], [data-anchor-id*="quantity"]');
+                const priceEl = el.querySelector('[data-anchor-id*="CartItemPrice"], [data-testid*="price"]');
+                const name = nameEl ? nameEl.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
+                const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
+                const priceText = priceEl ? priceEl.textContent.trim() : '';
+                const price = parseFloat((priceText.match(/\$?([\d.]+)/) || [])[1] || '0');
+                if (name && name.length > 1) results.push({ name, quantity: qty, price });
             }
             return results;
         });
 
-        // Navigate back to where we were
-        if (prevUrl && prevUrl !== page.url()) {
-            await page.goto(prevUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-        }
-
-        console.log(`[DoorDash] readBrowserCart: found ${cartPageItems.length} items on /cart/ page`);
-        return cartPageItems.length > 0 ? cartPageItems : null;
+        console.log(`[DoorDash] readBrowserCart: found ${drawerItems.length} items after opening drawer`);
+        return drawerItems.length > 0 ? drawerItems : null;
     } catch (e) {
         console.log('[DoorDash] readBrowserCart error:', e.message);
         return null;
