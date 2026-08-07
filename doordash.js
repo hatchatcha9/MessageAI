@@ -5467,9 +5467,22 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // cachedItem.y is the absolute document y from extraction; scroll there ± a few
             // steps as fallback in case the DOM shifted slightly since extraction.
             const cachedY = (cachedItem?.y > 0) ? cachedItem.y : 0;
-            const searchYPositions = cachedY > 0
-                ? [cachedY - 300, cachedY, cachedY + 300, cachedY - 700, cachedY + 700, 0]
-                : [0, 400, 800, 1200, 1600, 2000, 2400];
+            let searchYPositions;
+            if (cachedY > 0) {
+                searchYPositions = [cachedY - 300, cachedY, cachedY + 300, cachedY - 700, cachedY + 700, 0];
+            } else {
+                // No cached position (e.g. cache miss, or item never seen by extraction) —
+                // DoorDash's menu is virtualized, so an item's text/card isn't in the DOM at
+                // all until scrolled near it (confirmed live: a fixed 0-2400px checkpoint set
+                // found zero matches anywhere in document.body for items further down a long
+                // menu, e.g. Costa Vida's Appetizers/Beverages sections past ~2400px). Scale
+                // the checkpoint range to the page's actual height instead of a hardcoded cap
+                // — capped at 12000px as a sanity bound, not a full unbounded scan.
+                const scrollHeight = await page.evaluate(() => document.body.scrollHeight).catch(() => 2400);
+                const maxY = Math.min(scrollHeight || 2400, 12000);
+                searchYPositions = [];
+                for (let y = 0; y <= maxY; y += 400) searchYPositions.push(y);
+            }
             console.log(`[DoorDash] Targeted scroll to item (cached y=${cachedY}) — ${searchYPositions.length} positions`);
 
             for (let scrollAttempt = 0; scrollAttempt < searchYPositions.length && !clicked; scrollAttempt++) {
