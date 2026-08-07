@@ -837,18 +837,27 @@
     if (cartItems.length === 0) {
       list.innerHTML = '<div class="empty-state">Your cart is empty. Go back and add something.</div>';
     } else {
-      list.innerHTML = cartItems.map(item => `
+      list.innerHTML = cartItems.map(item => {
+        // selectedOptions[0] is normally the item's primary required choice (protein/
+        // flavor/size) — DoorDash's own modal orders that group first — so show it as
+        // the specific item name instead of the generic menu-tile name ("Burritos").
+        // Any remaining selections (sauce, sides, etc.) are the sub-text options line.
+        const opts = item.selectedOptions || [];
+        const displayName = opts.length > 0 ? opts[0] : item.name;
+        const subLabel = item.label || (opts.length > 1 ? opts.slice(1).join(', ') : '');
+        return `
         <div class="cart-row" data-id="${esc(item.id)}">
           <div class="cart-row-info">
-            <div class="cart-row-name">${item.quantity > 1 ? item.quantity + '× ' : ''}${esc(item.name)}</div>
-            ${item.label ? `<div class="cart-row-variant">${esc(item.label)}</div>` : ''}
+            <div class="cart-row-name">${item.quantity > 1 ? item.quantity + '× ' : ''}${esc(displayName)}</div>
+            ${subLabel ? `<div class="cart-row-variant">${esc(subLabel)}</div>` : ''}
           </div>
           <div class="cart-row-price">${money((parseFloat(item.price) || 0) * (item.quantity || 1))}</div>
           <button class="cart-row-remove" title="Remove">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           </button>
         </div>
-      `).join('');
+      `;
+      }).join('');
       list.querySelectorAll('.cart-row-remove').forEach(btn => {
         btn.addEventListener('click', () => removeItem(btn.closest('.cart-row').dataset.id));
       });

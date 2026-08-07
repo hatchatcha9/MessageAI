@@ -5179,6 +5179,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
     // (and skipping the browser-crash-recovery logic that catch block also runs).
     let _learnedItemId = '', _learnedMenuId = '';
     let _cartMutationHandler = null;
+    const _selectedOptionLabels = [];
     try {
         const itemName = cachedItem?.name || `item ${index + 1}`;
         console.log(`[DoorDash] Adding item: ${itemName} (index ${index})...`);
@@ -5370,7 +5371,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
             // Auto-select any remaining required options
             console.log('[DoorDash] Auto-selecting any remaining required options...');
-            await autoSelectAllRequiredOptions();
+            _selectedOptionLabels.push(...(await autoSelectAllRequiredOptions()).selected);
             await delay(500);
 
             // Try to click Add to Order button
@@ -5392,11 +5393,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
                         }
                     }
-                    return { success: true, price: clickResult.price };
+                    return { success: true, price: clickResult.price, selectedOptions: [...new Set(_selectedOptionLabels)] };
                 }
 
                 console.log(`[DoorDash] Add attempt ${attempt + 1} failed, trying to select more options...`);
-                await autoSelectAllRequiredOptions();
+                _selectedOptionLabels.push(...(await autoSelectAllRequiredOptions()).selected);
                 await delay(500);
             }
 
@@ -5787,10 +5788,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 };
             }
 
-            // If selectFirst is true, auto-select first option in each group
+            // If selectFirst is true, auto-select a valid option in each required group.
+            // Uses autoSelectAllRequiredOptions() rather than a dedicated "first options"
+            // routine — it already matches DoorDash's actual group markup ([role="group"],
+            // not just [role="radiogroup"]/fieldset) and verifies each click via the
+            // required-count feedback loop instead of clicking blind.
             if (options.selectFirst) {
                 console.log('[DoorDash] Auto-selecting first options...');
-                await autoSelectFirstOptions();
+                _selectedOptionLabels.push(...(await autoSelectAllRequiredOptions()).selected);
             }
 
             // If specific options were provided, select them
@@ -5803,7 +5808,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 // After applying user's selection, auto-select any remaining required options
                 // This handles cases where there are multiple required groups
                 console.log('[DoorDash] Auto-selecting any remaining required options...');
-                await autoSelectAllRequiredOptions();
+                _selectedOptionLabels.push(...(await autoSelectAllRequiredOptions()).selected);
                 await delay(500);
             }
 
@@ -5826,12 +5831,12 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             console.log(`[API] Learned item ID for "${cachedItem.name}": ${_learnedItemId} (storeId=${sid}) — next add will use HTTP`);
                         }
                     }
-                    return { success: true, price: clickResult.price };
+                    return { success: true, price: clickResult.price, selectedOptions: [...new Set(_selectedOptionLabels)] };
                 }
 
                 // If not added, try auto-selecting remaining options
                 console.log(`[DoorDash] Add attempt ${attempt + 1} failed, trying to select more options...`);
-                await autoSelectAllRequiredOptions();
+                _selectedOptionLabels.push(...(await autoSelectAllRequiredOptions()).selected);
                 await delay(500);
             }
 
@@ -6543,35 +6548,11 @@ async function clearPreSelectedOptions() {
     }
 }
 
-/**
- * Auto-select the first option in each required group
- */
-async function autoSelectFirstOptions() {
-    try {
-        await page.evaluate(() => {
-            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            if (!modal) return;
-
-            // Find all unselected radio buttons and click the first one in each group
-            const radioGroups = modal.querySelectorAll('[role="radiogroup"], fieldset');
-
-            for (const group of radioGroups) {
-                const unchecked = group.querySelector('[role="radio"][aria-checked="false"], input[type="radio"]:not(:checked)');
-                if (unchecked) {
-                    unchecked.click();
-                }
-            }
-
-            // Also try clicking any unselected required options
-            const unselectedRadios = modal.querySelectorAll('[role="radio"][aria-checked="false"]');
-            if (unselectedRadios.length > 0) {
-                unselectedRadios[0].click();
-            }
-        });
-        await delay(500);
-    } catch (error) {
-        console.error('[DoorDash] Auto-select error:', error.message);
-    }
+// DoorDash option labels come back like "Sweet Pork Burrito+$12.79Includes customization"
+// or "Regular Chips & Salsa+$5.69Includes customization" — strip the trailing
+// price/description junk so cart display shows just the chosen option's name.
+function cleanOptionLabel(text) {
+    return (text || '').replace(/\+\$[\d.]+.*$/, '').trim();
 }
 
 /**
@@ -6640,10 +6621,11 @@ async function autoSelectAllRequiredOptions() {
         if (remaining === 0) {
             console.log('[DoorDash] No required selections needed');
             await takeScreenshot('after-auto-select-all');
-            return 0;
+            return { remaining: 0, selected: [] };
         }
 
         const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
+        const selected = [];
 
         for (let gIdx = 0; gIdx < numGroups && remaining > 0; gIdx++) {
             const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(gIdx);
@@ -6710,6 +6692,8 @@ async function autoSelectAllRequiredOptions() {
             if (newCount < remaining) {
                 console.log(`[DoorDash] AutoSelect[${gIdx}]: registered! (${remaining} → ${newCount})`);
                 remaining = newCount;
+                const cleaned = cleanOptionLabel(targetInfo.text);
+                if (cleaned) selected.push(cleaned);
             } else {
                 console.log(`[DoorDash] AutoSelect[${gIdx}]: no change (optional or already handled)`);
             }
@@ -6717,10 +6701,10 @@ async function autoSelectAllRequiredOptions() {
 
         console.log(`[DoorDash] AutoSelect done — remaining required: ${remaining}`);
         await takeScreenshot('after-auto-select-all');
-        return remaining;
+        return { remaining, selected };
     } catch (error) {
         console.error('[DoorDash] Auto-select all error:', error.message);
-        return 0;
+        return { remaining: 0, selected: [] };
     }
 }
 

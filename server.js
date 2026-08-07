@@ -3165,7 +3165,14 @@ app.post('/api/food/cart/add', async (req, res) => {
             }
         }
 
-        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, price: realPrice, source: 'doordash' });
+        // selectedOptions comes from doordash.js actually clicking through the item's
+        // required option groups (protein/sauce/size/etc.) — e.g. ["Sweet Pork Burrito",
+        // "Red Enchilada Sauce (Hint of Heat)"] for a generic "Burritos" menu tile. Only
+        // used when the client didn't already send an explicit label (grouped size
+        // variants set that themselves and should take priority).
+        const selectedOptions = (!item.label && addResult && Array.isArray(addResult.selectedOptions) && addResult.selectedOptions.length > 0)
+            ? addResult.selectedOptions : undefined;
+        db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, selectedOptions, price: realPrice, source: 'doordash' });
         const cart = db.getCart(user.id);
         res.json({ items: cart.items[current.id] || [] });
     } catch (err) {
