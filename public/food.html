@@ -559,7 +559,7 @@
   // working on this hardware (the resistive digitizer reports as a plain mouse, and
   // native touch-scroll needs real Touch events the OS never generates here).
   const GENRES = ['Pizza', 'Burgers', 'Mexican', 'Chinese', 'Sushi', 'Italian',
-                  'Thai', 'Indian', 'Chicken', 'BBQ', 'Breakfast', 'Dessert'];
+                  'Smoothies', 'Indian', 'Chicken', 'BBQ', 'Breakfast', 'Dessert'];
 
   function genreGridHTML() {
     return `
@@ -992,7 +992,19 @@
     el.addEventListener('pointermove', e => {
       if (!dragging) return;
       const dy = e.clientY - startY;
-      if (Math.abs(dy) > DRAG_THRESHOLD) moved = true;
+      // Don't touch scrollTop until the gesture has actually crossed the
+      // threshold. Setting it on every micro-jitter pointermove — even ones
+      // well under the threshold — physically shifts every child of `el`
+      // (including whatever button is under the finger) out from under an
+      // in-progress tap, since nothing here calls setPointerCapture() to pin
+      // the gesture to its original target. That's a plausible root cause for
+      // "can't tap anything at all": the button moves a pixel or two mid-tap
+      // and the eventual click lands on nothing. A real tap that never
+      // crosses the threshold now never nudges the scroll position at all.
+      if (!moved) {
+        if (Math.abs(dy) <= DRAG_THRESHOLD) return;
+        moved = true;
+      }
       el.scrollTop = startScroll - dy;
     });
     const stopDrag = () => { dragging = false; };

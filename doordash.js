@@ -3359,7 +3359,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     console.log(`[DoorDash] After retry: extracted ${retryRestaurants.length} restaurants`);
                     if (retryRestaurants.length > 0) {
                         _cleanupInterceptors();
-                        const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 5);
+                        const sorted = sortRestaurantsByRelevance(retryRestaurants, query).slice(0, 15);
                         return { success: true, restaurants: sorted };
                     }
                 } catch (retryErr) {
@@ -3378,8 +3378,11 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
             console.log(`[DoorDash] Intercepted menu data for ${capturedCount} stores during search`);
         }
 
-        // Sort by rating and return top 5
-        const sortedRestaurants = sortRestaurantsByRelevance(restaurants, query).slice(0, 5);
+        // Sort by relevance and return top results — was capped at 5, which is why
+        // categories like "Pizza" were missing well-known chains (e.g. Little Caesars)
+        // that simply ranked 6th+; the upstream extraction already gathers up to 20
+        // candidates (see extractRestaurantList's DOM-scan cap), so there's headroom.
+        const sortedRestaurants = sortRestaurantsByRelevance(restaurants, query).slice(0, 15);
 
         // Save search URL so restaurant selection can navigate back here on CF retry
         updateSessionState({ lastSearchUrl: page.url() });
@@ -3494,15 +3497,35 @@ async function extractRestaurantList(searchPageHtml = '') {
                             const href = a.getAttribute('href') || '';
                             // Only care about links with a real store ID (5+ digits)
                             if (!/\/store\/[^/]*\d{5,}/.test(href)) continue;
-                            // Name element is sibling of link — walk up to container
+                            // Name element is sibling of link — walk up to container.
+                            // Bounded to a handful of levels, and the found name must be
+                            // vertically close to the link itself: on some layouts (observed
+                            // live on a pizza search) walking further up lands on a shared
+                            // ancestor whose FIRST matching descendant is actually a DIFFERENT
+                            // nearby card's name — silently pairing this link's real store ID
+                            // with the wrong restaurant name (confirmed live: "Big Daddy's
+                            // Pizza", "NY Pizza Patrol", "Marco's Pizza" each ended up mapped
+                            // to a different restaurant's real store ID this way).
+                            const linkRect = a.getBoundingClientRect();
                             let name = '';
                             let el = a.parentElement;
-                            while (el && el !== document.body) {
+                            let depth = 0;
+                            while (el && el !== document.body && depth < 6) {
                                 const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
-                                if (nameEl) { name = nameEl.textContent.trim(); break; }
+                                if (nameEl) {
+                                    const nameRect = nameEl.getBoundingClientRect();
+                                    if (Math.abs(nameRect.top - linkRect.top) < 150) {
+                                        name = nameEl.textContent.trim();
+                                    }
+                                    break;
+                                }
                                 el = el.parentElement;
+                                depth++;
                             }
-                            if (name && name.length >= 3) map[name.toLowerCase()] = a.href;
+                            // Store the real-cased name alongside the URL — needed below to add
+                            // DOM-only restaurants (network response didn't mention them at all)
+                            // as proper entries, not just to patch an existing one's URL.
+                            if (name && name.length >= 3) map[name.toLowerCase()] = { url: a.href, name };
                         }
                         return map;
                     }),
@@ -3516,26 +3539,41 @@ async function extractRestaurantList(searchPageHtml = '') {
                     // If DOM has several restaurants but none match network results,
                     // the network data is irrelevant (externalStores mismatch) — use DOM instead.
                     const matchCount = deduped.filter(r => domNameUrlMap[r.name.toLowerCase()]).length;
-                    if (domCount >= 5 && matchCount === 0) {
-                        console.log(`[DoorDash] 0/${deduped.length} network restaurants found in DOM (${domCount} DOM entries) — falling through to DOM extraction`);
+                    // Also prefer DOM extraction whenever it clearly knows about more distinct
+                    // restaurants than the network response mentioned — externalStores only
+                    // returns a handful of "featured" chains (5, in a case that surfaced this),
+                    // silently omitting real nearby options (confirmed live: Little Caesars,
+                    // Marco's Pizza, etc. were on the page but never in that response).
+                    //
+                    // A prior attempt fixed this by cross-matching each network restaurant's
+                    // name to a DOM link via nearest [data-telemetry-id="store.name"] and
+                    // patching in that link's real ID — but that name→link pairing isn't
+                    // reliable on dense results pages (confirmed live: "Big Daddy's Pizza" and
+                    // "NY Pizza Patrol" both ended up silently pointing at OTHER restaurants'
+                    // real store pages). Wrong menu shown is worse than fewer results, so
+                    // rather than trust that pairing, just prefer the simpler, self-consistent
+                    // DOM-only extraction path below (each restaurant's ID comes straight from
+                    // its own link, never cross-referenced against a different restaurant).
+                    if (domCount > deduped.length + 2 || (domCount >= 5 && matchCount === 0)) {
+                        console.log(`[DoorDash] DOM has ${domCount} restaurants vs ${deduped.length} from network (${matchCount} matched) — using DOM extraction for a fuller, self-consistent list`);
                         _capturedRestaurants = [];
                         // fall through to Priority 2/3
                     } else {
                         for (const r of deduped) {
-                            const domUrl = domNameUrlMap[r.name.toLowerCase()];
-                            if (domUrl && domUrl !== r.url) {
-                                console.log(`[DoorDash] Updated URL for ${r.name}: chain-level → ${domUrl.substring(0, 60)}`);
-                                r.url = domUrl;
+                            const domEntry = domNameUrlMap[r.name.toLowerCase()];
+                            if (domEntry && domEntry.url !== r.url) {
+                                console.log(`[DoorDash] Updated URL for ${r.name}: chain-level → ${domEntry.url.substring(0, 60)}`);
+                                r.url = domEntry.url;
                             }
                         }
-                        return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
+                        return deduped.slice(0, 20).map((r, i) => ({ ...r, index: i }));
                     }
                 } else {
-                    return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
+                    return deduped.slice(0, 20).map((r, i) => ({ ...r, index: i }));
                 }
             } catch (e) {
                 console.log('[DoorDash] DOM URL resolution error:', e.message);
-                return deduped.slice(0, 10).map((r, i) => ({ ...r, index: i }));
+                return deduped.slice(0, 20).map((r, i) => ({ ...r, index: i }));
             }
         }
 
@@ -3649,7 +3687,7 @@ async function extractRestaurantList(searchPageHtml = '') {
                 const seenNames = new Set();
 
                 for (const link of links) {
-                    if (results.length >= 10) break;
+                    if (results.length >= 20) break;
                     const href = link.getAttribute('href');
                     if (!href) continue;
                     const storeIdMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
