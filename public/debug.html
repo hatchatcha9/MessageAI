@@ -7,9 +7,25 @@
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --surface-2: #212c1d;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-ink: #16220c;
+      --accent-2: #e8b64a;
+      --water: #5fc9d1;
+      --danger: #ef4444;
+      --success: #4ade80;
+    }
+
     body {
-      background: #0a0a0f;
-      color: #e8e8e8;
+      background: var(--ground);
+      color: var(--ink);
       font-family: 'Segoe UI', system-ui, sans-serif;
       height: 100vh;
       display: flex;
@@ -23,8 +39,9 @@
       align-items: center;
       justify-content: space-between;
       padding: 10px 20px;
-      border-bottom: 1px solid #1a1a2e;
+      border-bottom: 1px solid var(--hairline);
       flex-shrink: 0;
+      background: #151d13;
     }
 
     #header-left {
@@ -37,11 +54,11 @@
       font-size: 16px;
       font-weight: 700;
       letter-spacing: 2px;
-      color: #6ee7f7;
+      color: var(--accent);
     }
 
     #logo span {
-      color: #a78bfa;
+      color: var(--muted-2);
       font-weight: 400;
     }
 
@@ -49,16 +66,16 @@
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #1f5c1f;
+      background: var(--muted-2);
       transition: background 0.3s;
       flex-shrink: 0;
     }
-    #sse-dot.connected { background: #22c55e; box-shadow: 0 0 5px #22c55e; }
-    #sse-dot.error     { background: #ef4444; box-shadow: 0 0 5px #ef4444; }
+    #sse-dot.connected { background: var(--success); box-shadow: 0 0 5px var(--success); }
+    #sse-dot.error     { background: var(--danger); box-shadow: 0 0 5px var(--danger); }
 
     #sse-label {
       font-size: 11px;
-      color: #555;
+      color: var(--muted);
       letter-spacing: 1px;
     }
 
@@ -74,7 +91,7 @@
       width: 60%;
       display: flex;
       flex-direction: column;
-      border-right: 1px solid #1a1a2e;
+      border-right: 1px solid var(--hairline);
       overflow: hidden;
     }
 
@@ -83,37 +100,37 @@
       align-items: center;
       gap: 10px;
       padding: 8px 14px;
-      background: #0d0d18;
-      border-bottom: 1px solid #1a1a2e;
+      background: var(--surface);
+      border-bottom: 1px solid var(--hairline);
       flex-shrink: 0;
     }
 
     #log-toolbar label {
       font-size: 11px;
-      color: #555;
+      color: var(--muted);
       letter-spacing: 1px;
       text-transform: uppercase;
     }
 
     #filter-input {
       flex: 1;
-      background: #111120;
-      border: 1px solid #222238;
+      background: var(--surface-2);
+      border: 1px solid var(--hairline);
       border-radius: 4px;
-      color: #ccc;
+      color: var(--ink);
       font-size: 11px;
       padding: 4px 8px;
       font-family: 'Cascadia Code', 'Consolas', monospace;
       outline: none;
     }
-    #filter-input:focus { border-color: #6ee7f7; }
-    #filter-input::placeholder { color: #333; }
+    #filter-input:focus { border-color: var(--accent); }
+    #filter-input::placeholder { color: var(--muted-2); }
 
     #clear-btn {
       background: none;
-      border: 1px solid #2a2a3e;
+      border: 1px solid var(--hairline);
       border-radius: 4px;
-      color: #555;
+      color: var(--muted);
       font-size: 11px;
       padding: 4px 10px;
       cursor: pointer;
@@ -121,11 +138,11 @@
       text-transform: uppercase;
       transition: all 0.2s;
     }
-    #clear-btn:hover { border-color: #ef4444; color: #ef4444; }
+    #clear-btn:hover { border-color: var(--danger); color: var(--danger); }
 
     #log-count {
       font-size: 10px;
-      color: #333;
+      color: var(--muted-2);
       white-space: nowrap;
     }
 
@@ -139,8 +156,8 @@
     }
 
     #log-output::-webkit-scrollbar { width: 6px; }
-    #log-output::-webkit-scrollbar-track { background: #0a0a0f; }
-    #log-output::-webkit-scrollbar-thumb { background: #222; border-radius: 3px; }
+    #log-output::-webkit-scrollbar-track { background: var(--ground); }
+    #log-output::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 3px; }
 
     .log-line {
       white-space: pre-wrap;
@@ -150,11 +167,11 @@
     .log-line.hidden { display: none; }
 
     /* Color coding */
-    .log-info    { color: #4ade80; }
-    .log-warn    { color: #fbbf24; }
-    .log-error   { color: #f87171; }
-    .log-special { color: #6ee7f7; }
-    .log-default { color: #ccc; }
+    .log-info    { color: var(--accent); }
+    .log-warn    { color: var(--accent-2); }
+    .log-error   { color: var(--danger); }
+    .log-special { color: var(--water); }
+    .log-default { color: var(--muted); }
 
     /* ── Health panel (right, 40%) ── */
     #health-panel {
@@ -169,21 +186,21 @@
       align-items: center;
       justify-content: space-between;
       padding: 8px 14px;
-      background: #0d0d18;
-      border-bottom: 1px solid #1a1a2e;
+      background: var(--surface);
+      border-bottom: 1px solid var(--hairline);
       flex-shrink: 0;
     }
 
     #health-toolbar label {
       font-size: 11px;
-      color: #555;
+      color: var(--muted);
       letter-spacing: 1px;
       text-transform: uppercase;
     }
 
     #health-age {
       font-size: 10px;
-      color: #333;
+      color: var(--muted-2);
     }
 
     #health-body {
@@ -196,22 +213,22 @@
     }
 
     #health-body::-webkit-scrollbar { width: 6px; }
-    #health-body::-webkit-scrollbar-track { background: #0a0a0f; }
-    #health-body::-webkit-scrollbar-thumb { background: #222; border-radius: 3px; }
+    #health-body::-webkit-scrollbar-track { background: var(--ground); }
+    #health-body::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 3px; }
 
     .health-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 10px 14px;
-      background: #0d0d18;
-      border: 1px solid #1a1a2e;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
       border-radius: 8px;
     }
 
     .health-name {
       font-size: 13px;
-      color: #aaa;
+      color: var(--muted);
       letter-spacing: 0.5px;
     }
 
@@ -225,21 +242,18 @@
     }
 
     .badge-ok {
-      background: #0d2b1a;
-      color: #4ade80;
-      border: 1px solid #1f5c1f;
+      background: rgba(74, 222, 128, 0.12);
+      color: var(--success);
     }
 
     .badge-err {
-      background: #2b0d0d;
-      color: #f87171;
-      border: 1px solid #5c1f1f;
+      background: rgba(239, 68, 68, 0.12);
+      color: var(--danger);
     }
 
     .badge-info {
-      background: #0d1a2b;
-      color: #6ee7f7;
-      border: 1px solid #1a3a4a;
+      background: rgba(95, 201, 209, 0.12);
+      color: var(--water);
       font-weight: 400;
       letter-spacing: 0;
       max-width: 180px;
@@ -251,7 +265,7 @@
 
     .health-section-title {
       font-size: 10px;
-      color: #333;
+      color: var(--muted-2);
       letter-spacing: 2px;
       text-transform: uppercase;
       padding: 4px 2px 0;
@@ -263,24 +277,24 @@
       align-items: center;
       justify-content: space-between;
       padding: 7px 20px;
-      border-top: 1px solid #1a1a2e;
+      border-top: 1px solid var(--hairline);
       flex-shrink: 0;
-      background: #0d0d18;
+      background: #151d13;
     }
 
     .footer-item {
       font-size: 11px;
-      color: #444;
+      color: var(--muted-2);
       letter-spacing: 0.5px;
     }
 
     .footer-item span {
-      color: #666;
+      color: var(--muted);
     }
 
-    #uptime-display span { color: #a78bfa; }
-    #platform-display span { color: #6ee7f7; }
-    #node-display span { color: #4ade80; }
+    #uptime-display span { color: var(--accent-2); }
+    #platform-display span { color: var(--water); }
+    #node-display span { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -293,18 +307,18 @@
     <div id="sse-label">stream</div>
   </div>
   <div style="display:flex;align-items:center;gap:4px;">
-    <a href="/chat.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Chat">
+    <a href="/chat.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:var(--muted);text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'" title="Chat">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M14 2H2a1 1 0 00-1 1v8a1 1 0 001 1h3l3 2 3-2h3a1 1 0 001-1V3a1 1 0 00-1-1z"></path>
       </svg>
     </a>
-    <a href="/settings.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Settings">
+    <a href="/settings.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:var(--muted);text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'" title="Settings">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="8" cy="8" r="2.5"></circle>
         <path d="M8 1.5v1M8 13.5v1M1.5 8h1M13.5 8h1M3.4 3.4l.7.7M11.9 11.9l.7.7M3.4 12.6l.7-.7M11.9 4.1l.7-.7"></path>
       </svg>
     </a>
-    <a href="/screen.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:#555;text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='#6ee7f7'" onmouseout="this.style.color='#555'" title="Screen">
+    <a href="/screen.html" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;color:var(--muted);text-decoration:none;border-radius:6px;transition:color 0.2s;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'" title="Screen">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <rect x="1" y="2" width="14" height="10" rx="1.5"></rect>
         <line x1="5" y1="14" x2="11" y2="14"></line>
