@@ -6556,6 +6556,58 @@ function cleanOptionLabel(text) {
 }
 
 /**
+ * Reads back the actual current selection of every non-optional group in the
+ * modal, by DOM state rather than trusting click deltas. DoorDash sometimes
+ * serves a modal with required groups already satisfied by a default (no click
+ * ever happens), so a click-delta-only approach silently loses which option was
+ * actually charged — confirmed live: a $14.73 Burritos add left selectedOptions
+ * empty because every group was pre-defaulted and never clicked.
+ *
+ * "Required" here means "not explicitly marked Optional/Recommended" — the same
+ * criterion the working Strategy A branch of extractRequiredOptions() uses.
+ * The checked-element detection reuses that same branch's proven signal set
+ * (aria-checked anywhere in the group, input:checked, or a label[for] pointing
+ * at a checked input) — a narrower [role="radio"][aria-checked="true"]-only
+ * check tried first missed real selections DoorDash marks some other way.
+ */
+async function readRequiredGroupSelections() {
+    return page.evaluate(() => {
+        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+        if (!modal) return [];
+        const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+        const results = [];
+        groups.forEach((grp, i) => {
+            const labelId = grp.getAttribute('aria-labelledby');
+            const labelEl = labelId ? document.getElementById(labelId) : null;
+            const heading = grp.querySelector('h1,h2,h3,h4,h5,legend');
+            const headerText = (labelEl?.textContent || heading?.parentElement?.textContent || heading?.textContent || grp.getAttribute('aria-label') || '').toLowerCase();
+            if (headerText.includes('optional') || headerText.includes('recommended')) return;
+
+            let checkedEl = grp.querySelector('[aria-checked="true"]');
+            if (!checkedEl) {
+                const checkedInput = grp.querySelector('input:checked');
+                if (checkedInput) {
+                    const forLabel = checkedInput.id ? grp.querySelector(`label[for="${checkedInput.id}"]`) : null;
+                    checkedEl = forLabel || checkedInput.closest('label') || checkedInput;
+                }
+            }
+            if (!checkedEl) {
+                checkedEl = Array.from(grp.querySelectorAll('label[for]')).find(l => {
+                    const inp = document.getElementById(l.htmlFor);
+                    return inp && inp.checked;
+                }) || null;
+            }
+            if (!checkedEl) return;
+
+            const label = checkedEl.closest('label') || checkedEl;
+            const text = (label?.textContent || checkedEl.getAttribute('aria-label') || '').trim();
+            if (text) results.push({ i, text });
+        });
+        return results;
+    }).catch(() => []);
+}
+
+/**
  * Auto-select ALL required options in the modal
  * This handles DoorDash's multi-section required options
  */
@@ -6619,9 +6671,20 @@ async function autoSelectAllRequiredOptions() {
         groupDiag.forEach(g => console.log(`[DoorDash] Group[${g.i}] role=${g.role} name="${g.name}" labels=${g.labels} roleRadios=${g.roleRadios} inputs=${g.inputs}`));
 
         if (remaining === 0) {
-            console.log('[DoorDash] No required selections needed');
+            // Button already shows 0 required — but that can mean either "nothing
+            // required" or "DoorDash pre-filled every required group with a default."
+            // Re-verify by reading each required group's actual DOM selection instead
+            // of assuming empty, so a defaulted choice still shows up in the cart.
+            const preSelected = (await readRequiredGroupSelections())
+                .map(s => cleanOptionLabel(s.text))
+                .filter(Boolean);
+            if (preSelected.length > 0) {
+                console.log(`[DoorDash] No click needed, but ${preSelected.length} required group(s) already had a default selection: ${preSelected.join(', ')}`);
+            } else {
+                console.log('[DoorDash] No required selections needed');
+            }
             await takeScreenshot('after-auto-select-all');
-            return { remaining: 0, selected: [] };
+            return { remaining: 0, selected: preSelected };
         }
 
         const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
@@ -6699,9 +6762,17 @@ async function autoSelectAllRequiredOptions() {
             }
         }
 
-        console.log(`[DoorDash] AutoSelect done — remaining required: ${remaining}`);
+        // Reconcile with an authoritative DOM read-back: a group that was already
+        // satisfied by a DoorDash default before this loop ever ran never produces
+        // a click-delta, so click-tracked `selected` alone can miss it.
+        const domSelected = (await readRequiredGroupSelections())
+            .map(s => cleanOptionLabel(s.text))
+            .filter(Boolean);
+        const finalSelected = [...new Set([...domSelected, ...selected])];
+
+        console.log(`[DoorDash] AutoSelect done — remaining required: ${remaining}, selected: ${finalSelected.join(', ') || '(none)'}`);
         await takeScreenshot('after-auto-select-all');
-        return { remaining, selected };
+        return { remaining, selected: finalSelected };
     } catch (error) {
         console.error('[DoorDash] Auto-select all error:', error.message);
         return { remaining: 0, selected: [] };
