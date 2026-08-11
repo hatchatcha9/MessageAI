@@ -824,7 +824,11 @@
       const res = await fetch('/api/food/cart');
       const data = await res.json();
       cartItems = data.items || [];
-      document.getElementById('cart-restaurant-name').textContent = data.restaurant ? data.restaurant.name : '—';
+      // data.restaurant is "last selected restaurant," not "restaurant this cart's
+      // items belong to" — those diverge once the cart is emptied but a restaurant
+      // is still cached, so only show a name when there's actually something in it.
+      document.getElementById('cart-restaurant-name').textContent =
+        (data.restaurant && cartItems.length > 0) ? data.restaurant.name : 'Cart';
       renderCart();
       updateCartBar();
     } catch {
@@ -971,7 +975,12 @@
   // suppresses the click that would otherwise land on whatever's under the
   // finger at release.
   function enableDragScroll(el) {
-    const DRAG_THRESHOLD = 6; // px
+    // 6px was too tight for this hardware — the resistive digitizer isn't precise
+    // like a mouse, so ordinary finger-down jitter on a stationary tap regularly
+    // exceeded it, making every tap misread as a scroll-drag and get suppressed
+    // (reported live: could not tap any menu item to add it). 18px still clearly
+    // distinguishes a deliberate scroll gesture from a tap.
+    const DRAG_THRESHOLD = 18; // px
     let dragging = false, startY = 0, startScroll = 0, moved = false;
 
     el.addEventListener('pointerdown', e => {

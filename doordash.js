@@ -656,13 +656,39 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
 
     // Block heavy resources to reduce memory usage on Railway.
     // Stylesheets are safe to block — DOM scraping doesn't need CSS rendering.
+    //
+    // Also block known ad/analytics domains outright — DoorDash's page fires a
+    // constant stream of Google Analytics/GTM/DoubleClick/Singular beacon calls
+    // (observed: dozens per single add-to-cart) that are pure noise for scraping
+    // (menu/cart data only ever comes from doordash.com's own GraphQL/API
+    // responses — see the response interceptor below, which already ignores
+    // non-doordash.com traffic). On a resource-constrained Pi 4 running headed
+    // Chromium, the JS these trackers execute and the network round-trips they
+    // make measurably add to page load/settle time. Blocking them at the route
+    // level (rather than just filtering after the fact) cuts that overhead
+    // instead of merely hiding it from the logs.
+    const AD_ANALYTICS_HOSTS = [
+        'www.google-analytics.com', 'analytics.google.com', 'www.googletagmanager.com',
+        'googleads.g.doubleclick.net', 'ad.doubleclick.net', 'stats.g.doubleclick.net',
+        'sdk-api-v1.singular.net', 'www.googleadservices.com', 'googlesyndication.com',
+    ];
     await page.route('**/*', (route) => {
-        const rt = route.request().resourceType();
+        const req = route.request();
+        const rt = req.resourceType();
         if (rt === 'image' || rt === 'media' || rt === 'font' || rt === 'stylesheet') {
-            route.abort();
-        } else {
-            route.continue();
+            return route.abort();
         }
+        let host = '';
+        try { host = new URL(req.url()).hostname; } catch {}
+        if (AD_ANALYTICS_HOSTS.includes(host)) {
+            return route.abort();
+        }
+        // google.com itself hosts real functionality (fonts/APIs) alongside pure
+        // tracking beacons — block only the known tracking paths on that host.
+        if (host === 'www.google.com' && /\/(ccm|rmkt|pagead)\//.test(req.url())) {
+            return route.abort();
+        }
+        route.continue();
     });
 
     // Set default timeout
@@ -891,6 +917,15 @@ async function takeScreenshot(name) {
     // Screenshots crash Chrome on Railway (Mesa/llvmpipe GL_CLOSE_PATH_NV SIGSEGV).
     // They're debug-only — disable on Railway entirely.
     if (process.env.RAILWAY_ENVIRONMENT) return null;
+    // Off by default everywhere else too — same DEBUG_SCREENSHOTS flag
+    // startDebugScreenshots() already uses. There are 70+ always-on call sites
+    // throughout this file (one at nearly every step: page load, modal open,
+    // each option-select attempt, add-button click...); on Pi 4 hardware each
+    // capture+encode+disk-write costs multiple real seconds, and no caller ever
+    // reads the return value — this was confirmed live as the dominant cost in
+    // "restaurant select" taking 50-70s. Set DEBUG_SCREENSHOTS=true to re-enable
+    // for troubleshooting sessions.
+    if (!process.env.DEBUG_SCREENSHOTS) return null;
     if (!page) {
         console.log(`[DoorDash] Screenshot skipped (page not ready): ${name}`);
         return null;
@@ -901,7 +936,12 @@ async function takeScreenshot(name) {
     }
 
     const filename = `${name}-${Date.now()}.png`;
-    await page.screenshot({ path: path.join(screenshotDir, filename), fullPage: true });
+    // Viewport-only, not fullPage: DoorDash restaurant pages routinely run
+    // 5,000-12,000px tall (see addItemByIndex()'s scroll-checkpoint scaling), and
+    // compositing+encoding that whole height on Pi 4 hardware is expensive — this
+    // is called at nearly every step, purely for debugging (no caller ever reads
+    // the return value), so the extra height below the fold buys nothing here.
+    await page.screenshot({ path: path.join(screenshotDir, filename) });
     console.log(`[DoorDash] Screenshot saved: ${filename}`);
     return filename;
 }
