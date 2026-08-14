@@ -1070,7 +1070,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         prefsText.pendingDoordashOptions = null;
                         prefsText.pendingDoordashSelections = null;
                         db.setUserPreferences(user.id, prefsText);
-                        db.addToCart(user.id, prefsText.currentRestaurant, { id: itemText.id || `doordash-${numText}`, name: itemText.name, price: itemText.price || 0, source: 'doordash' });
+                        const selectedOptionsText = (!itemText.label && addResultText && Array.isArray(addResultText.selectedOptions) && addResultText.selectedOptions.length > 0)
+                            ? addResultText.selectedOptions : undefined;
+                        db.addToCart(user.id, prefsText.currentRestaurant, { id: itemText.id || `doordash-${numText}`, name: itemText.name, selectedOptions: selectedOptionsText, price: itemText.price || 0, source: 'doordash' });
                         actions.push({ type: 'add_item_doordash', item: itemText.name });
                         textResolvedMenuIndex = numText; // mark so ADD_ITEM_NUM won't re-add this item
                         // Process any queued items from a prior multi-item request
@@ -1083,7 +1085,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                     const qRes = await doordash.addItemByIndex(queued.num,
                                         { selectFirst: false, restaurantUrl: prefsText.currentRestaurantUrl }, queued.item);
                                     if (qRes.success) {
-                                        db.addToCart(user.id, prefsText.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, price: queued.item.price || 0, source: 'doordash' });
+                                        const selectedOptionsQ = (!queued.item.label && Array.isArray(qRes.selectedOptions) && qRes.selectedOptions.length > 0)
+                                            ? qRes.selectedOptions : undefined;
+                                        db.addToCart(user.id, prefsText.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, selectedOptions: selectedOptionsQ, price: queued.item.price || 0, source: 'doordash' });
                                         actions.push({ type: 'add_item_doordash', item: queued.item.name });
                                         addedNamesText.push(queued.item.name);
                                         console.log(`[Queue] Added queued item: ${queued.item.name}`);
@@ -1195,7 +1199,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     prefsOpt.pendingDoordashOptions = null;
                     prefsOpt.pendingDoordashSelections = null;
                     db.setUserPreferences(user.id, prefsOpt);
-                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: itemOpt.id || `doordash-${numOpt}`, name: itemOpt.name, price: itemOpt.price || 0, source: 'doordash' });
+                    const selectedOptionsOpt = (!itemOpt.label && addResultOpt && Array.isArray(addResultOpt.selectedOptions) && addResultOpt.selectedOptions.length > 0)
+                        ? addResultOpt.selectedOptions : undefined;
+                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: itemOpt.id || `doordash-${numOpt}`, name: itemOpt.name, selectedOptions: selectedOptionsOpt, price: itemOpt.price || 0, source: 'doordash' });
                     actions.push({ type: 'add_item_doordash', item: itemOpt.name });
                     // Process any queued items from a prior multi-item request
                     const queuedAfterOpt = prefsOpt.pendingQueuedItems;
@@ -1207,7 +1213,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 const qRes = await doordash.addItemByIndex(queued.num,
                                     { selectFirst: false, restaurantUrl: prefsOpt.currentRestaurantUrl }, queued.item);
                                 if (qRes.success) {
-                                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, price: queued.item.price || 0, source: 'doordash' });
+                                    const selectedOptionsQ = (!queued.item.label && Array.isArray(qRes.selectedOptions) && qRes.selectedOptions.length > 0)
+                                        ? qRes.selectedOptions : undefined;
+                                    db.addToCart(user.id, prefsOpt.currentRestaurant, { id: queued.item.id || `doordash-${queued.num}`, name: queued.item.name, selectedOptions: selectedOptionsQ, price: queued.item.price || 0, source: 'doordash' });
                                     actions.push({ type: 'add_item_doordash', item: queued.item.name });
                                     addedNames.push(queued.item.name);
                                     console.log(`[Queue] Added queued item: ${queued.item.name}`);
@@ -1431,9 +1439,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             db.setUserPreferences(user.id, prefs);
 
                             // Add to local cart for display
+                            const selectedOptionsMain = (!item.label && Array.isArray(addResult.selectedOptions) && addResult.selectedOptions.length > 0)
+                                ? addResult.selectedOptions : undefined;
                             const cartItem = {
                                 id: item.id || `doordash-${num}`,
                                 name: item.name,
+                                selectedOptions: selectedOptionsMain,
                                 price: item.price || 0,
                                 description: item.description || '',
                                 source: 'doordash'
@@ -1473,7 +1484,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                         prefs.pendingDoordashOptions = null;
                                         prefs.pendingDoordashSelections = null;
                                         db.setUserPreferences(user.id, prefs);
-                                        db.addToCart(user.id, prefs.currentRestaurant, { id: item.id || `doordash-${num}`, name: item.name, price: item.price || 0, source: 'doordash' });
+                                        const selectedOptionsAuto = (!item.label && Array.isArray(autoResult.selectedOptions) && autoResult.selectedOptions.length > 0)
+                                            ? autoResult.selectedOptions : undefined;
+                                        db.addToCart(user.id, prefs.currentRestaurant, { id: item.id || `doordash-${num}`, name: item.name, selectedOptions: selectedOptionsAuto, price: item.price || 0, source: 'doordash' });
                                         itemsAdded.push(item.name);
                                         actions.push({ type: 'add_item_doordash', item: item.name });
                                         needsOptionsBreak = false;

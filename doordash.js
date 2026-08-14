@@ -587,12 +587,16 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
     ]) {
         try {
             const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
-            if (prefs.profile) {
+            // Skip the write on the common clean-exit path — only touch the file when it's
+            // actually dirty, to avoid a wasted read+parse+stringify+write on every single
+            // launch on hardware already resource-constrained.
+            if (prefs.profile && (prefs.profile.exit_type !== 'Normal' || prefs.profile.exited_cleanly !== true)) {
                 prefs.profile.exit_type = 'Normal';
                 prefs.profile.exited_cleanly = true;
                 fs.writeFileSync(prefsPath, JSON.stringify(prefs));
             }
-        } catch (e) { /* profile may not exist yet on first launch */ }
+        } catch (e) { /* profile may not exist yet on first launch, or prefs format unrecognized —
+                         --disable-session-crashed-bubble (launch arg below) still applies either way */ }
     }
 
     const launchOptions = {
@@ -3214,14 +3218,18 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     const seen = new Set();
                     for (const link of document.querySelectorAll('a[href*="/store/"]')) {
                         const href = link.getAttribute('href') || '';
-                        // Name element is a sibling of the link, not a child — walk up to container
+                        // Name element is a sibling of the link, not a child — walk up to container.
+                        // Bounded depth only (no proximity gate — see comment on the near-identical
+                        // block in extractRestaurantList's fallback for why it was dropped).
                         let name = '';
                         try {
                             let el = link.parentElement;
-                            while (el && el !== document.body) {
+                            let depth = 0;
+                            while (el && el !== document.body && depth < 6) {
                                 const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
                                 if (nameEl) { name = nameEl.textContent.trim(); break; }
                                 el = el.parentElement;
+                                depth++;
                             }
                         } catch(e) {}
                         if (PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) name = '';
@@ -3242,7 +3250,7 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                         telemetryNameCount: nameEls.length,
                         telemetryNames: [...nameEls].slice(0, 5).map(el => el.textContent.trim()),
                     };
-                    return { slugged, idOnly: idOnly.slice(0, 10), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')), nameDebug };
+                    return { slugged, idOnly: idOnly.slice(0, 20), sampleHrefs: [...document.querySelectorAll('a[href*="/store/"]')].slice(0, 5).map(a => a.getAttribute('href')), nameDebug };
                 }),
                 new Promise(r => setTimeout(() => r({ slugged: [], idOnly: [], sampleHrefs: [] }), 5000))
             ]).catch(() => ({ slugged: [], idOnly: [], sampleHrefs: [] }));
@@ -3362,12 +3370,24 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                                     const idMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
                                     if (!idMatch || seen.has(idMatch[1])) continue;
                                     seen.add(idMatch[1]);
+                                    // Bounded depth only (no proximity gate — see comment on the
+                                    // near-identical block in extractRestaurantList's fallback for
+                                    // why the proximity check was dropped here).
                                     let name = '';
-                                    try { let el = link.parentElement; while (el && el !== document.body) { const n = el.querySelector('[data-telemetry-id="store.name"]'); if (n) { name = n.textContent.trim(); break; } el = el.parentElement; } } catch(e) {}
+                                    try {
+                                        let el = link.parentElement;
+                                        let depth = 0;
+                                        while (el && el !== document.body && depth < 6) {
+                                            const n = el.querySelector('[data-telemetry-id="store.name"]');
+                                            if (n) { name = n.textContent.trim(); break; }
+                                            el = el.parentElement;
+                                            depth++;
+                                        }
+                                    } catch(e) {}
                                     if (!name || name.length < 3 || PROMO_STARTS.some(p => name.toLowerCase().startsWith(p))) continue;
                                     results.push({ id: idMatch[1], name, url: link.href });
                                 }
-                                return results.slice(0, 10);
+                                return results.slice(0, 20);
                             }),
                             new Promise(r => setTimeout(() => r([]), 5000))
                         ]).catch(() => []);
@@ -3619,7 +3639,7 @@ async function extractRestaurantList(searchPageHtml = '') {
                 const seenNames = new Set();
                 const storeIdRe = /"storeId"\s*:\s*"?(\d{5,})"?/g;
                 let m;
-                while ((m = storeIdRe.exec(searchPageHtml)) !== null && restaurants.length < 10) {
+                while ((m = storeIdRe.exec(searchPageHtml)) !== null && restaurants.length < 20) {
                     const storeId = m[1];
                     if (seenIds.has(storeId)) continue;
                     // Look for name in a window around this storeId occurrence
@@ -3661,7 +3681,7 @@ async function extractRestaurantList(searchPageHtml = '') {
             const hrefMatches = [...searchPageHtml.matchAll(/href="(\/store\/[^"?#]+)"/g)];
             console.log(`[DoorDash] HTML href matches: ${hrefMatches.length}`);
             for (const hm of hrefMatches) {
-                if (restaurants.length >= 10) break;
+                if (restaurants.length >= 20) break;
                 const href = hm[1];
                 const idMatch = href.match(/\/store\/[^/?#]*?\/(\d{5,})/) || href.match(/\/store\/(\d+)/);
                 if (!idMatch) continue;
@@ -3717,14 +3737,29 @@ async function extractRestaurantList(searchPageHtml = '') {
                     if (seenIds.has(storeId)) continue;
                     seenIds.add(storeId);
 
-                    // Name element is sibling of link — walk up to container
+                    // Name element is sibling of link — walk up to container. Bounded to a
+                    // handful of levels, and the found name must be vertically close to the
+                    // link itself: on dense results pages, walking further up can land on a
+                    // shared ancestor whose first matching descendant is actually a DIFFERENT
+                    // nearby card's name, silently pairing this link's real store ID with the
+                    // wrong restaurant (same failure mode fixed in the Priority-1 path above).
+                    // Bounded to a handful of levels only — no vertical-proximity gate here.
+                    // (A proximity check was tried, matching the already-proven Priority-1
+                    // logic elsewhere in this file, but empirically returned 0 matches live
+                    // against this fallback's actual page state even when Priority-1's own
+                    // identical check found valid matches moments earlier on the same page —
+                    // likely a virtualization/layout-timing difference between the two call
+                    // sites. Depth-capping alone still meaningfully bounds the mispairing risk
+                    // vs. the original fully-unbounded walk, without that fragility.)
                     let name = '';
                     try {
                         let el = link.parentElement;
-                        while (el && el !== document.body) {
+                        let depth = 0;
+                        while (el && el !== document.body && depth < 6) {
                             const nameEl = el.querySelector('[data-telemetry-id="store.name"]');
                             if (nameEl) { name = nameEl.textContent.trim(); break; }
                             el = el.parentElement;
+                            depth++;
                         }
                     } catch(e) {}
                     if (!name || name.length < 3) continue;
@@ -6682,25 +6717,29 @@ async function readRequiredGroupSelections() {
             const headerText = (labelEl?.textContent || heading?.parentElement?.textContent || heading?.textContent || grp.getAttribute('aria-label') || '').toLowerCase();
             if (headerText.includes('optional') || headerText.includes('recommended')) return;
 
-            let checkedEl = grp.querySelector('[aria-checked="true"]');
-            if (!checkedEl) {
-                const checkedInput = grp.querySelector('input:checked');
-                if (checkedInput) {
-                    const forLabel = checkedInput.id ? grp.querySelector(`label[for="${checkedInput.id}"]`) : null;
-                    checkedEl = forLabel || checkedInput.closest('label') || checkedInput;
-                }
-            }
-            if (!checkedEl) {
-                checkedEl = Array.from(grp.querySelectorAll('label[for]')).find(l => {
+            // A required group can be a multi-select checkbox group (e.g. "choose 2
+            // toppings"), not just a single radio choice — collect every checked element,
+            // not just the first, so multi-select required groups don't silently lose all
+            // but one of their real selections.
+            const checkedEls = new Set();
+            grp.querySelectorAll('[aria-checked="true"]').forEach(el => checkedEls.add(el));
+            grp.querySelectorAll('input:checked').forEach(inp => {
+                const forLabel = inp.id ? grp.querySelector(`label[for="${inp.id}"]`) : null;
+                checkedEls.add(forLabel || inp.closest('label') || inp);
+            });
+            if (checkedEls.size === 0) {
+                Array.from(grp.querySelectorAll('label[for]')).forEach(l => {
                     const inp = document.getElementById(l.htmlFor);
-                    return inp && inp.checked;
-                }) || null;
+                    if (inp && inp.checked) checkedEls.add(l);
+                });
             }
-            if (!checkedEl) return;
+            if (checkedEls.size === 0) return;
 
-            const label = checkedEl.closest('label') || checkedEl;
-            const text = (label?.textContent || checkedEl.getAttribute('aria-label') || '').trim();
-            if (text) results.push({ i, text });
+            checkedEls.forEach(checkedEl => {
+                const label = checkedEl.closest('label') || checkedEl;
+                const text = (label?.textContent || checkedEl.getAttribute('aria-label') || '').trim();
+                if (text) results.push({ i, text });
+            });
         });
         return results;
     }).catch(() => []);
@@ -6810,12 +6849,15 @@ async function autoSelectAllRequiredOptions() {
                 if (!target) return null;
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 const rect = target.getBoundingClientRect();
-                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim().substring(0, 40), isStepper: !!stepper && !label && !radio && !roleBtn && !input };
+                // Keep the full text here (not truncated) — cleanOptionLabel() below needs to
+                // see a trailing "+$price" marker that a hard 40-char cutoff could cut off
+                // before it's reached, leaving a raw untrimmed fragment in the selection.
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim(), isStepper: !!stepper && !label && !radio && !roleBtn && !input };
             }, gIdx);
 
             if (!targetInfo) continue;
 
-            console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text}"${targetInfo.isStepper ? ' (stepper)' : ''}`);
+            console.log(`[DoorDash] AutoSelect[${gIdx}]: trying "${targetInfo.text.substring(0, 40)}"${targetInfo.isStepper ? ' (stepper)' : ''}`);
             await delay(200);
 
             // Try Playwright locator click: label first, then [role="radio"], then input, then stepper
