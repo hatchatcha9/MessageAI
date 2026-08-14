@@ -575,6 +575,26 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
         try { fs.unlinkSync(lockPath); console.log(`[DoorDash] Removed stale lock: ${lockFile}`); } catch (e) {}
     }
 
+    // If the automation browser crashed last run (frequent on the Pi under load — see
+    // "page.screenshot: Timeout 30000ms exceeded" crashes documented elsewhere), Chrome
+    // marks the profile's exit_type as dirty and shows a "Restore pages?" bubble on next
+    // launch. That bubble has repeatedly blocked clearBrowserCart()/readBrowserCart()'s
+    // click-based automation for minutes at a time without erroring, silently corrupting
+    // cart-state checks. Force the clean-exit flag before every launch so it never appears.
+    for (const prefsPath of [
+        path.join(BOT_PROFILE_DIR, 'Default', 'Preferences'),
+        path.join(BOT_PROFILE_DIR, 'Preferences'),
+    ]) {
+        try {
+            const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+            if (prefs.profile) {
+                prefs.profile.exit_type = 'Normal';
+                prefs.profile.exited_cleanly = true;
+                fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+            }
+        } catch (e) { /* profile may not exist yet on first launch */ }
+    }
+
     const launchOptions = {
         headless,
         channel: CHROME_INSTALLED ? 'chrome' : undefined,
@@ -585,6 +605,7 @@ async function launchBrowser(headless = HEADLESS, rotateProxy = false) {
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-infobars',
+            '--disable-session-crashed-bubble',
             '--disable-dev-shm-usage',
             '--no-first-run',
             '--no-default-browser-check',
