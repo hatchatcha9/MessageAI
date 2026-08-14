@@ -41,6 +41,15 @@ if (!doordash) doordash = doordashUI;
 // Fixed user identifier for the Pi hardware device
 const PI_DEVICE_ID = '+1PIDEVICE000';
 
+// A single shared Playwright page/browser backs all DoorDash automation. If a user taps
+// through restaurants faster than a select can finish (each one can take 30-70s), an older
+// select's navigation and menu-scrape can still be mid-flight when a newer one starts
+// navigating the SAME page out from under it — wasting time on work that'll be thrown away,
+// and worse, scraping the newer/wrong page's content (e.g. a "recommended items" carousel)
+// under the old restaurant's name. Track the latest request so stale ones can bail early
+// instead of fighting the newer one for the shared page.
+let _selectRequestSeq = 0;
+
 // In-memory log buffer for remote debugging
 const logBuffer = [];
 const sseLogClients = []; // SSE clients subscribed to /logs/stream
@@ -3061,6 +3070,9 @@ app.post('/api/food/select', async (req, res) => {
     const { id, name, url } = req.body || {};
     if (!url || !id) return res.status(400).json({ error: 'Missing restaurant id/url.' });
 
+    const mySeq = ++_selectRequestSeq;
+    const superseded = () => mySeq !== _selectRequestSeq;
+
     try {
         let menuItems = db.getCachedRestaurantMenu(user.id, id);
 
@@ -3069,16 +3081,31 @@ app.post('/api/food/select', async (req, res) => {
         // never touched the browser. prewarmBrowser() launches it if needed (no-op if already up).
         await doordashUI.prewarmBrowser().catch(() => {});
 
+        if (superseded()) {
+            console.log(`[Food] select superseded before navigation (${name || id})`);
+            return res.status(409).json({ error: 'Superseded by a newer selection.', superseded: true });
+        }
+
         // Always navigate the browser here — a cached menu doesn't guarantee the browser
         // still has a live page on this restaurant, and cart/add assumes the page is
         // already on the right store.
         const menuResult = await doordashUI.selectRestaurantFromSearch(url);
+
+        if (superseded()) {
+            console.log(`[Food] select superseded after navigation (${name || id}) — not scraping menu for a stale request`);
+            return res.status(409).json({ error: 'Superseded by a newer selection.', superseded: true });
+        }
+
         if (!menuResult.success) return res.status(502).json({ error: menuResult.error || 'Could not load menu.' });
         const restaurantName = menuResult.restaurantName || name;
         const finalUrl = menuResult.url || url;
 
         if (!menuItems) {
             menuItems = await doordashUI.extractMenuItems();
+            if (superseded()) {
+                console.log(`[Food] select superseded after menu extraction (${name || id}) — discarding, not caching`);
+                return res.status(409).json({ error: 'Superseded by a newer selection.', superseded: true });
+            }
             if (menuItems && menuItems.length > 0) {
                 menuItems = groupSizeVariants(menuItems);
                 db.cacheRestaurantMenu(user.id, id, menuItems);

@@ -3930,6 +3930,13 @@ async function extractMenuItems() {
             const els = Array.from(candidates).slice(0, 300);
 
             for (const el of els) {
+                // Skip DoorDash's own "recommended for you" / cross-sell carousel — it can
+                // surface items and even other restaurants entirely unrelated to the store
+                // actually being viewed (confirmed live: a Little Caesars page scrape picked
+                // up "Chick-fil-A" and "Sergio's Pizza" this way), and it has real $-tagged
+                // content so the price-match filter alone doesn't exclude it.
+                if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"]')) continue;
+
                 // Viewport filter first (cheap) before layout-triggering calls
                 const rect = el.getBoundingClientRect();
                 if (rect.bottom < -300 || rect.top > window.innerHeight + 300) continue;
@@ -4055,6 +4062,10 @@ async function extractMenuItems() {
                 const seen = new Set();
                 const all = document.querySelectorAll('button, article, div, [role="button"]');
                 for (const el of all) {
+                    // Same cross-sell/recommended-items exclusion as Strategy 1 above — this
+                    // untargeted whole-page scan is especially exposed to scraping other
+                    // restaurants' items out of that carousel.
+                    if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"]')) continue;
                     if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
                     if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
 
@@ -5058,7 +5069,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             await storeLinks[index].click();
         }
 
-        await delay(4000);
+        await delay(2000);
         await handlePopups();
         await takeScreenshot('restaurant-page');
 
