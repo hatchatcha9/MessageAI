@@ -2536,6 +2536,25 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
         }
     }
 
+    // Intercept exact "show cart" phrasings directly — Claude sometimes hallucinates a
+    // stale cart summary straight from conversation history instead of emitting
+    // [SHOW_CART] (confirmed live: asking "show my cart" right after a real cart clear
+    // returned the OLD pre-clear cart text verbatim, with actions:[] proving [SHOW_CART]
+    // never actually fired — the sync-with-browser and fresh-read-from-db logic in the
+    // [SHOW_CART] branch below never ran). Bypass Claude entirely for these exact
+    // phrasings, same technique as the plainNumMatch intercept above, so the cart shown
+    // is always freshly read rather than whatever Claude last said in this conversation.
+    const cartShowTriggers = ['show cart', 'view cart', "what's in my cart", 'whats in my cart', 'my cart', 'cart', 'what do i have', 'show order'];
+    const trimmedCartMsg = message.trim().toLowerCase().replace(/[?!.]+$/, '');
+    if (cartShowTriggers.includes(trimmedCartMsg)) {
+        console.log(`[Intercept] "${trimmedCartMsg}" → forced SHOW_CART (bypassing Claude)`);
+        db.saveMessage(user.id, 'user', message);
+        db.pruneConversationHistory(user.id);
+        const { response: cleanedResponse, actions } = await processCommands('[SHOW_CART]', user, phoneNumber, '', voiceMode);
+        db.saveMessage(user.id, 'assistant', cleanedResponse);
+        return { response: cleanedResponse, actions };
+    }
+
     // Intercept "more menu" directly — show next page of cached menu without going to Claude
     if (/^more menu$/i.test(message.trim()) && doordashMenu && doordashMenu.length > 0) {
         const PAGE_SIZE = 15;
