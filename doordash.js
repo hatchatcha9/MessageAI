@@ -4969,7 +4969,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             }
 
             const cfWait = 30000;
-            await delay(1000); // brief settle before checking
+            await delay(400); // brief settle before checking
             const cfResolved = await waitForCFChallenge(cfWait);
             let finalUrl = page.url();
             let bodySnippet = await Promise.race([
@@ -5069,7 +5069,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             await storeLinks[index].click();
         }
 
-        await delay(2000);
+        await delay(800);
         await handlePopups();
         await takeScreenshot('restaurant-page');
 
@@ -6849,14 +6849,20 @@ async function autoSelectAllRequiredOptions() {
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                 const grp = groups[idx];
                 if (!grp) return null;
-                // Try label, then [role="radio"], then [role="button"], then input, then stepper
+                // Try label, then [role="radio"], then [role="button"], then a plain
+                // interactive button (DoorDash sometimes renders options as bare
+                // <button data-is-interactive="true"> wrappers with no role="button"
+                // attribute at all — an implicit button role that this selector's
+                // explicit-attribute match would otherwise miss entirely, e.g. a real
+                // Little Caesars "Sauce Selection" group), then input, then stepper
                 const label = grp.querySelector('label');
                 const radio = grp.querySelector('[role="radio"]');
                 const roleBtn = grp.querySelector('[role="button"]');
+                const plainBtn = grp.querySelector('button[data-is-interactive="true"]');
                 const input = grp.querySelector('input[type="radio"],input[type="checkbox"]');
                 const stepper = grp.querySelector('[data-anchor-id="IncrementQuantity"]');
                 // Only use stepper as last resort — it increments quantity rather than selecting
-                const target = label || radio || roleBtn || input || stepper;
+                const target = label || radio || roleBtn || plainBtn || input || stepper;
                 if (!target) return null;
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 const rect = target.getBoundingClientRect();
@@ -6880,9 +6886,11 @@ async function autoSelectAllRequiredOptions() {
                 const stepperLoc = group.locator('[data-anchor-id="IncrementQuantity"]').first();
                 let target = null;
                 const roleBtnLoc = group.locator('[role="button"]').first();
+                const plainBtnLoc = group.locator('button[data-is-interactive="true"]').first();
                 if (await labelLoc.count() > 0) target = labelLoc;
                 else if (await radioLoc.count() > 0) target = radioLoc;
                 else if (await roleBtnLoc.count() > 0) target = roleBtnLoc;
+                else if (await plainBtnLoc.count() > 0) target = plainBtnLoc;
                 else if (await inputLoc.count() > 0) target = inputLoc;
                 else if (await stepperLoc.count() > 0) target = stepperLoc;
                 if (target) {
@@ -7132,6 +7140,138 @@ async function applyOptionSelections(selections) {
                     }
                 } catch (e) {
                     console.log(`[DoorDash] Strategy 2b error:`, e.message.substring(0, 100));
+                }
+            }
+
+            // Strategy 2c: click a labeled option button. DoorDash sometimes renders
+            // required-group options as plain <button data-is-interactive="true"
+            // tabindex="-1"> wrappers around a label span (no <label>, no [role="radio"],
+            // no <input type="radio"> anywhere in the group) — confirmed live via a saved
+            // modal dump for a real Little Caesars "Sauce Selection" group, which every
+            // earlier strategy silently no-ops on since none of them look for this pattern.
+            // Without this, the explicit selection click can fail completely while the
+            // add still "succeeds" using whatever DoorDash's default happened to be —
+            // silently charging for a different size/flavor than the user actually tapped.
+            if (!clicked) {
+                try {
+                    // Each option button wraps a real (but visually tiny/custom-styled)
+                    // <input type="radio" aria-label="<option text>"> — confirmed live via
+                    // a saved modal dump. Its own `checked` property is ground truth for
+                    // whether a click actually registered; the aggregate "Make N required"
+                    // button text (getRequiredCount) is NOT reliable here because these two
+                    // groups both already read as 0-required (DoorDash pre-defaults them),
+                    // so a before/after count comparison can't detect a same-count swap
+                    // between two non-empty options (e.g. Regular → Extra).
+                    const info = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                        if (!modal) return null;
+                        const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                        const group = groups[groupIdx];
+                        if (!group) return null;
+                        const buttons = Array.from(group.querySelectorAll('button[data-is-interactive="true"]'));
+                        const lower = (optText || '').toLowerCase();
+                        let target = optText ? buttons.find(b => (b.textContent || '').trim().toLowerCase().startsWith(lower)) : null;
+                        if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
+                        if (!target) return null;
+                        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+                        const rect = target.getBoundingClientRect();
+                        const input = target.querySelector('input[type="radio"], input[type="checkbox"]');
+                        const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+                        const atPoint = document.elementFromPoint(cx, cy);
+                        return {
+                            x: cx, y: cy,
+                            alreadyChecked: input ? input.checked : null,
+                            atPointTag: atPoint?.tagName, atPointCls: (atPoint?.className || '').toString().substring(0, 60),
+                        };
+                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+                    if (info) {
+                        console.log(`[DoorDash] Strategy 2c: click labeled option button at (${Math.round(info.x)}, ${Math.round(info.y)}), alreadyChecked=${info.alreadyChecked}, elementAtPoint=${info.atPointTag}.${info.atPointCls}`);
+                        if (info.alreadyChecked) {
+                            // Already the selected option (e.g. user picked the current
+                            // default) — nothing to click, and a click here would just
+                            // toggle it back off on some radio implementations.
+                            console.log('[DoorDash] Strategy 2c: option already selected, no click needed');
+                            clicked = true;
+                        } else {
+                            await delay(200);
+                            await page.mouse.click(info.x, info.y);
+                            await delay(600);
+                            const nowChecked = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                                const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
+                                const group = groups?.[groupIdx];
+                                if (!group) return null;
+                                const buttons = Array.from(group.querySelectorAll('button[data-is-interactive="true"]'));
+                                const lower = (optText || '').toLowerCase();
+                                let target = optText ? buttons.find(b => (b.textContent || '').trim().toLowerCase().startsWith(lower)) : null;
+                                if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
+                                const input = target?.querySelector('input[type="radio"], input[type="checkbox"]');
+                                return input ? input.checked : null;
+                            }, { groupIdx: sel.groupIndex, optText, optIdx });
+                            if (nowChecked === true) {
+                                console.log(`[DoorDash] Strategy 2c registered! (input.checked now true)`);
+                                clicked = true;
+                            } else {
+                                console.log(`[DoorDash] Strategy 2c click landed but input.checked=${nowChecked} — not registered`);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Strategy 2c error:`, e.message.substring(0, 150));
+                }
+            }
+
+            // Strategy 2d: same labeled-button target as 2c, but click the nested
+            // radio/checkbox input's own coordinates directly instead of the button's
+            // center — covers cases where the button's hit-testable area doesn't
+            // actually cover its full visual bounds (e.g. an inner element captures
+            // the center point per Strategy 2c's elementAtPoint diagnostic).
+            if (!clicked) {
+                try {
+                    const inputCoords = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                        if (!modal) return null;
+                        const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                        const group = groups[groupIdx];
+                        if (!group) return null;
+                        const buttons = Array.from(group.querySelectorAll('button[data-is-interactive="true"]'));
+                        const lower = (optText || '').toLowerCase();
+                        let target = optText ? buttons.find(b => (b.textContent || '').trim().toLowerCase().startsWith(lower)) : null;
+                        if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
+                        const input = target?.querySelector('input[type="radio"], input[type="checkbox"]');
+                        if (!input) return null;
+                        input.scrollIntoView({ block: 'center', inline: 'nearest' });
+                        const rect = input.getBoundingClientRect();
+                        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, w: rect.width, h: rect.height };
+                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+                    if (inputCoords && inputCoords.w > 0 && inputCoords.h > 0) {
+                        console.log(`[DoorDash] Strategy 2d: click nested input directly at (${Math.round(inputCoords.x)}, ${Math.round(inputCoords.y)})`);
+                        await delay(200);
+                        await page.mouse.click(inputCoords.x, inputCoords.y);
+                        await delay(600);
+                        const nowChecked = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                            const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
+                            const group = groups?.[groupIdx];
+                            if (!group) return null;
+                            const buttons = Array.from(group.querySelectorAll('button[data-is-interactive="true"]'));
+                            const lower = (optText || '').toLowerCase();
+                            let target = optText ? buttons.find(b => (b.textContent || '').trim().toLowerCase().startsWith(lower)) : null;
+                            if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
+                            const input = target?.querySelector('input[type="radio"], input[type="checkbox"]');
+                            return input ? input.checked : null;
+                        }, { groupIdx: sel.groupIndex, optText, optIdx });
+                        if (nowChecked === true) {
+                            console.log(`[DoorDash] Strategy 2d registered! (input.checked now true)`);
+                            clicked = true;
+                        } else {
+                            console.log(`[DoorDash] Strategy 2d click landed but input.checked=${nowChecked} — not registered`);
+                        }
+                    } else if (inputCoords) {
+                        console.log(`[DoorDash] Strategy 2d: input is zero-size (${inputCoords.w}x${inputCoords.h}), skipping coordinate click`);
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Strategy 2d error:`, e.message.substring(0, 150));
                 }
             }
 

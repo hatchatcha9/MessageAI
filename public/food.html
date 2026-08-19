@@ -420,6 +420,116 @@
     #cart-bar.show { display: flex; }
     #cart-bar-label { font-size: 13px; font-weight: 700; }
     #cart-bar-arrow { width: 16px; height: 16px; }
+
+    /* ── Options modal (size/flavor/required-choice picker) ── */
+    #options-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 50;
+      align-items: flex-end;
+      justify-content: center;
+    }
+    #options-modal.show { display: flex; }
+    #options-modal-panel {
+      width: 100%;
+      max-height: 260px;
+      background: var(--surface);
+      border-top: 1px solid var(--hairline);
+      border-radius: 14px 14px 0 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #options-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--hairline);
+      flex-shrink: 0;
+    }
+    #options-modal-item-name {
+      font-size: 13.5px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding-right: 8px;
+    }
+    #options-modal-close {
+      width: 26px; height: 26px;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: none; border: none; color: var(--muted);
+      font-size: 18px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #options-modal-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 12px;
+    }
+    .opt-group { margin-bottom: 12px; }
+    .opt-group-name {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .opt-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .opt-btn {
+      padding: 7px 10px;
+      background: var(--ground);
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      color: var(--ink);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .opt-btn:active { border-color: var(--accent); }
+    .opt-btn.selected {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-ink);
+    }
+    #options-modal-error {
+      margin: 0 12px 6px;
+      padding: 6px 8px;
+      background: #2a1a16;
+      border: 1px solid #4a2a20;
+      color: #e89e6a;
+      border-radius: 8px;
+      font-size: 11.5px;
+    }
+    #options-modal-error.hidden { display: none; }
+    #options-modal-footer {
+      flex-shrink: 0;
+      padding: 8px 12px 10px;
+      border-top: 1px solid var(--hairline);
+    }
+    #options-modal-add {
+      width: 100%;
+      padding: 10px;
+      border-radius: 10px;
+      border: none;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 13.5px;
+      font-weight: 700;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #options-modal-add:disabled { opacity: 0.5; }
+    #options-modal-add:active:not(:disabled) { background: var(--accent-2); }
   </style>
 </head>
 <body>
@@ -503,6 +613,20 @@
   <svg id="cart-bar-arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <polyline points="6,3 11,8 6,13"></polyline>
   </svg>
+</div>
+
+<div id="options-modal">
+  <div id="options-modal-panel">
+    <div id="options-modal-header">
+      <div id="options-modal-item-name">—</div>
+      <button id="options-modal-close" title="Cancel">✕</button>
+    </div>
+    <div class="scroll-list" id="options-modal-body"></div>
+    <div id="options-modal-error" class="hidden"></div>
+    <div id="options-modal-footer">
+      <button id="options-modal-add" disabled>Pick options above</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -793,7 +917,7 @@
       const data = await res.json();
       if (!res.ok) {
         if (data.needsOptions) {
-          alert(`"${item.name}" needs a choice (like size or protein) — add it by voice/SMS instead.`);
+          showOptionsModal(realIndex, item, data.requiredOptions, data.pendingSelections);
         } else {
           alert(data.error || 'Could not add item.');
         }
@@ -814,6 +938,112 @@
       btn.disabled = false;
     }
   }
+
+  // ── Options modal (size/flavor/required-choice picker) ────────────────────
+  // Shown when /api/food/cart/add reports needsOptions — a real required group
+  // (e.g. Sauce, Cheese, protein) with more than one real choice. Groups with
+  // exactly one option are auto-filled server-side and never reach here.
+  let optionsModalState = null; // { itemIndex, item, groups, picks: {gi: {optionIndex, optionText}}, pendingSelections }
+
+  function showOptionsModal(itemIndex, item, groups, pendingSelections) {
+    optionsModalState = { itemIndex, item, groups, picks: {}, pendingSelections: pendingSelections || [] };
+    renderOptionsModal();
+    document.getElementById('options-modal-error').classList.add('hidden');
+    const addBtn = document.getElementById('options-modal-add');
+    addBtn.disabled = true;
+    addBtn.textContent = 'Pick options above';
+    document.getElementById('options-modal').classList.add('show');
+  }
+
+  function closeOptionsModal() {
+    document.getElementById('options-modal').classList.remove('show');
+    optionsModalState = null;
+  }
+
+  function renderOptionsModal() {
+    const { item, groups, picks } = optionsModalState;
+    document.getElementById('options-modal-item-name').textContent = item.name;
+    const body = document.getElementById('options-modal-body');
+    body.innerHTML = groups.map((g, gi) => `
+      <div class="opt-group">
+        <div class="opt-group-name">${esc(g.name)}</div>
+        <div class="opt-options">
+          ${g.options.map((opt, oi) => `<button class="opt-btn${picks[gi] && picks[gi].optionIndex === oi ? ' selected' : ''}" data-group="${gi}" data-opt="${oi}">${esc(opt)}</button>`).join('')}
+        </div>
+      </div>
+    `).join('');
+    body.querySelectorAll('.opt-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const gi = parseInt(btn.dataset.group);
+        const oi = parseInt(btn.dataset.opt);
+        const group = optionsModalState.groups[gi];
+        // DoorDash option text sometimes carries a price suffix like "(+$1.50)" —
+        // shown to the user for context, but stripped before submitting so it
+        // matches what applyOptionSelections() in doordash.js actually compares
+        // against (same stripping the voice/SMS SELECT_OPTION handler already does).
+        const rawText = group.options[oi] || '';
+        const optionText = rawText.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
+        optionsModalState.picks[gi] = { optionIndex: oi, optionText };
+        renderOptionsModal();
+        const allPicked = optionsModalState.groups.every((gg, ggi) => optionsModalState.picks[ggi] !== undefined);
+        const addBtn = document.getElementById('options-modal-add');
+        addBtn.disabled = !allPicked;
+        addBtn.textContent = allPicked ? 'Add to Cart' : 'Pick options above';
+      });
+    });
+  }
+
+  function showOptionsModalError(msg) {
+    const err = document.getElementById('options-modal-error');
+    err.textContent = msg;
+    err.classList.remove('hidden');
+  }
+
+  document.getElementById('options-modal-close').addEventListener('click', closeOptionsModal);
+  document.getElementById('options-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'options-modal') closeOptionsModal();
+  });
+
+  document.getElementById('options-modal-add').addEventListener('click', async () => {
+    const { itemIndex, item, groups, picks, pendingSelections } = optionsModalState;
+    const btn = document.getElementById('options-modal-add');
+    btn.disabled = true;
+    btn.textContent = 'Adding…';
+    document.getElementById('options-modal-error').classList.add('hidden');
+    const selections = [...pendingSelections];
+    groups.forEach((g, gi) => {
+      const pick = picks[gi];
+      const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
+      selections.push({ groupIndex: origIdx, optionIndex: pick.optionIndex, optionText: pick.optionText });
+    });
+    try {
+      const res = await fetch('/api/food/cart/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIndex, item, selections }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.needsOptions) {
+          // Another round of required groups revealed after this selection
+          // (e.g. picking a size unlocks a flavor group) — show it and keep going.
+          showOptionsModal(itemIndex, item, data.requiredOptions, data.pendingSelections);
+          return;
+        }
+        showOptionsModalError(data.error || 'Could not add item.');
+        btn.disabled = false;
+        btn.textContent = 'Add to Cart';
+        return;
+      }
+      cartItems = data.items || [];
+      updateCartBar();
+      closeOptionsModal();
+    } catch {
+      showOptionsModalError('Could not reach the server.');
+      btn.disabled = false;
+      btn.textContent = 'Add to Cart';
+    }
+  });
 
   // ── Cart ────────────────────────────────────────────────────────────────
   async function loadCart() {

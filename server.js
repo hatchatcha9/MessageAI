@@ -3168,35 +3168,17 @@ app.post('/api/food/cart/add', async (req, res) => {
     const current = db.getCachedCurrentRestaurant(user.id);
     if (!current) return res.status(400).json({ error: 'No restaurant selected.' });
 
-    const { itemIndex, item } = req.body || {};
+    const { itemIndex, item, selections } = req.body || {};
     if (!item || !item.name || itemIndex === undefined) return res.status(400).json({ error: 'Missing item.' });
 
-    try {
-        // skipOptionsCheck + selectFirst: auto-pick the first choice in any required option
-        // group (size, seasoning, etc.) instead of blocking — most menu items have at least
-        // one required group, so blocking on needsOptions would make this view mostly unusable.
-        // The result still lands in the cart only, never checkout.
-        const addResult = await doordashUI.addItemByIndex(itemIndex, { selectFirst: true, skipOptionsCheck: true, restaurantUrl: current.url }, item);
-        if (addResult && addResult.needsOptions) {
-            return res.status(409).json({
-                error: 'This item needs a choice this quick view couldn\'t auto-fill — use voice or SMS for it.',
-                needsOptions: true,
-                requiredOptions: addResult.requiredOptions || [],
-            });
-        }
+    // Shared tail: price-correct + write to local cart + respond. Used both for a
+    // plain success and for the "all remaining groups were trivial" auto-fill retry
+    // below, so both paths get identical price-correction/selectedOptions handling.
+    const finishAdd = async (addResult) => {
         if (addResult && addResult.success === false) {
-            // If the page drifted off the store (e.g. a prior request's error recovery
-            // navigated away), get back to a known-good state so the *next* tap has a
-            // chance, even though this one still reports the failure to the user.
             if (current.url) doordashUI.navigateToRestaurantPage(current.url).catch(() => {});
             return res.status(502).json({ error: addResult.error || 'Could not add item.' });
         }
-        // The menu-grid scrape (extractMenuItems) can show a starting/base price for
-        // items with a hidden default size — DoorDash may add a pricier default variant
-        // (e.g. "Regular") than what the tile displayed. Since this price feeds directly
-        // into the pre-checkout estimate/confirm total, prefer the real price read straight
-        // off DoorDash's own "Add to cart - $X" button at the moment of the click
-        // (addItemByIndex's price field) over the scraped estimate.
         let realPrice = item.price || 0;
         if (addResult && typeof addResult.price === 'number' && addResult.price > 0) {
             if (Math.abs(addResult.price - realPrice) > 0.01) {
@@ -3204,8 +3186,6 @@ app.post('/api/food/cart/add', async (req, res) => {
             }
             realPrice = addResult.price;
         } else {
-            // No-modal quick-add path doesn't expose a button price — fall back to
-            // reading DoorDash's own cart DOM as a second attempt at the real price.
             try {
                 const browserCart = await doordashUI.readBrowserCart();
                 if (browserCart && browserCart.length > 0) {
@@ -3223,17 +3203,58 @@ app.post('/api/food/cart/add', async (req, res) => {
                 console.log('[Food] readBrowserCart price-verify failed, using scraped estimate:', e.message);
             }
         }
-
-        // selectedOptions comes from doordash.js actually clicking through the item's
-        // required option groups (protein/sauce/size/etc.) — e.g. ["Sweet Pork Burrito",
-        // "Red Enchilada Sauce (Hint of Heat)"] for a generic "Burritos" menu tile. Only
-        // used when the client didn't already send an explicit label (grouped size
-        // variants set that themselves and should take priority).
         const selectedOptions = (!item.label && addResult && Array.isArray(addResult.selectedOptions) && addResult.selectedOptions.length > 0)
             ? addResult.selectedOptions : undefined;
         db.addToCart(user.id, current.id, { id: item.id || `doordash-${itemIndex}`, name: item.name, label: item.label || null, selectedOptions, price: realPrice, source: 'doordash' });
         const cart = db.getCart(user.id);
         res.json({ items: cart.items[current.id] || [] });
+    };
+
+    try {
+        const hasUserSelections = Array.isArray(selections) && selections.length > 0;
+        // First call (no selections yet): let addItemByIndex's fast options-check run
+        // instead of blind-guessing with selectFirst. The old behavior always passed
+        // selectFirst+skipOptionsCheck, which for an item with real choices meant several
+        // slow, silent minutes of Playwright auto-select-and-retry before ever surfacing
+        // an error — and it could just as easily auto-pick the WRONG size/flavor instead
+        // of failing. Checking first means simple items (no real options) still add
+        // immediately, and items with real choices report back fast so the touchscreen
+        // can show them as an actual tappable modal instead of bouncing to voice/SMS.
+        const addOptions = hasUserSelections
+            ? { selectFirst: false, selections, skipOptionsCheck: true, restaurantUrl: current.url }
+            : { skipOptionsCheck: false, restaurantUrl: current.url };
+        const addResult = await doordashUI.addItemByIndex(itemIndex, addOptions, item);
+
+        if (addResult && addResult.needsOptions) {
+            // Split into groups with exactly one real choice (nothing to actually pick —
+            // auto-fill server-side) vs groups the user needs to tap through. Mirrors the
+            // same split the voice/SMS path already does (server.js SELECT_OPTION queued-
+            // item handling above).
+            const autoSels = (hasUserSelections ? selections : []).slice();
+            const needsInput = [];
+            addResult.requiredOptions.forEach((g, gi) => {
+                const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
+                if (g.options.length === 1) {
+                    autoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                } else {
+                    needsInput.push({ ...g, _origIdx: origIdx });
+                }
+            });
+            if (needsInput.length === 0) {
+                // Every remaining group was trivial (single option) — finish the add now
+                // with those auto-selections instead of bothering the user with a modal
+                // for a "choice" that was never really a choice.
+                const retryResult = await doordashUI.addItemByIndex(itemIndex, { selectFirst: false, selections: autoSels, skipOptionsCheck: true, restaurantUrl: current.url }, item);
+                return await finishAdd(retryResult);
+            }
+            return res.status(409).json({
+                needsOptions: true,
+                requiredOptions: needsInput,
+                pendingSelections: autoSels,
+            });
+        }
+
+        return await finishAdd(addResult);
     } catch (err) {
         console.error('[Food] /api/food/cart/add error:', err.message);
         res.status(502).json({ error: err.message || 'Could not add item.' });
