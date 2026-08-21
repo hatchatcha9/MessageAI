@@ -1041,7 +1041,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     }
                     if (matchedOption) {
                         const cleanOption = matchedOption.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                        selectionsText.push({ groupIndex: origIdx, optionIndex: matchedIndex, optionText: cleanOption });
+                        selectionsText.push({ groupIndex: origIdx, optionIndex: matchedIndex, optionText: cleanOption, groupName: group.name });
                         console.log(`[DoorDash] Group ${origIdx} (${group.name}): Matched "${cleanOption}"`);
                     }
                 }
@@ -1056,7 +1056,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         const match = matchPhraseInGroup(lastGroup, userPhrases[pIdx]);
                         if (match) {
                             const cleanOption = match.option.replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
-                            selectionsText.push({ groupIndex: lastGroupOrigIdx, optionIndex: match.index, optionText: cleanOption });
+                            selectionsText.push({ groupIndex: lastGroupOrigIdx, optionIndex: match.index, optionText: cleanOption, groupName: lastGroup.name });
                             console.log(`[DoorDash] Group ${lastGroupOrigIdx} extra (checkbox): Matched "${cleanOption}"`);
                         }
                     }
@@ -1106,7 +1106,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                         const qAutoSelsT = [], qNeedsInputT = [];
                                         qRes.requiredOptions.forEach((g, gi) => {
                                             const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
-                                            if (g.options.length === 1) qAutoSelsT.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                                            if (g.options.length === 1) qAutoSelsT.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0], groupName: g.name });
                                             else qNeedsInputT.push({ ...g, _origIdx: origIdx });
                                         });
                                         qPrefsT.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
@@ -1186,7 +1186,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     let optionText = (group.options[optNum] || group.options[0] || '').replace(/\s*\(\+?\$[\d.]+\)\s*$/, '').trim();
                     const actualIdx = optNum < group.options.length ? optNum : 0;
                     const origIdx = group._origIdx !== undefined ? group._origIdx : gIdx;
-                    selectionsOpt.push({ groupIndex: origIdx, optionIndex: actualIdx, optionText });
+                    selectionsOpt.push({ groupIndex: origIdx, optionIndex: actualIdx, optionText, groupName: group.name });
                     console.log(`[DoorDash] Group ${origIdx} (${group.name}): User selected "${optionText}" (index ${actualIdx})`);
                 }
             }
@@ -1235,7 +1235,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                     const qAutoSels = [], qNeedsInput = [];
                                     qRes.requiredOptions.forEach((g, gi) => {
                                         const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
-                                        if (g.options.length === 1) qAutoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                                        if (g.options.length === 1) qAutoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0], groupName: g.name });
                                         else qNeedsInput.push({ ...g, _origIdx: origIdx });
                                     });
                                     qPrefs.pendingDoordashItem = { ...queued.item, menuIndex: queued.num };
@@ -1473,7 +1473,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 const g = addResult.requiredOptions[gIdx];
                                 const origIdx = g._origIdx !== undefined ? g._origIdx : gIdx;
                                 if (g.options.length === 1) {
-                                    autoSelections.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                                    autoSelections.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0], groupName: g.name });
                                     console.log(`[DoorDash] Auto-selecting single option for "${g.name}": "${g.options[0]}"`);
                                 } else {
                                     groupsNeedingInput.push({ ...g, _origIdx: origIdx });
@@ -3235,7 +3235,7 @@ app.post('/api/food/cart/add', async (req, res) => {
             addResult.requiredOptions.forEach((g, gi) => {
                 const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
                 if (g.options.length === 1) {
-                    autoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0] });
+                    autoSels.push({ groupIndex: origIdx, optionIndex: 0, optionText: g.options[0], groupName: g.name });
                 } else {
                     needsInput.push({ ...g, _origIdx: origIdx });
                 }
@@ -4185,6 +4185,20 @@ app.listen(PORT, async () => {
             console.log(`[Startup] Imported ${cookies.length} DoorDash cookies from env`);
         } catch (e) {
             console.error('[Startup] Failed to import DOORDASH_COOKIES:', e.message);
+        }
+    }
+
+    // Prewarm the browser onto whatever restaurant page was last selected, so the
+    // first tap-to-add right after a restart doesn't hit the browserNotOpen
+    // cold-start gap (addItemByIndex bails immediately if page/context aren't up
+    // yet, and that bail only helps the *next* request, not the one that hit it).
+    if (doordashUI) {
+        const startupUser = db.getOrCreateUser(PI_DEVICE_ID);
+        const startupRestaurant = db.getCachedCurrentRestaurant(startupUser.id);
+        if (startupRestaurant && startupRestaurant.url) {
+            console.log(`[Startup] Prewarming browser for cached restaurant: ${startupRestaurant.name || startupRestaurant.id}`);
+            doordashUI.prewarmRestaurantPage(startupRestaurant.url)
+                .catch(err => console.error('[Startup] Prewarm failed:', err.message));
         }
     }
 });

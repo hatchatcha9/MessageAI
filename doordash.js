@@ -978,6 +978,19 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms + Math.random() * 500));
 }
 
+// page.evaluate() has no built-in timeout in Playwright — if the page is mid-navigation
+// or its JS execution context is otherwise stuck, an evaluate() call can hang forever,
+// which silently defeats any surrounding loop's own iteration/attempt caps (confirmed as
+// the real mechanism behind a clearBrowserCart() hang that outlasted its documented
+// ~79s worst-case with zero further log output). Wrap evaluate() calls that sit inside a
+// bounded loop with this so a stuck call throws instead of hanging the whole function.
+function evalWithTimeout(pageObj, fn, timeoutMs, label) {
+    return Promise.race([
+        pageObj.evaluate(fn),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`evaluate timed out after ${timeoutMs}ms${label ? ` (${label})` : ''}`)), timeoutMs))
+    ]);
+}
+
 // Debug screenshot interval - captures screenshots every N seconds during item selection
 let debugScreenshotInterval = null;
 let debugScreenshotCounter = 0;
@@ -5510,9 +5523,25 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
             // Apply the user's selections
             console.log('[DoorDash] Applying user selections to existing modal...');
-            await applyOptionSelections(options.selections);
+            const applyResultExisting = await applyOptionSelections(options.selections);
             await delay(1000);
             await takeScreenshot('after-user-selection-existing');
+
+            // Refuse to proceed if an explicit selection couldn't actually be clicked —
+            // continuing here means autoSelectAllRequiredOptions() picks SOMETHING to
+            // satisfy the requirement, which can silently add the wrong flavor/size/
+            // seasoning at a real price instead of surfacing an error. See the comment on
+            // applyOptionSelections() for the confirmed live repro.
+            if (applyResultExisting.failed.length > 0) {
+                const f = applyResultExisting.failed[0];
+                console.log(`[DoorDash] Refusing to auto-fill: explicit selection "${f.optionText}" for "${f.groupName || 'group ' + f.groupIndex}" could not be applied`);
+                stopDebugScreenshots();
+                return {
+                    success: false,
+                    error: `Could not select "${f.optionText}"${f.groupName ? ` for "${f.groupName}"` : ''} — please try again.`,
+                    selectionFailed: true
+                };
+            }
 
             // Auto-select any remaining required options
             console.log('[DoorDash] Auto-selecting any remaining required options...');
@@ -5654,6 +5683,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             const r = el.getBoundingClientRect();
                             if (r.width > 600 || r.height > 500) break;
                             if (r.width > 100 && r.width < 520 && r.height > 50 && r.height < 400 && r.left > 50) {
+                                // Real menu-item cards always show a price. Without this check, a
+                                // card-shaped element that merely quotes the item's name — e.g. a
+                                // "photos from reviews" widget captioning which item a reviewer
+                                // ordered — passes through and opens a review-details modal instead
+                                // of the item modal (confirmed live: clicked a review photo card for
+                                // an item whose real menu card was scrolled off-screen at extraction
+                                // time). Strategy 2 below already requires this; Strategy 1 didn't.
+                                if (!/\$\d/.test(el.textContent || '')) { el = el.parentElement; continue; }
                                 bestCard = el;
                                 const tag = el.tagName?.toLowerCase();
                                 const role = el.getAttribute?.('role');
@@ -5946,9 +5983,24 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // If specific options were provided, select them
             if (options.selections && options.selections.length > 0) {
                 console.log('[DoorDash] Applying user selections...');
-                await applyOptionSelections(options.selections);
+                const applyResult = await applyOptionSelections(options.selections);
                 await delay(1000);
                 await takeScreenshot('after-user-selection');
+
+                // Refuse to proceed if an explicit selection couldn't actually be clicked —
+                // see the comment on applyOptionSelections() for the confirmed live repro
+                // (Wingstop "Choose Flavors", silently added a different flavor at a real
+                // price when the blind auto-fill fallback ran instead of surfacing an error).
+                if (applyResult.failed.length > 0) {
+                    const f = applyResult.failed[0];
+                    console.log(`[DoorDash] Refusing to auto-fill: explicit selection "${f.optionText}" for "${f.groupName || 'group ' + f.groupIndex}" could not be applied`);
+                    stopDebugScreenshots();
+                    return {
+                        success: false,
+                        error: `Could not select "${f.optionText}"${f.groupName ? ` for "${f.groupName}"` : ''} — please try again.`,
+                        selectionFailed: true
+                    };
+                }
 
                 // After applying user's selection, auto-select any remaining required options
                 // This handles cases where there are multiple required groups
@@ -6945,6 +6997,14 @@ async function autoSelectAllRequiredOptions() {
  * @param {Array} selections - Array of { groupIndex, optionIndex, optionText }
  */
 async function applyOptionSelections(selections) {
+    // Tracks explicit user selections that no click strategy could actually apply. The
+    // caller uses this to refuse to proceed rather than silently falling back to
+    // autoSelectAllRequiredOptions() — confirmed live (Wingstop "Choose Flavors", a
+    // stepper-based required group with no clickable strategy currently handles it) that
+    // silently blind-filling after a real selection fails adds the WRONG flavor/seasoning
+    // at a real price with no error surfaced anywhere. Failing loudly here is deliberately
+    // the safer default until that specific click pattern gets its own strategy.
+    const failed = [];
     try {
         console.log('[DoorDash] Applying option selections:', JSON.stringify(selections));
         await takeScreenshot('before-apply-selections');
@@ -6993,7 +7053,7 @@ async function applyOptionSelections(selections) {
         };
 
         for (const sel of selections) {
-            console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}"`);
+            console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}", groupName="${sel.groupName || 'N/A'}"`);
 
             const groupCount = await page.evaluate(() => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
@@ -7002,7 +7062,107 @@ async function applyOptionSelections(selections) {
             });
             console.log(`[DoorDash] Modal has ${groupCount} option groups`);
 
-            if (sel.groupIndex >= groupCount) {
+            // Prefer resolving the target group by NAME over trusting sel.groupIndex as-is.
+            // A modal with many groups (confirmed live: a real Wingstop item had 12 —
+            // required picks interleaved with several optional/"Recommended" sections) gets
+            // extracted by different strategies (structured / radiogroup-broad / div-broad)
+            // depending on what that particular call happened to hit, and each strategy
+            // computes _origIdx in its own way. Two selections gathered across separate
+            // addItemByIndex calls can carry _origIdx values that look like stable group
+            // positions but aren't comparable to each other — confirmed live: this silently
+            // applied a wing-flavor pick to the fries-seasoning group and vice versa, adding
+            // the wrong item variant to a real cart at the wrong price. Matching by the
+            // group's own visible name sidesteps the whole cross-call indexing mismatch,
+            // the same way option-level matching already prefers optText over optIndex.
+            // Cheap pre-check: does the group already AT sel.groupIndex contain the wanted
+            // option? If so, the carried index is already correct and the expensive
+            // re-resolution below (a full extractRequiredOptions() pass) is both unnecessary
+            // and actively harmful — confirmed live: running it even for an already-correct
+            // first selection measurably hurt Wingstop's click reliability (a previously
+            // solid "Choose Your Wings" click started failing every strategy once this extra
+            // pass ran ahead of it, most likely by shifting timing/scroll state the modal's
+            // finicky radio inputs are sensitive to). Only pay for re-resolution when the
+            // carried index is actually wrong.
+            let indexAlreadyCorrect = false;
+            if (sel.groupName && sel.optionText && sel.groupIndex < groupCount && sel.groupIndex >= 0) {
+                indexAlreadyCorrect = await page.evaluate(({ gi, optText }) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
+                    const grp = groups?.[gi];
+                    if (!grp) return false;
+                    const wanted = optText.toLowerCase().trim();
+                    const texts = Array.from(grp.querySelectorAll('label, [role="radio"], [role="checkbox"], button'))
+                        .map(el => (el.textContent || '').toLowerCase().trim());
+                    return texts.some(t => t.startsWith(wanted) || wanted.startsWith(t));
+                }, { gi: sel.groupIndex, optText: sel.optionText }).catch(() => false);
+            }
+
+            if (sel.groupName && !indexAlreadyCorrect) {
+                // Reuse the actual extraction function instead of re-deriving group names
+                // with a separate heuristic — a standalone attempt at this (aria-labelledby /
+                // heading / nearest-"required"-ancestor) still missed "Fry Seasoning" on a
+                // real Wingstop modal, because whatever DOM path its name is reachable through
+                // is exactly what extractRequiredOptions()'s own broad-extraction strategies
+                // already handle correctly (confirmed: it's what produced sel.groupName in the
+                // first place). Calling it again here guarantees the same name maps to the same
+                // _origIdx, which is what actually indexes into the radiogroups array below.
+                const wanted = sel.groupName.toLowerCase().trim();
+                let match = null;
+                // A section revealed only after an EARLIER selection in this same loop
+                // (progressive disclosure — confirmed live: "Fry Seasoning" doesn't exist in
+                // the DOM at all until "Choose Your Wings" is picked) may not have finished
+                // rendering yet the instant we ask. A first extraction attempt right after the
+                // prior click can land mid-transition and return an unrelated set of stray
+                // groups instead of an empty/short list — retry with a short settle delay
+                // rather than trusting a single immediate read.
+                for (let attempt = 0; attempt < 3 && !match; attempt++) {
+                    if (attempt > 0) await delay(1200);
+                    const freshGroups = await extractRequiredOptions().catch(() => []);
+                    match = freshGroups.find(g => (g.name || '').toLowerCase().trim() === wanted)
+                        || freshGroups.find(g => (g.name || '') && wanted.startsWith(g.name.toLowerCase().trim()))
+                        || freshGroups.find(g => (g.name || '') && g.name.toLowerCase().trim().startsWith(wanted))
+                        || null;
+                }
+                if (match && match._origIdx !== undefined && match._origIdx !== sel.groupIndex) {
+                    console.log(`[DoorDash] Resolved group "${sel.groupName}" to index ${match._origIdx} (selection carried stale index ${sel.groupIndex})`);
+                    sel.groupIndex = match._origIdx;
+                } else if (!match && sel.optionText) {
+                    // Last resort: some sections genuinely have no discoverable "required"
+                    // marker or name anywhere near them — confirmed live on this same Wingstop
+                    // modal, a fresh dump of the whole modal HTML at this exact point contained
+                    // the word "required" exactly once, inside the aggregate "1 required
+                    // selection - $X" button label, nowhere near the section itself. Instead of
+                    // relying on a name at all, scan every group's own OPTION text for the
+                    // specific option this selection wants (which the caller already knows
+                    // precisely, e.g. "Lemon Pepper Seasoning") and use whichever unselected
+                    // group actually contains it.
+                    const optMatchIdx = await page.evaluate((wantedOpt) => {
+                        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                        if (!modal) return -1;
+                        const groups = Array.from(modal.querySelectorAll('[role="radiogroup"], [role="group"]'));
+                        const wanted = wantedOpt.toLowerCase().trim();
+                        for (let i = 0; i < groups.length; i++) {
+                            const grp = groups[i];
+                            const alreadyChecked = grp.querySelector('[aria-checked="true"], input:checked') !== null;
+                            if (alreadyChecked) continue;
+                            const texts = Array.from(grp.querySelectorAll('label, [role="radio"], [role="checkbox"], button'))
+                                .map(el => (el.textContent || '').toLowerCase().trim());
+                            if (texts.some(t => t.startsWith(wanted) || wanted.startsWith(t))) return i;
+                        }
+                        return -1;
+                    }, sel.optionText).catch(() => -1);
+                    if (optMatchIdx >= 0 && optMatchIdx !== sel.groupIndex) {
+                        console.log(`[DoorDash] Resolved group for option "${sel.optionText}" to index ${optMatchIdx} by scanning option text (name lookup failed)`);
+                        sel.groupIndex = optMatchIdx;
+                    } else {
+                        console.log(`[DoorDash] Could not resolve group "${sel.groupName}" by name or option text — falling back to carried index ${sel.groupIndex}`);
+                    }
+                } else if (!match) {
+                    console.log(`[DoorDash] Could not resolve group "${sel.groupName}" by name — falling back to carried index ${sel.groupIndex}`);
+                }
+            }
+
+            if (sel.groupIndex >= groupCount || sel.groupIndex < 0) {
                 console.log(`[DoorDash] Group ${sel.groupIndex} not found`);
                 continue;
             }
@@ -7306,6 +7466,7 @@ async function applyOptionSelections(selections) {
 
             if (!clicked) {
                 console.log(`[DoorDash] All strategies failed for "${optText}" in group ${sel.groupIndex}`);
+                failed.push({ groupName: sel.groupName || null, optionText: sel.optionText || null, groupIndex: sel.groupIndex });
             }
 
             await delay(400);
@@ -7317,6 +7478,7 @@ async function applyOptionSelections(selections) {
         console.error('[DoorDash] Apply selections error:', error.message);
         await takeScreenshot('apply-selections-error');
     }
+    return { failed };
 }
 
 /**
@@ -7952,19 +8114,19 @@ async function clearBrowserCart() {
         // DEAD route — confirmed it returns DoorDash's own "page not found" error.
         await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 45000 });
         await new Promise(r => setTimeout(r, 5000));
-        const opened = await page.evaluate(() => {
+        const opened = await evalWithTimeout(page, () => {
             const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]')
                 || document.querySelector('[aria-label*="cart" i]');
             if (btn) { btn.click(); return true; }
             return false;
-        });
+        }, 10000, 'open cart drawer');
         // Hydration of the drawer's item list lags well behind domcontentloaded on this
         // Pi (confirmed live: a fixed 1.2s wait here saw 0 decrement buttons even though a
         // real $123 cart existed) — poll for a decrement button to actually exist instead
         // of guessing a fixed delay, up to 20s.
         if (opened) {
             for (let i = 0; i < 20; i++) {
-                const ready = await page.evaluate(() => !!document.querySelector('[data-testid="stepper-decrement-button"]'));
+                const ready = await evalWithTimeout(page, () => !!document.querySelector('[data-testid="stepper-decrement-button"]'), 12000, 'poll decrement button');
                 if (ready) break;
                 await new Promise(r => setTimeout(r, 1000));
             }
@@ -7972,7 +8134,7 @@ async function clearBrowserCart() {
         // Click all minus (-) buttons in the cart until no items remain
         let attempts = 0;
         while (attempts < 30) {
-            const removed = await page.evaluate(() => {
+            const removed = await evalWithTimeout(page, () => {
                 // Confirmed live via DOM dump: the real decrement control is
                 // data-testid="stepper-decrement-button" / aria-label="remove one from
                 // cart" — none of the previous guesses (data-anchor-id*="Decrement" etc.)
@@ -7994,7 +8156,7 @@ async function clearBrowserCart() {
                     }
                 }
                 return false;
-            });
+            }, 12000, 'click decrement button');
             if (!removed) break;
             await new Promise(r => setTimeout(r, 300));
             attempts++;
@@ -8241,6 +8403,15 @@ module.exports = {
     getOrderStatus: locked(getOrderStatus),
     exportCookies,
     importCookies,
-    prewarmRestaurantPage,
+    // Locked like every other browser-touching export: prewarmRestaurantPage() was
+    // previously unlocked, on the assumption that a "background" prewarm running
+    // concurrently with a real operation was harmless. Confirmed live it isn't — a
+    // startup prewarm's own page.goto() destroyed a concurrently-running
+    // clearBrowserCart()'s cart-drawer state, reproducing the exact "wrong drawer,
+    // 0 items" bug the /home-navigation fix in clearBrowserCart() was meant to
+    // prevent. Callers already treat this as fire-and-forget (.catch(()=>{})), so
+    // queueing behind the lock instead of running concurrently costs nothing they
+    // were relying on.
+    prewarmRestaurantPage: locked(prewarmRestaurantPage),
     prewarmBrowser,
 };

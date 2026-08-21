@@ -1014,7 +1014,7 @@
     groups.forEach((g, gi) => {
       const pick = picks[gi];
       const origIdx = g._origIdx !== undefined ? g._origIdx : gi;
-      selections.push({ groupIndex: origIdx, optionIndex: pick.optionIndex, optionText: pick.optionText });
+      selections.push({ groupIndex: origIdx, optionIndex: pick.optionIndex, optionText: pick.optionText, groupName: g.name });
     });
     try {
       const res = await fetch('/api/food/cart/add', {
