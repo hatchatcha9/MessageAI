@@ -6960,6 +6960,32 @@ async function autoSelectAllRequiredOptions() {
                 clickOk = true;
             }
 
+            // Native element.click() fallback — same fix as applyOptionSelections'
+            // Strategy 0 above. Confirmed live that Playwright's locator/mouse clicks
+            // silently fail to register React state on some Toggle-component groups
+            // (Wingstop) while a plain in-page element.click() reliably does.
+            if (!clickOk) {
+                const nativeOk = await page.evaluate((idx) => {
+                    const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                    if (!modal) return false;
+                    const grp = modal.querySelectorAll('[role="radiogroup"], [role="group"]')[idx];
+                    if (!grp) return false;
+                    const target = grp.querySelector('label')
+                        || grp.querySelector('[role="radio"]')
+                        || grp.querySelector('[role="button"]')
+                        || grp.querySelector('button[data-is-interactive="true"]')
+                        || grp.querySelector('input[type="radio"],input[type="checkbox"]')
+                        || grp.querySelector('[data-anchor-id="IncrementQuantity"]');
+                    if (!target || target.disabled) return false;
+                    target.click();
+                    return true;
+                }, gIdx).catch(() => false);
+                if (nativeOk) {
+                    console.log(`[DoorDash] AutoSelect[${gIdx}]: native element.click() fallback dispatched`);
+                    clickOk = true;
+                }
+            }
+
             if (!clickOk) continue;
 
             await delay(500);
@@ -7174,9 +7200,93 @@ async function applyOptionSelections(selections) {
             const optIdx = sel.optionIndex || 0;
             let clicked = false;
 
+            // Strategy 0: plain in-page element.click() via page.evaluate — tried first
+            // since it's cheap and, confirmed live (Wingstop "Choose Your Wings", a
+            // Toggle-component radio group with a real <input type="radio"> wrapped in a
+            // <label for=...>), it succeeds where every Playwright-driven strategy below
+            // fails silently. Playwright's locator.click({force:true}) and mouse.click()
+            // both dispatch pointer events at computed coordinates — confirmed via live
+            // testing that neither registers React's onChange for this component even
+            // though elementFromPoint at those coordinates correctly resolves to the
+            // label. A native element.click() sidesteps coordinate/overlay hit-testing
+            // entirely and reliably fires the same 'click'/'input'/'change' sequence the
+            // framework listens to. Also handles the stepper-only case (Wingstop "Choose
+            // Flavors", a required multi-pick group with zero radio/checkbox inputs, only
+            // [data-anchor-id="IncrementQuantity"] buttons) the same way — confirmed live
+            // this is the group that was previously entirely unhandled ("all strategies
+            // failed"), and native button.click() reliably registers it too (real price
+            // recalculation, real progressive disclosure of the next required group).
+            if (!clicked) {
+                try {
+                    const inputResult = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                        const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                        if (!modal) return { ok: false };
+                        const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                        const group = groups[groupIdx];
+                        if (!group) return { ok: false };
+                        const inputs = Array.from(group.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
+                        if (inputs.length === 0) return { ok: false, noInputs: true };
+                        const lower = (optText || '').toLowerCase();
+                        let target = null;
+                        if (optText) {
+                            target = inputs.find(inp => {
+                                const label = modal.querySelector(`label[for="${inp.id}"]`);
+                                return label && (label.textContent || '').trim().toLowerCase().startsWith(lower);
+                            });
+                        }
+                        if (!target) target = inputs[Math.min(optIdx, inputs.length - 1)];
+                        if (!target) return { ok: false };
+                        const already = target.checked;
+                        if (!already) target.click();
+                        return { ok: true, already, id: target.id };
+                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+
+                    if (inputResult.ok) {
+                        await delay(400);
+                        const nowChecked = inputResult.already || await page.evaluate(
+                            (id) => document.getElementById(id)?.checked, inputResult.id
+                        ).catch(() => null);
+                        if (nowChecked === true) {
+                            console.log(`[DoorDash] Strategy 0: native input.click() registered (id=${inputResult.id})`);
+                            clicked = true;
+                        } else {
+                            console.log(`[DoorDash] Strategy 0: native click did not register checked state`);
+                        }
+                    } else if (inputResult.noInputs) {
+                        const stepResult = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                            const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                            const group = groups[groupIdx];
+                            if (!group) return { ok: false };
+                            const btns = Array.from(group.querySelectorAll('[data-anchor-id="IncrementQuantity"]'));
+                            if (btns.length === 0) return { ok: false };
+                            const lower = (optText || '').toLowerCase();
+                            let target = null;
+                            if (optText) {
+                                target = btns.find(b => {
+                                    const row = b.closest('[data-display="block"]')?.parentElement || b.closest('div');
+                                    return row && (row.textContent || '').toLowerCase().includes(lower);
+                                });
+                            }
+                            if (!target) target = btns[Math.min(optIdx, btns.length - 1)];
+                            if (!target || target.disabled) return { ok: false };
+                            target.click();
+                            return { ok: true };
+                        }, { groupIdx: sel.groupIndex, optText, optIdx });
+                        if (stepResult.ok) {
+                            await delay(400);
+                            console.log(`[DoorDash] Strategy 0b: native stepper button.click() dispatched`);
+                            clicked = true;
+                        }
+                    }
+                } catch (e) {
+                    console.log(`[DoorDash] Strategy 0 error:`, e.message.substring(0, 150));
+                }
+            }
+
             // Strategy 1: Playwright locator click on label scoped to the correct group
             // This uses Playwright's built-in scroll + real pointer events
-            try {
+            if (!clicked) try {
                 const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
                 const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(sel.groupIndex);
                 let label;
