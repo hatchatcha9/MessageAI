@@ -251,6 +251,16 @@
     .add-btn:active { background: var(--accent-2); }
     .add-btn svg { width: 16px; height: 16px; }
     .add-btn.added { background: var(--surface); border: 1px solid var(--accent); color: var(--accent); }
+    .add-btn.pending, .size-btn.pending { background: var(--accent-2); pointer-events: none; }
+    .size-btn.pending { color: var(--accent-ink); border-color: var(--accent-2); }
+    @keyframes tap-spin { to { transform: rotate(360deg); } }
+    .tap-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(0,0,0,0.25);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: tap-spin 0.6s linear infinite;
+    }
 
     #menu-header {
       padding: 8px 12px 2px;
@@ -906,8 +916,14 @@
   // grouped size variant it's that size's own index, NOT the group's.
   async function addItem(realIndex, item, btn) {
     const isSizeBtn = btn.classList.contains('size-btn');
-    const origHTML = isSizeBtn ? btn.innerHTML : null;
+    const origHTML = btn.innerHTML;
+    // Immediate feedback the instant the tap registers — the actual add can take
+    // several seconds (or ~10s if DoorDash needs to open a real options modal), and
+    // with nothing visible in that window a real tap was indistinguishable from a
+    // missed one. Swap to a spinner synchronously, before the network call starts.
     btn.disabled = true;
+    btn.classList.add('pending');
+    btn.innerHTML = '<span class="tap-spinner"></span>';
     try {
       const res = await fetch('/api/food/cart/add', {
         method: 'POST',
@@ -915,7 +931,9 @@
         body: JSON.stringify({ itemIndex: realIndex, item }),
       });
       const data = await res.json();
+      btn.classList.remove('pending');
       if (!res.ok) {
+        btn.innerHTML = origHTML;
         if (data.needsOptions) {
           showOptionsModal(realIndex, item, data.requiredOptions, data.pendingSelections);
         } else {
@@ -930,10 +948,13 @@
         btn.textContent = 'Added ✓';
         setTimeout(() => { btn.innerHTML = origHTML; btn.disabled = false; }, 600);
       } else {
+        btn.innerHTML = origHTML;
         btn.classList.add('added');
         setTimeout(() => { btn.classList.remove('added'); btn.disabled = false; }, 600);
       }
     } catch {
+      btn.classList.remove('pending');
+      btn.innerHTML = origHTML;
       alert('Could not reach the server.');
       btn.disabled = false;
     }
@@ -1072,13 +1093,11 @@
       list.innerHTML = '<div class="empty-state">Your cart is empty. Go back and add something.</div>';
     } else {
       list.innerHTML = cartItems.map(item => {
-        // selectedOptions[0] is normally the item's primary required choice (protein/
-        // flavor/size) — DoorDash's own modal orders that group first — so show it as
-        // the specific item name instead of the generic menu-tile name ("Burritos").
-        // Any remaining selections (sauce, sides, etc.) are the sub-text options line.
+        // Item name is always the primary line; whatever the user picked (size,
+        // flavor, protein, etc.) is the sub-text underneath it.
         const opts = item.selectedOptions || [];
-        const displayName = opts.length > 0 ? opts[0] : item.name;
-        const subLabel = item.label || (opts.length > 1 ? opts.slice(1).join(', ') : '');
+        const displayName = item.name;
+        const subLabel = item.label || opts.join(', ');
         return `
         <div class="cart-row" data-id="${esc(item.id)}">
           <div class="cart-row-info">

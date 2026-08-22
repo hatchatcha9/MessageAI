@@ -3098,10 +3098,15 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
 
         // Wait for searchWithFilterFacetFeed (actual query-specific results) to fire.
         // externalStores fires at ~3s with general nearby stores regardless of query —
-        // don't rely on that. Wait for the real search results (up to 8s total).
+        // don't rely on that. Wait for the real search results, but not too long — live
+        // testing across several real searches this session showed this consistently
+        // never fires (searchQueryFired stays false every time, full wait exhausted) and
+        // DOM extraction is what actually produces the restaurant list regardless (see
+        // "using DOM extraction for a fuller, self-consistent list" below) — so a long
+        // wait here was pure dead time in every observed case, not a real tradeoff.
         {
             const waitStart = Date.now();
-            while (!_capturedSearchQueryFired && Date.now() - waitStart < 8000) {
+            while (!_capturedSearchQueryFired && Date.now() - waitStart < 3000) {
                 await delay(500);
             }
             console.log(`[DoorDash] Waited ${Date.now() - waitStart}ms: ${_capturedRestaurants.length} captured (searchQueryFired=${_capturedSearchQueryFired})`);
@@ -3121,6 +3126,12 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
         // including restaurant search results and featured menu items.
         // Wrapped in Promise.race: page.evaluate can hang if Playwright has a pending navigation
         // (e.g. DoorDash SPA does pushState after domcontentloaded). Skip gracefully on timeout.
+        // This step's own output only feeds the best-effort featured-item preview cache
+        // (_capturedStoreMenus) below — the actual restaurant list always comes from DOM
+        // extraction regardless of whether this succeeds. Live testing across several real
+        // searches this session showed the evaluate call consistently hangs the full
+        // timeout (the pending-navigation race the comment describes, happening every
+        // time), so a long timeout here was pure dead time, not a real tradeoff.
         try {
             const apolloResult = await Promise.race([
                 page.evaluate(() => {
@@ -3143,9 +3154,9 @@ async function searchRestaurantsNearAddress(credentials, address, query = '') {
                     };
                 }),
                 new Promise((resolve) => setTimeout(() => {
-                    console.log('[DoorDash] Apollo cache evaluate timed out (10s) — skipping');
+                    console.log('[DoorDash] Apollo cache evaluate timed out (3s) — skipping');
                     resolve({ found: false });
-                }, 10000))
+                }, 3000))
             ]);
 
             if (apolloResult.found) {
