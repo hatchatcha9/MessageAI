@@ -78,12 +78,24 @@
     #view-shutter { background: #0b0f0a; }
     #viewfinder {
       flex: 1;
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
       color: var(--muted-2);
+      overflow: hidden;
+      background: #000;
     }
     #viewfinder svg { width: 96px; height: 96px; opacity: 0.3; }
+    #viewfinder-stream {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: none;
+    }
+    #viewfinder-stream.visible { display: block; }
 
     #shutter-row {
       position: relative;
@@ -189,10 +201,11 @@
   <!-- Shutter -->
   <div class="view active" id="view-shutter">
     <div id="viewfinder">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <svg id="viewfinder-placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 8a2 2 0 0 1 2-2h1.9l1.1-1.8a2 2 0 0 1 1.7-1h4.6a2 2 0 0 1 1.7 1L17 6h1.9a2 2 0 0 1 2 2v10.2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z"></path>
         <circle cx="12" cy="13.2" r="3.6"></circle>
       </svg>
+      <img id="viewfinder-stream" alt="">
     </div>
     <div id="shutter-row">
       <div id="last-thumb"><img id="last-thumb-img" src="" alt=""></div>
@@ -215,7 +228,42 @@
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     document.getElementById('back-btn-label').textContent = id === 'view-shutter' ? 'Screen' : 'Back';
+    // The camera hardware only allows one process to hold it open — don't keep the live
+    // stream connection open (and rpicam-vid running on the Pi) while looking at the
+    // gallery instead of the viewfinder.
+    if (id === 'view-shutter') startViewfinder(); else stopViewfinder();
   }
+
+  // ── Live viewfinder ──
+  let _viewfinderRetryTimer = null;
+  function startViewfinder() {
+    clearTimeout(_viewfinderRetryTimer);
+    const img = document.getElementById('viewfinder-stream');
+    img.src = '/api/camera/stream?t=' + Date.now();
+  }
+  function stopViewfinder() {
+    clearTimeout(_viewfinderRetryTimer);
+    const img = document.getElementById('viewfinder-stream');
+    img.classList.remove('visible');
+    img.removeAttribute('src'); // plain src="" can make some browsers try to load the current page as an image
+  }
+  (function initViewfinder() {
+    const img = document.getElementById('viewfinder-stream');
+    const placeholder = document.getElementById('viewfinder-placeholder');
+    img.addEventListener('load', () => {
+      img.classList.add('visible');
+      placeholder.style.display = 'none';
+    });
+    img.addEventListener('error', () => {
+      img.classList.remove('visible');
+      placeholder.style.display = '';
+      // Camera briefly busy (e.g. right after a still capture) or momentarily
+      // unavailable — retry rather than leaving the viewfinder dead. Guarded on
+      // hasAttribute so an intentional stopViewfinder() (which removes the attribute
+      // entirely) doesn't schedule a pointless retry for its own resulting error.
+      if (img.hasAttribute('src')) _viewfinderRetryTimer = setTimeout(startViewfinder, 1500);
+    });
+  })();
 
   document.getElementById('back-btn').addEventListener('click', () => {
     const active = document.querySelector('.view.active').id;
@@ -277,6 +325,11 @@
     } finally {
       _capturing = false;
       btn.disabled = false;
+      // The still capture stopped the live stream server-side (camera can only be held
+      // open by one process at a time) — reconnect now that it's free again, rather than
+      // relying on the <img>'s own error event, which doesn't reliably fire for every
+      // browser on a cleanly-ended multipart stream.
+      startViewfinder();
     }
   });
 
@@ -344,6 +397,8 @@
       if (data.photos && data.photos.length > 0) updateLastThumb(data.photos[0].url);
     } catch (e) {}
   })();
+
+  startViewfinder();
 </script>
 </body>
 </html>

@@ -10,7 +10,7 @@
  *   const desc = await camera.describeWith(prompt); // custom prompt
  */
 
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -27,6 +27,73 @@ const CAPTURE_PATH = path.join(os.tmpdir(), 'frog_capture.jpg');
 const PHOTOS_DIR = path.join(__dirname, '..', 'public', 'camera-photos');
 if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 
+// ---------- Live preview stream ----------
+// The camera hardware only allows one process to hold it open at a time, so a still
+// capture (capture()/capturePhoto()) must stop any running live stream first, and only
+// one live-view viewer is supported at once — fine for this single-kiosk device.
+let _streamProc = null;
+
+function stopStream() {
+    if (_streamProc) {
+        try { _streamProc.kill('SIGTERM'); } catch {}
+        _streamProc = null;
+    }
+}
+
+// Pipes a live MJPEG feed from rpicam-vid into an Express response as
+// multipart/x-mixed-replace, which a plain <img> tag can display natively with no
+// client-side JS beyond setting src. rpicam-vid's own `--codec mjpeg` output is just a
+// bare, undelimited sequence of JPEG frames back to back — this function does the
+// frame-boundary splitting itself (JPEG SOI marker 0xFFD8 → EOI marker 0xFFD9) and wraps
+// each complete frame in the multipart boundary format the browser expects.
+function attachStream(res) {
+    if (!IS_PI) { res.status(503).end(); return; }
+    stopStream();
+
+    const boundary = 'frogcamstream';
+    res.writeHead(200, {
+        'Content-Type': `multipart/x-mixed-replace; boundary=${boundary}`,
+        'Cache-Control': 'no-cache, private',
+        'Pragma': 'no-cache',
+        'Connection': 'close',
+    });
+
+    const proc = spawn('rpicam-vid', [
+        '--codec', 'mjpeg',
+        '--width', '640',
+        '--height', '480',
+        '--framerate', '12',
+        '--timeout', '0', // run until killed
+        '--nopreview',
+        '--inline',
+        '-o', '-',
+    ]);
+    _streamProc = proc;
+
+    let buf = Buffer.alloc(0);
+    proc.stdout.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        for (;;) {
+            const start = buf.indexOf(Buffer.from([0xff, 0xd8]));
+            if (start === -1) { buf = Buffer.alloc(0); break; }
+            const end = buf.indexOf(Buffer.from([0xff, 0xd9]), start + 2);
+            if (end === -1) {
+                if (start > 0) buf = buf.slice(start); // drop leading garbage, keep partial frame
+                break;
+            }
+            const frame = buf.slice(start, end + 2);
+            buf = buf.slice(end + 2);
+            try {
+                res.write(`--${boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`);
+                res.write(frame);
+                res.write('\r\n');
+            } catch (e) { /* client disconnected — req.on('close') in server.js handles cleanup */ }
+        }
+    });
+    proc.on('error', () => { if (_streamProc === proc) _streamProc = null; try { res.end(); } catch {} });
+    proc.on('exit', () => { if (_streamProc === proc) _streamProc = null; try { res.end(); } catch {} });
+}
+
 // ---------- Capture ----------
 
 function capture() {
@@ -35,6 +102,7 @@ function capture() {
             reject(new Error('No camera hardware detected (not running on Pi)'));
             return;
         }
+        stopStream(); // free the camera device if a live-preview stream is running
         execFile('rpicam-still', [
             '--output', CAPTURE_PATH,
             '--width',  '1280',
@@ -106,6 +174,7 @@ function capturePhoto() {
             reject(new Error('No camera hardware detected (not running on Pi)'));
             return;
         }
+        stopStream(); // free the camera device if a live-preview stream is running
         const filename = `photo-${Date.now()}.jpg`;
         const outPath = path.join(PHOTOS_DIR, filename);
         execFile('rpicam-still', [
@@ -135,4 +204,4 @@ function listPhotos() {
         .sort((a, b) => b.timestamp - a.timestamp);
 }
 
-module.exports = { describe, describeWith, capture, capturePhoto, listPhotos, IS_PI };
+module.exports = { describe, describeWith, capture, capturePhoto, listPhotos, attachStream, stopStream, IS_PI };

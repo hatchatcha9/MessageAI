@@ -3358,6 +3358,15 @@ app.get('/api/camera/photos', (req, res) => {
     res.json({ photos: camera.listPhotos() });
 });
 
+// Live viewfinder feed for camera.html — see camera.js's attachStream() for how a plain
+// <img> tag ends up displaying this. Stopping on disconnect matters: an abandoned
+// connection (tab closed, navigated away) would otherwise leave rpicam-vid running
+// forever holding the camera device, blocking any future capture or stream attempt.
+app.get('/api/camera/stream', (req, res) => {
+    camera.attachStream(res);
+    req.on('close', () => camera.stopStream());
+});
+
 // DoorDash account — settings.html's on-screen-keyboard alternative to the voice
 // [SETUP_DOORDASH:] command. Unlike that command (which only stores credentials for
 // later), this actually drives doordash.js's login() to authenticate the browser's
