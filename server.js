@@ -283,9 +283,10 @@ NEWS - When user wants headlines:
     [NEWS]
     [NEWS: technology] or [NEWS: sports] or [NEWS: business] for category news
 
-CAMERA - When user asks what the camera sees, to take a photo, or describe surroundings:
+CAMERA - When user asks what the camera sees, or to take a photo:
     [CAMERA]
     Examples: "what do you see", "look around", "what's in front of you", "take a picture"
+    This takes a photo and shows it on the screen — you do NOT describe what's in it (you can't see the image), just acknowledge briefly, e.g. "Here you go" or "Snapping a photo now."
 
 CALENDAR - When user asks about their schedule or events:
     [CALENDAR]           → today's events
@@ -2206,12 +2207,19 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
         actions.push({ type: 'wiki', topic });
     }
 
-    // Camera
+    // Camera — takes a real photo and flashes it on the kiosk screen instead of
+    // describing it (Claude never sees the image here, describe()/describeWith() above
+    // are kept for that but are no longer wired into this voice command path by request).
     if (response.includes('[CAMERA]')) {
         cleanResponse = cleanResponse.replace('[CAMERA]', '').trim();
-        const cameraResult = await camera.describe(anthropic);
-        additionalContext = `\n\n${cameraResult}`;
-        actions.push({ type: 'camera' });
+        try {
+            const photo = await camera.capturePhoto();
+            broadcastScreenState('photo', { photoUrl: photo.url, durationMs: 3000 });
+            actions.push({ type: 'camera', photo: photo.url });
+        } catch (err) {
+            console.error('[Camera] Capture error:', err.message);
+            additionalContext = `\n\n(Couldn't take a photo — camera error.)`;
+        }
     }
 
     // Calendar
@@ -3331,6 +3339,25 @@ app.post('/api/food/checkout', async (req, res) => {
     }
 });
 
+// Camera app (camera.html) — shutter button + gallery. Broadcasts the same 'photo'
+// screen state the voice [CAMERA] command uses, so a manual capture also flashes on
+// the main kiosk screen if it happens to be showing (harmless no-op if it isn't).
+app.post('/api/camera/capture', async (req, res) => {
+    if (!camera.IS_PI) return res.status(503).json({ error: 'No camera hardware detected on this device.' });
+    try {
+        const photo = await camera.capturePhoto();
+        broadcastScreenState('photo', { photoUrl: photo.url, durationMs: 3000 });
+        res.json({ success: true, photo });
+    } catch (err) {
+        console.error('[Camera] /api/camera/capture error:', err.message);
+        res.status(502).json({ error: 'Could not capture photo.' });
+    }
+});
+
+app.get('/api/camera/photos', (req, res) => {
+    res.json({ photos: camera.listPhotos() });
+});
+
 // DoorDash account — settings.html's on-screen-keyboard alternative to the voice
 // [SETUP_DOORDASH:] command. Unlike that command (which only stores credentials for
 // later), this actually drives doordash.js's login() to authenticate the browser's
@@ -4010,7 +4037,14 @@ app.post('/api/voice', async (req, res) => {
     try {
         const { response, actions } = await handleMessage(PI_DEVICE_ID, message, true);
         console.log(`[Voice] Response: ${response.substring(0, 100)}...`);
-        broadcastScreenState('speaking', { userText: message, aiText: response });
+        // This route never actually speaks the response through voice_loop.py (no real
+        // TTS playback happens for a chat.html/API request) — broadcasting 'speaking'
+        // here left the kiosk screen showing a permanent speaking animation with no
+        // driver to ever clear it, since only a real TTS finish (voice_loop.py's own
+        // set_screen_state('idle', ...) call) normally does that. Go straight to 'idle'
+        // (still carrying aiText, same as voice_loop.py does at the real end of a turn)
+        // so the kiosk reflects the exchange without getting stuck.
+        broadcastScreenState('idle', { userText: message, aiText: response });
         res.json({ response, actions });
     } catch (error) {
         console.error('[Voice] Error:', error);

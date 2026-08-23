@@ -21,6 +21,12 @@ const IS_PI = process.platform === 'linux' && fs.existsSync('/dev/video0') ||
 
 const CAPTURE_PATH = path.join(os.tmpdir(), 'frog_capture.jpg');
 
+// Photos taken via capturePhoto() (voice "[CAMERA]" command or the camera app's shutter
+// button) are kept permanently here for the gallery — unlike capture()/describeWith()'s
+// CAPTURE_PATH above, which is a scratch file deleted right after each Vision API call.
+const PHOTOS_DIR = path.join(__dirname, '..', 'public', 'camera-photos');
+if (!fs.existsSync(PHOTOS_DIR)) fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+
 // ---------- Capture ----------
 
 function capture() {
@@ -92,4 +98,41 @@ async function describe(anthropic) {
     return describeWith(anthropic, 'Describe what you see in 1-2 sentences of natural spoken English. Be specific about objects, people, and setting.');
 }
 
-module.exports = { describe, describeWith, capture, IS_PI };
+// ---------- Permanent capture (voice "[CAMERA]" command + camera app shutter) ----------
+
+function capturePhoto() {
+    return new Promise((resolve, reject) => {
+        if (!IS_PI) {
+            reject(new Error('No camera hardware detected (not running on Pi)'));
+            return;
+        }
+        const filename = `photo-${Date.now()}.jpg`;
+        const outPath = path.join(PHOTOS_DIR, filename);
+        execFile('rpicam-still', [
+            '--output', outPath,
+            '--width', '1280',
+            '--height', '720',
+            '--timeout', '800',
+            '--nopreview',
+            '--encoding', 'jpg',
+            '-q', '85',
+        ], { timeout: 12000 }, (err) => {
+            if (err) { reject(err); return; }
+            resolve({ filename, url: `/camera-photos/${filename}`, timestamp: Date.now() });
+        });
+    });
+}
+
+function listPhotos() {
+    if (!fs.existsSync(PHOTOS_DIR)) return [];
+    return fs.readdirSync(PHOTOS_DIR)
+        .filter(f => /^photo-\d+\.jpg$/.test(f))
+        .map(f => ({
+            filename: f,
+            url: `/camera-photos/${f}`,
+            timestamp: parseInt(f.slice('photo-'.length, -'.jpg'.length), 10) || 0,
+        }))
+        .sort((a, b) => b.timestamp - a.timestamp);
+}
+
+module.exports = { describe, describeWith, capture, capturePhoto, listPhotos, IS_PI };

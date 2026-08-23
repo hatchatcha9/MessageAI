@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=480, initial-scale=1.0">
+  <title>frog — Camera</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --ground: #10160f;
+      --surface: #1a2318;
+      --hairline: #2a3524;
+      --ink: #eef2e6;
+      --muted: #7c8a72;
+      --muted-2: #55604c;
+      --accent: #9ee85a;
+      --accent-ink: #16220c;
+      --accent-2: #e8b64a;
+    }
+
+    body {
+      width: 480px;
+      height: 320px;
+      background: var(--ground);
+      color: var(--ink);
+      font-family: -apple-system, 'Segoe UI', 'Noto Sans', sans-serif;
+      font-size: 14px;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    #top-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      padding: 0 14px;
+      background: #151d13;
+      border-bottom: 1px solid var(--hairline);
+      flex-shrink: 0;
+    }
+
+    #back-btn, #gallery-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 12px 8px;
+      min-height: 44px;
+      -webkit-tap-highlight-color: transparent;
+      background: none;
+      border: none;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    #back-btn:active, #gallery-btn:active { opacity: 0.6; }
+    #back-btn svg, #gallery-btn svg { width: 18px; height: 18px; }
+
+    #top-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    #app { height: calc(100% - 48px); }
+    .view { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+    .view.active { display: flex; }
+
+    /* ── Shutter view ── */
+    #view-shutter { background: #0b0f0a; }
+    #viewfinder {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted-2);
+    }
+    #viewfinder svg { width: 96px; height: 96px; opacity: 0.3; }
+
+    #shutter-row {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px 0 22px;
+      flex-shrink: 0;
+    }
+    #shutter-btn {
+      width: 62px;
+      height: 62px;
+      border-radius: 50%;
+      background: var(--ink);
+      border: 4px solid var(--hairline);
+      box-shadow: 0 0 0 2px var(--ink);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #shutter-btn:active { transform: scale(0.9); }
+    #shutter-btn:disabled { opacity: 0.5; }
+
+    #last-thumb {
+      position: absolute;
+      left: 24px;
+      width: 42px;
+      height: 42px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      border: 2px solid var(--hairline);
+      cursor: pointer;
+    }
+    #last-thumb img { width: 100%; height: 100%; object-fit: cover; display: none; }
+
+    /* ── Gallery view ── */
+    #gallery-grid {
+      flex: 1;
+      overflow-y: auto;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding: 10px 12px;
+      align-content: start;
+    }
+    .gallery-item {
+      aspect-ratio: 16 / 9;
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      cursor: pointer;
+    }
+    .gallery-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+    #gallery-empty {
+      flex: 1;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: var(--muted);
+      padding: 0 40px;
+      line-height: 1.5;
+    }
+
+    /* ── Full-screen photo viewer (capture review + gallery tap-in) ── */
+    #photo-view {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: #000;
+      align-items: center;
+      justify-content: center;
+    }
+    #photo-view.visible { display: flex; }
+    #photo-view img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  </style>
+</head>
+<body>
+
+<div id="top-bar">
+  <button id="back-btn">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="10,3 5,8 10,13"></polyline>
+    </svg>
+    <span id="back-btn-label">Screen</span>
+  </button>
+  <div id="top-title">Camera</div>
+  <button id="gallery-btn" title="Gallery">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="2" width="5" height="5" rx="1"></rect>
+      <rect x="9" y="2" width="5" height="5" rx="1"></rect>
+      <rect x="2" y="9" width="5" height="5" rx="1"></rect>
+      <rect x="9" y="9" width="5" height="5" rx="1"></rect>
+    </svg>
+  </button>
+</div>
+
+<div id="app">
+
+  <!-- Shutter -->
+  <div class="view active" id="view-shutter">
+    <div id="viewfinder">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 8a2 2 0 0 1 2-2h1.9l1.1-1.8a2 2 0 0 1 1.7-1h4.6a2 2 0 0 1 1.7 1L17 6h1.9a2 2 0 0 1 2 2v10.2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z"></path>
+        <circle cx="12" cy="13.2" r="3.6"></circle>
+      </svg>
+    </div>
+    <div id="shutter-row">
+      <div id="last-thumb"><img id="last-thumb-img" src="" alt=""></div>
+      <button id="shutter-btn" title="Take photo"></button>
+    </div>
+  </div>
+
+  <!-- Gallery -->
+  <div class="view" id="view-gallery">
+    <div id="gallery-grid"></div>
+    <div id="gallery-empty">No photos yet — tap the shutter button to take one.</div>
+  </div>
+
+</div>
+
+<div id="photo-view"><img id="photo-view-img" src="" alt="Photo"></div>
+
+<script>
+  function showView(id) {
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    document.getElementById('back-btn-label').textContent = id === 'view-shutter' ? 'Screen' : 'Back';
+  }
+
+  document.getElementById('back-btn').addEventListener('click', () => {
+    const active = document.querySelector('.view.active').id;
+    if (active === 'view-gallery') {
+      showView('view-shutter');
+    } else {
+      window.location.href = '/screen.html';
+    }
+  });
+
+  document.getElementById('gallery-btn').addEventListener('click', () => {
+    loadGallery();
+    showView('view-gallery');
+  });
+
+  function updateLastThumb(url) {
+    const img = document.getElementById('last-thumb-img');
+    img.src = url;
+    img.style.display = 'block';
+  }
+
+  function openPhotoView(url, autoCloseMs) {
+    const el = document.getElementById('photo-view');
+    document.getElementById('photo-view-img').src = url;
+    el.classList.add('visible');
+    if (autoCloseMs) {
+      clearTimeout(el._closeTimer);
+      el._closeTimer = setTimeout(() => el.classList.remove('visible'), autoCloseMs);
+    }
+  }
+
+  document.getElementById('photo-view').addEventListener('click', function () {
+    clearTimeout(this._closeTimer);
+    this.classList.remove('visible');
+  });
+
+  document.getElementById('last-thumb').addEventListener('click', () => {
+    const url = document.getElementById('last-thumb-img').src;
+    if (url) openPhotoView(url, 0);
+  });
+
+  let _capturing = false;
+  document.getElementById('shutter-btn').addEventListener('click', async () => {
+    if (_capturing) return;
+    _capturing = true;
+    const btn = document.getElementById('shutter-btn');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/camera/capture', { method: 'POST' });
+      const data = await res.json();
+      if (data.success && data.photo) {
+        openPhotoView(data.photo.url, 2500);
+        updateLastThumb(data.photo.url);
+      } else {
+        alert(data.error || 'Could not take photo.');
+      }
+    } catch (e) {
+      alert('Could not reach the server.');
+    } finally {
+      _capturing = false;
+      btn.disabled = false;
+    }
+  });
+
+  async function loadGallery() {
+    const grid = document.getElementById('gallery-grid');
+    const empty = document.getElementById('gallery-empty');
+    try {
+      const res = await fetch('/api/camera/photos');
+      const data = await res.json();
+      const photos = data.photos || [];
+      grid.innerHTML = '';
+      grid.style.display = photos.length > 0 ? 'grid' : 'none';
+      empty.style.display = photos.length > 0 ? 'none' : 'flex';
+      photos.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'gallery-item';
+        const img = document.createElement('img');
+        img.src = p.url;
+        img.loading = 'lazy';
+        item.appendChild(img);
+        item.addEventListener('click', () => openPhotoView(p.url, 0));
+        grid.appendChild(item);
+      });
+    } catch (e) {}
+  }
+
+  // Drag-to-scroll for the gallery grid — same pattern as food.html/calendar.html:
+  // this hardware's resistive digitizer reports as a plain mouse with no touch events,
+  // so native overflow scrolling does nothing and this has to be hand-rolled.
+  function enableDragScroll(el) {
+    const DRAG_THRESHOLD = 18; // px — see food.html for why this value specifically
+    let dragging = false, startY = 0, startScroll = 0, moved = false;
+
+    el.addEventListener('pointerdown', e => {
+      dragging = true;
+      moved = false;
+      startY = e.clientY;
+      startScroll = el.scrollTop;
+    });
+    el.addEventListener('pointermove', e => {
+      if (!dragging) return;
+      const dy = e.clientY - startY;
+      if (!moved) {
+        if (Math.abs(dy) <= DRAG_THRESHOLD) return;
+        moved = true;
+      }
+      el.scrollTop = startScroll - dy;
+    });
+    const stopDrag = () => { dragging = false; };
+    el.addEventListener('pointerup', stopDrag);
+    el.addEventListener('pointercancel', stopDrag);
+    el.addEventListener('pointerleave', stopDrag);
+
+    el.addEventListener('click', e => {
+      if (moved) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
+  enableDragScroll(document.getElementById('gallery-grid'));
+
+  // Populate the last-photo thumbnail on load without opening the gallery view.
+  (async function init() {
+    try {
+      const res = await fetch('/api/camera/photos');
+      const data = await res.json();
+      if (data.photos && data.photos.length > 0) updateLastThumb(data.photos[0].url);
+    } catch (e) {}
+  })();
+</script>
+</body>
+</html>

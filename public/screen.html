@@ -416,6 +416,23 @@
 
     body.speaking #status-dot   { background: var(--water); box-shadow: 0 0 6px var(--water); }
     body.speaking #status-badge  { color: var(--water); background: rgba(95,201,209,0.12); }
+
+    /* ── Photo flash overlay (voice "[CAMERA]" command + manual capture) ── */
+    #photo-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 500;
+      background: #000;
+      align-items: center;
+      justify-content: center;
+    }
+    #photo-overlay.visible { display: flex; }
+    #photo-overlay img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
   </style>
 </head>
 <body class="idle">
@@ -528,6 +545,13 @@
           <path d="M3 1.5v5a1.5 1.5 0 0 0 1.5 1.5V14.5M3 1.5v3.5M5 1.5v3.5M3 5h2M9.5 1.5S8 3 8 5.5 9.5 9 9.5 9V14.5"></path>
         </svg>
       </a>
+      <!-- Camera -->
+      <a class="footer-nav-btn" href="/camera.html" title="Camera">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 5.5a1 1 0 0 1 1-1h1.3l.7-1.2a1 1 0 0 1 .86-.5h4.3a1 1 0 0 1 .86.5l.7 1.2H13a1 1 0 0 1 1 1v6.8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5.5z"></path>
+          <circle cx="8" cy="8.8" r="2.4"></circle>
+        </svg>
+      </a>
       <!-- Settings -->
       <a class="footer-nav-btn" href="/settings.html" title="Settings">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -540,6 +564,8 @@
   </div>
 
 </div>
+
+<div id="photo-overlay"><img id="photo-overlay-img" src="" alt="Captured photo"></div>
 
 <script>
   // ── Clock ──
@@ -615,6 +641,23 @@
 
   setState('idle');
 
+  // ── Photo flash overlay ──
+  // A separate overlay layer rather than a 5th stateMap view — it needs to flash on top
+  // of whatever's currently showing (e.g. mid-"speaking" after "take a picture, what's
+  // for dinner") and then auto-revert to it, rather than replacing it like the other
+  // states do.
+  let _photoOverlayTimer = null;
+  function showPhotoOverlay(photoUrl, durationMs) {
+    if (!photoUrl) return;
+    const overlay = document.getElementById('photo-overlay');
+    document.getElementById('photo-overlay-img').src = photoUrl;
+    overlay.classList.add('visible');
+    if (_photoOverlayTimer) clearTimeout(_photoOverlayTimer);
+    _photoOverlayTimer = setTimeout(() => {
+      overlay.classList.remove('visible');
+    }, durationMs || 3000);
+  }
+
   // ── SSE connection ──
   const dot = document.getElementById('connection-dot');
 
@@ -629,6 +672,7 @@
       try {
         const msg = JSON.parse(e.data);
         if (msg.state === 'rms') { updateWaveform(msg.rms); return; }
+        if (msg.state === 'photo') { showPhotoOverlay(msg.photoUrl, msg.durationMs); return; }
         setState(msg.state, msg);
       } catch {}
     };
