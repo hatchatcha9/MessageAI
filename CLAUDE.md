@@ -194,6 +194,14 @@ Deliberately did NOT add the "+$ price suffix = skip" heuristic considered in th
 2. Re-verify the search-speed timeout cuts from 2026-08-22 with a genuinely fresh uncached search (still never actually measured before/after, per that session's notes).
 3. Everything else from the standing backlog: GPS wiring, review-text-as-menu-item scraping (Wingstop/Costa Vida), physical-tap 18px-threshold confirmation, Wildside Bowls modal issue if it resurfaces, food.html multi-select stepper UI.
 
+## Session 2026-08-24 continued — voice DoorDash command surface tested (SEARCH/SELECT work), new ADD_ITEM_NUM name-truncation bug found (NOT fixed)
+
+Tested the real voice command path (`/api/voice`, not food.html) for SEARCH → SELECT → ADD_ITEM_NUM — this had never been verified beyond SHOW_CART since the 2026-07-22 `doordash`/`doordashUI` null-alias fix. SEARCH and SELECT both work correctly live (confirmed against "tacos" search → Taco Time menu).
+
+**New bug found, NOT fixed:** ADD_ITEM_NUM failed for Taco Time's "Tacos" item. Root cause: `extractMenuItems()` (doordash.js ~line 3980-3988) picks only the FIRST non-calorie line of an item card's innerText as the name, then `break`s — so a card whose real name spans two DOM lines (e.g. "Tacos -" then a separate line with the actual descriptor) gets truncated. Confirmed live: cached menu entry is literally `{"name":"Tacos -","price":3.79}`. The later click-by-name search (`addItemByIndex`'s Playwright locator + anchored regex, ~line 5606-5641) then also fails to find a match on the real page and the add fails. Also surfaces a confusing voice UX bug: the response text says "Added Tacos to your cart" (Claude's own paraphrase, generated before it knows the real result) immediately followed by "Couldn't add Tacos -. Please try again." (the real error) — self-contradictory to a user. No real cart mutation occurred (verified via `/api/food/cart` — empty).
+
+**Not fixed this session** — needs a fresh DOM dump of Taco Time's actual item-card HTML to see what's really between "Tacos -" and the price/description (same kind of forensics past Wingstop click-strategy bugs needed), not a guess-and-check fix. Next session: dump the card HTML (search "tacos" → select Taco Time id 29280516 → look at item index 7's live DOM), see what's actually on the line after "Tacos -", then fix `extractMenuItems()`'s single-line name-picking to either join adjacent short lines or handle a trailing " -" as a continuation marker rather than a terminator.
+
 ## Session 2026-08-23 (IN PROGRESS, paused mid-investigation — resume here)
 
 **Goal:** Fix `autoSelectAllRequiredOptions()`'s retry-loop bug (confirmed 2026-08-22 as the real cause of "can't pick options" add failures — it wanders into an optional side/upsell section instead of reaching genuinely-required groups).
