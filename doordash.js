@@ -6853,15 +6853,15 @@ async function autoSelectAllRequiredOptions() {
             return 0;
         }).catch(() => 0);
 
-        const numGroups = await page.evaluate(() => {
-            const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
-            return modal ? modal.querySelectorAll('[role="radiogroup"], [role="group"]').length : 0;
-        });
-
-        let remaining = await getCount();
-        console.log(`[DoorDash] AutoSelect: ${remaining} required selections, ${numGroups} groups in modal`);
-
-        // Diagnostic: log structure of each group
+        // Diagnostic + optional/recommended classification, computed in ONE evaluate() call
+        // against ONE DOM snapshot. This matters: a separate call (e.g. calling the standalone
+        // extractRequiredOptions() function here) queries modal.querySelectorAll(...) again at a
+        // slightly later moment, and if the modal's group list is virtualized/lazily rendered,
+        // that second query can return groups in a different order/count — silently pointing
+        // "group N" at a completely different section than what THIS function's own click loop
+        // means by "group N". That exact cross-call index mismatch is a previously-confirmed real
+        // bug class in this codebase (see the 2026-08-21 Wingstop wrong-order fix); reusing this
+        // one snapshot for both classification and the click loop below avoids it entirely.
         const groupDiag = await page.evaluate(() => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return [];
@@ -6870,17 +6870,42 @@ async function autoSelectAllRequiredOptions() {
                 const labelEl = labelId ? document.getElementById(labelId) : null;
                 const heading = g.querySelector('h1,h2,h3,h4,legend');
                 const name = (labelEl?.textContent || heading?.textContent || g.getAttribute('aria-label') || '').trim().substring(0, 40);
+                // Optional/recommended detection: check the group's own label/heading, its
+                // previous sibling (common "section title above the group" pattern), and a
+                // couple of ancestor levels' text — same signal extractRequiredOptions() uses
+                // to exclude these sections, just gathered here instead of via a second query.
+                let contextText = (labelEl?.textContent || heading?.parentElement?.textContent || heading?.textContent || '').toLowerCase();
+                if (!contextText) contextText = (g.previousElementSibling?.textContent || '').toLowerCase();
+                let anc = g.parentElement;
+                for (let d = 0; d < 2 && anc; d++) {
+                    contextText += ' ' + (anc.textContent || '').toLowerCase().substring(0, 200);
+                    anc = anc.parentElement;
+                }
+                const isOptional = contextText.includes('optional') || contextText.includes('recommended');
+                // A group already showing a checked/selected option is already satisfied —
+                // the click loop below must never touch it. It has no effect on `remaining`
+                // either way (a radiogroup always has exactly one selection), so a naive
+                // "click the first option" pass on an already-satisfied group is invisible in
+                // the count feedback while silently swapping the real selection (e.g. the
+                // user's deliberately-chosen "10 Classic Wings" getting replaced by whatever
+                // renders first, "10 Boneless Wings") — confirmed live 2026-08-24.
+                const alreadySatisfied = !!g.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked, [role="radio"][aria-checked="true"], [aria-selected="true"]');
                 return {
                     i,
                     role: g.getAttribute('role'),
                     name,
+                    isOptional,
+                    alreadySatisfied,
                     labels: g.querySelectorAll('label').length,
                     roleRadios: g.querySelectorAll('[role="radio"]').length,
                     inputs: g.querySelectorAll('input[type="radio"],input[type="checkbox"]').length
                 };
             });
         }).catch(() => []);
-        groupDiag.forEach(g => console.log(`[DoorDash] Group[${g.i}] role=${g.role} name="${g.name}" labels=${g.labels} roleRadios=${g.roleRadios} inputs=${g.inputs}`));
+        const numGroups = groupDiag.length;
+        let remaining = await getCount();
+        console.log(`[DoorDash] AutoSelect: ${remaining} required selections, ${numGroups} groups in modal`);
+        groupDiag.forEach(g => console.log(`[DoorDash] Group[${g.i}] role=${g.role} name="${g.name}"${g.isOptional ? ' (optional/recommended)' : ''}${g.alreadySatisfied ? ' (already satisfied)' : ''} labels=${g.labels} roleRadios=${g.roleRadios} inputs=${g.inputs}`));
 
         if (remaining === 0) {
             // Button already shows 0 required — but that can mean either "nothing
@@ -6899,10 +6924,32 @@ async function autoSelectAllRequiredOptions() {
             return { remaining: 0, selected: preSelected };
         }
 
+        // Determine visit order: non-optional/non-recommended groups first (using the
+        // isOptional flag from groupDiag above — same snapshot, so indices are guaranteed to
+        // mean the same group in both places), THEN the optional/recommended ones as a last
+        // resort. Without this, blind gIdx-order iteration can wander into an optional section
+        // (e.g. Wingstop's "Add a Side → Seasoned Fries", which swaps the whole modal into a
+        // sub-view) before ever reaching the actually-required groups later in the modal — and
+        // since every retry in addItemByIndex() calls this function fresh from gIdx=0, it
+        // re-enters that same optional sub-view every time instead of making progress. This was
+        // the confirmed root cause of "can't pick options" add failures (2026-08-22 session).
+        const touchable = groupDiag.filter(g => !g.alreadySatisfied);
+        const skippedSatisfied = groupDiag.filter(g => g.alreadySatisfied).map(g => g.i);
+        const priorityIndices = touchable.filter(g => !g.isOptional).map(g => g.i);
+        const fallbackIndices = touchable.filter(g => g.isOptional).map(g => g.i);
+        const visitOrder = [...priorityIndices, ...fallbackIndices];
+        if (priorityIndices.length > 0 && fallbackIndices.length > 0) {
+            console.log(`[DoorDash] AutoSelect: trying non-optional groups [${priorityIndices.join(', ')}] before optional/recommended [${fallbackIndices.join(', ')}]`);
+        }
+        if (skippedSatisfied.length > 0) {
+            console.log(`[DoorDash] AutoSelect: never touching already-satisfied groups [${skippedSatisfied.join(', ')}]`);
+        }
+
         const modalLoc = page.locator('[role="dialog"], [aria-modal="true"]').first();
         const selected = [];
 
-        for (let gIdx = 0; gIdx < numGroups && remaining > 0; gIdx++) {
+        for (const gIdx of visitOrder) {
+            if (remaining <= 0) break;
             const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(gIdx);
 
             // Get clickable target: prefer label, then [role="radio"], then stepper button, skip if none
@@ -6999,8 +7046,21 @@ async function autoSelectAllRequiredOptions() {
 
             if (!clickOk) continue;
 
+            // Poll for the count to actually change instead of trusting a single fixed-delay
+            // read: a slow React re-render can still be mid-flight at the old 500ms mark,
+            // which misattributes the credit to whichever group happens to be checked NEXT
+            // (confirmed live 2026-08-24 — "Seasoned Fries" got credited with resolving the
+            // real requirement, which was almost certainly still catching up from an earlier
+            // group's click). Stop as soon as the count changes; otherwise give up after the
+            // same ~1.5s total the old single-shot version implicitly assumed was enough.
             await delay(500);
-            const newCount = await getCount();
+            let newCount = await getCount();
+            let pollAttempts = 0;
+            while (newCount === remaining && pollAttempts < 2) {
+                await delay(500);
+                newCount = await getCount();
+                pollAttempts++;
+            }
             if (newCount < remaining) {
                 console.log(`[DoorDash] AutoSelect[${gIdx}]: registered! (${remaining} → ${newCount})`);
                 remaining = newCount;

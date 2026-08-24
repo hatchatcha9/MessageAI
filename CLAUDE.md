@@ -169,6 +169,50 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 - **Menu**: Fixed ✓ — removed OOM-causing pre-fetch; DOM scraping used instead
 - **Full ordering flow**: Should work end-to-end
 
+## Session 2026-08-24 (Day 1 of weekly plan) — autoSelectAllRequiredOptions() retry-loop bug FIXED, verified live
+
+**Root cause, finally isolated:** the click loop clicked the first label/radio/checkbox in EVERY visited group unconditionally, with no check for whether that group already had a selection. Two consequences, both real bugs:
+1. **Silent-overwrite risk (newly found this session, not in the 2026-08-23 notes):** for an already-satisfied radiogroup (e.g. "Choose Your Wings" after the user's real choice, "10 Classic Wings," was already applied), clicking the first-rendered option ("10 Boneless Wings") would silently swap the selection — a radiogroup always has exactly one selection either way, so `getCount()`'s required-tally never reflects the swap. Never observed a live wrong-flavor add during testing, but the code path was live and would have triggered it.
+2. **Misattributed credit (the 2026-08-23 finding, root-caused further):** a single fixed 500ms delay before reading `getCount()` after a click meant a still-in-flight React re-render from an EARLIER group's click could get credited to whichever group was checked NEXT — this is how the un-named "Add a Side → Seasoned Fries" toggle got wrongly credited with resolving the real requirement, when clicking it actually just swapped the modal into a new "Fry Seasoning" sub-view with its own new unsatisfied requirement.
+
+**Fix (`doordash.js`, `autoSelectAllRequiredOptions()`, ~line 6884-7070):**
+1. Added an `alreadySatisfied` flag per group (checked in the same DOM snapshot as the existing `isOptional` classification) — any group with `input:checked`/`[aria-checked="true"]`/`[aria-selected="true"]` is now skipped entirely by the click loop, never touched. Logged as `AutoSelect: never touching already-satisfied groups [...]`.
+2. Replaced the fixed 500ms-then-read with a short poll (up to 3 reads, 500ms apart) that keeps checking until the count actually changes, so credit goes to the group that actually caused it instead of whichever happens to be checked next.
+
+Deliberately did NOT add the "+$ price suffix = skip" heuristic considered in the 2026-08-23 notes — "Choose Your Wings"'s own (genuinely required) options also carry a "+$" price suffix, so that heuristic risked false-skipping real required groups. The already-satisfied + correct-attribution fixes address the actual mechanism instead of guessing from label text.
+
+**Verified live, twice, against the exact repro from the 2026-08-23 notes** (search "wingstop" → select id 1285837 → add itemIndex 2 "10 Wings" with `{"groupIndex":0,"optionIndex":1,"optionText":"10 Classic Wings","groupName":"Choose Your Wings"}`):
+- First attempt hit an unrelated modal-open timing hiccup (page assets still loading) and correctly reported `needsOptions` rather than adding wrong — not a regression, a pre-existing separate flake.
+- Second attempt (fresh restaurant re-select) succeeded end-to-end. Logs confirmed `never touching already-satisfied groups [0, 2, 3, 4, 5, 6, 7]` — group 0 ("Choose Your Wings") was correctly left alone, and the previously-problematic Seasoned Fries group was never even visited this time.
+- Confirmed via real `readBrowserCart()` ("show my cart" through `/api/voice`): `1x 10 Wings - $16.39` — correct base item, no phantom side-item upcharge, no price drift from a wrong flavor swap.
+- Cart cleared afterward and reconfirmed genuinely empty via the same real-cart read.
+
+**Not committed yet** — holding for explicit user go-ahead per this repo's git safety rules. Diff is against `6f35e64` (last commit before this fix); the 2026-08-23 session's two intermediate attempts were never committed, so this diff is the full net change, not an incremental one.
+
+**Not yet done / next (Day 2 per the weekly plan is explicitly "verify Day 1 live"):**
+1. Re-test with an item that has a genuine multi-pick stepper group ("Choose Flavors," min 2 units × 2 distinct flavors = 10 total, per the 2026-08-22 notes) — today's fix was verified on a single-flavor item ("10 Wings"); the loop still only clicks each group ONCE per pass, which may be insufficient on its own for multi-unit stepper groups. This is the outstanding item #3 from the 2026-08-23 notes, still unverified.
+2. Re-verify the search-speed timeout cuts from 2026-08-22 with a genuinely fresh uncached search (still never actually measured before/after, per that session's notes).
+3. Everything else from the standing backlog: GPS wiring, review-text-as-menu-item scraping (Wingstop/Costa Vida), physical-tap 18px-threshold confirmation, Wildside Bowls modal issue if it resurfaces, food.html multi-select stepper UI.
+
+## Session 2026-08-23 (IN PROGRESS, paused mid-investigation — resume here)
+
+**Goal:** Fix `autoSelectAllRequiredOptions()`'s retry-loop bug (confirmed 2026-08-22 as the real cause of "can't pick options" add failures — it wanders into an optional side/upsell section instead of reaching genuinely-required groups).
+
+**First attempt (deployed, then found flawed):** prioritized groups using `_origIdx` from a separate `extractRequiredOptions()` call. **This was wrong** — confirmed live via logs that `_origIdx` values from that separate `page.evaluate()` call do NOT reliably line up with the indices `autoSelectAllRequiredOptions()`'s own click loop uses (same cross-call index-drift bug class as the 2026-08-21 Wingstop wrong-order fix). Live evidence: priority list pointed at "Recommended Beverages/Sides/Dessert" groups instead of the real "Choose Flavors"/"Choose a Dip" groups.
+
+**Second attempt (current state, deployed to Pi, NOT committed):** replaced the cross-call approach with an inline classification computed in the SAME `page.evaluate()` snapshot already used for the diagnostic `groupDiag` dump (`doordash.js`, `autoSelectAllRequiredOptions()`, ~line 6856-6900) — each group gets an `isOptional` flag (checks own label/heading/prevSibling + 2 ancestor levels' text for "optional"/"recommended"), and the click loop visits non-optional groups first, optional/recommended ones last. This correctly excludes the "Recommended Sides And Apps"/"Recommended Dessert"/"Recommended Beverages" upsell groups (confirmed live via log: `Group[10] ... (optional/recommended)` etc.).
+
+**Still broken — new finding, not yet fixed:** a DIFFERENT, earlier, un-labeled group (no `aria-labelledby`, no heading — same "undetectable name" problem noted for Wingstop's flavor group back in 2026-08-21) also contains a "Seasoned Fries" checkbox toggle. This group is NOT caught by the `isOptional` heuristic (no "optional"/"recommended" text within 2 ancestor levels) even though checking that box is genuinely optional and — worse — checking it introduces a BRAND NEW required sub-question ("Fry Seasoning") that DoorDash then reports as unsatisfied, so the add still fails, just for a different-looking reason. Live logs show the auto-select loop's count-feedback (`getCount()`) crediting this click with resolving the requirement (1→0) — most likely a misattribution: the real satisfying click was probably the EARLIER "Choose Flavors" stepper click, and React's async re-render hadn't caught up until the NEXT check. Was mid-investigation into the modal's raw HTML (`(Optional)` marker byte offsets: 14341, 21624, 23589, 28097 in the dumped `modal-debug.html`) to find a better structural signal than ancestor-text-scanning when the session was paused.
+
+**Confirmed safe:** across all of today's test attempts, `journalctl` shows zero `addCartItemV2` GraphQL mutations fired — nothing ever actually hit the real DoorDash cart. No cleanup needed.
+
+**Next session, in order:**
+1. Finish diagnosing why the un-named "Seasoned Fries" group isn't classified as optional/skippable — check what's at those 4 `(Optional)` byte offsets in a fresh `modal-debug.html` dump (re-run the same repro: search "wingstop" → select id 1285837 → `/api/food/cart/add` itemIndex 2 ("10 Wings") → submit `{"groupIndex":0,"optionIndex":1,"optionText":"10 Classic Wings","groupName":"Choose Your Wings"}` as `selections`) to see the real structural relationship between that group and its "(Optional)" marker.
+2. Consider a more robust heuristic than ancestor-text-scanning — e.g. treat any checkbox/toggle option whose own label includes a "+$" price suffix as an up-sell add-on that should never be auto-clicked to satisfy a requirement (add-ons increase price and can spawn new sub-questions; genuinely required choices for THIS item's base config are a safer default target).
+3. Also double check the "Choose Flavors" stepper group (`Increase quantity by 1`) really is or isn't getting satisfied by a single click — needs multiple increments (min 2 units per flavor, 2 distinct flavors, 10 total) per the 2026-08-22 notes; today's loop only clicks each group ONCE per pass, which may be insufficient on its own for multi-unit stepper groups regardless of the optional-skipping fix.
+4. Uncommitted changes currently sitting in local `doordash.js` (deployed to Pi) — do not lose them; diff against `6f35e64` before committing once the fix is actually verified working end-to-end.
+5. Weekly plan Day 1 formally starts 2026-08-24 per user's memory note — this session's work counts as a head start, not the official Day 1.
+
 ## Railway Testing (no Twilio needed)
 ```bash
 # Send test message directly (no Twilio signature check)
