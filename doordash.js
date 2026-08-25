@@ -984,9 +984,9 @@ function delay(ms) {
 // the real mechanism behind a clearBrowserCart() hang that outlasted its documented
 // ~79s worst-case with zero further log output). Wrap evaluate() calls that sit inside a
 // bounded loop with this so a stuck call throws instead of hanging the whole function.
-function evalWithTimeout(pageObj, fn, timeoutMs, label) {
+function evalWithTimeout(pageObj, fn, timeoutMs, label, arg) {
     return Promise.race([
-        pageObj.evaluate(fn),
+        arg !== undefined ? pageObj.evaluate(fn, arg) : pageObj.evaluate(fn),
         new Promise((_, reject) => setTimeout(() => reject(new Error(`evaluate timed out after ${timeoutMs}ms${label ? ` (${label})` : ''}`)), timeoutMs))
     ]);
 }
@@ -5679,7 +5679,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 // Try to find and click the item at current scroll position.
                 // Uses TreeWalker (text-node scan) instead of querySelectorAll('span,div')
                 // to avoid iterating thousands of elements — critical on Railway's limited RAM.
-                const result = await page.evaluate((name) => {
+                // Wrapped with evalWithTimeout: this sits inside a bounded scroll-position
+                // loop, and an unguarded evaluate() hanging here (page mid-navigation/stuck
+                // JS context) would silently defeat the loop's own iteration cap — same
+                // failure class documented on evalWithTimeout's definition above.
+                const result = await evalWithTimeout(page, (name) => {
                     const lowerName = name.toLowerCase().trim();
 
                     // Helper: walk up from a text node to find a clickable card element.
@@ -5799,7 +5803,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         if (t.includes('$')) visibleSamples.push(t.substring(0, 30));
                     }
                     return { found: false, scrollTop: window.scrollY, visiblePriceItems: visibleSamples };
-                }, searchName);
+                }, 8000, `find item by name @y=${scrollY}`, searchName);
 
                 if (!result.found) {
                     console.log(`[DoorDash] y=${scrollY}: not found, scrollTop=${result.scrollTop}, visible: ${JSON.stringify(result.visiblePriceItems)}`);

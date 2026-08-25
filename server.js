@@ -3252,7 +3252,26 @@ app.post('/api/food/cart/add', async (req, res) => {
                 // Every remaining group was trivial (single option) — finish the add now
                 // with those auto-selections instead of bothering the user with a modal
                 // for a "choice" that was never really a choice.
-                const retryResult = await doordashUI.addItemByIndex(itemIndex, { selectFirst: false, selections: autoSels, skipOptionsCheck: true, restaurantUrl: current.url }, item);
+                //
+                // This is a SECOND full addItemByIndex() call (re-opens the item modal from
+                // scratch) with no timeout of its own — confirmed live 2026-08-25 as the actual
+                // mechanism behind a multi-minute hang with zero app-level log output (the FIRST
+                // call had already returned ITEM_NOT_ADDED cleanly; this retry was the "something
+                // outside that clean return path" that reopened the modal and then stalled,
+                // requiring a manual `kill -9` + service restart to recover). Race it against a
+                // generous timeout — matches the ~79s documented worst-case for other browser ops
+                // — so a stuck retry surfaces as a clear error instead of hanging the request (and
+                // the underlying browser/service) indefinitely.
+                let retryResult;
+                try {
+                    retryResult = await Promise.race([
+                        doordashUI.addItemByIndex(itemIndex, { selectFirst: false, selections: autoSels, skipOptionsCheck: true, restaurantUrl: current.url }, item),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('retry addItemByIndex timed out after 75000ms')), 75000))
+                    ]);
+                } catch (retryErr) {
+                    console.error('[Food] Single-option auto-fill retry hung/failed:', retryErr.message);
+                    retryResult = { success: false, error: 'ITEM_NOT_ADDED', message: retryErr.message };
+                }
                 return await finishAdd(retryResult);
             }
             return res.status(409).json({
