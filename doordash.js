@@ -3959,7 +3959,12 @@ async function extractMenuItems() {
                 // actually being viewed (confirmed live: a Little Caesars page scrape picked
                 // up "Chick-fil-A" and "Sergio's Pizza" this way), and it has real $-tagged
                 // content so the price-match filter alone doesn't exclude it.
-                if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"]')) continue;
+                // Also excludes the customer-reviews carousel (data-testid="carousel-slider",
+                // confirmed live on both Wingstop and Costa Vida) — review cards render as
+                // "Reviewer Name — $XX.XX" (an unrelated "amount spent" figure, not a price)
+                // and otherwise pass every other filter below, scraping fake menu "items" like
+                // "Butch H" or a full review sentence as the name.
+                if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"], [data-testid="carousel-slider"]')) continue;
 
                 // Viewport filter first (cheap) before layout-triggering calls
                 const rect = el.getBoundingClientRect();
@@ -4089,7 +4094,7 @@ async function extractMenuItems() {
                     // Same cross-sell/recommended-items exclusion as Strategy 1 above — this
                     // untargeted whole-page scan is especially exposed to scraping other
                     // restaurants' items out of that carousel.
-                    if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"]')) continue;
+                    if (el.closest('[data-testid*="recommended"], [data-anchor-id*="Recommend"], [data-testid*="cross_sell"], [data-testid="carousel-slider"]')) continue;
                     if (el.offsetWidth < 80 || el.offsetHeight < 50) continue;
                     if (['SCRIPT','STYLE','NAV','HEADER','FOOTER'].includes(el.tagName)) continue;
 

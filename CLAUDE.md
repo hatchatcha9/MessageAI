@@ -309,9 +309,17 @@ Started Day 3 by first committing+pushing the Day 2 fix that had been verified l
 
 **Verified:** `node -c doordash.js` syntax-clean; deployed to the Pi, `frog-server` restarted cleanly (browser launched, Wingstop pre-warm succeeded); confirmed via `node -e` on the Pi that `dd.placeFullOrder` is now the `locked()` wrapper function, not the raw export; real DoorDash cart confirmed genuinely empty afterward via a real `"my cart"` voice request (exact `actions` marker present, not a hallucinated empty response). Did not attempt a live concurrent-scheduled-order race test — orchestrating a real scheduled order to fire while driving a simultaneous interactive session wasn't worth the real-money risk for what is a mechanical, low-risk change consistent with an already-proven pattern used successfully elsewhere in this exact file for months.
 
-**Not committed yet** — holding for user go-ahead before committing/pushing.
+Committed `1b59c53`, pushed.
 
-**Next up:** audit finding #2 (food.html checkout double-tap/cancel race) per the suggested priority order, then finding #3 (extend timeout guards to voice/SMS retry paths + Piper subprocess), then the original Day 3 plan item (filter fake review-text menu items on Wingstop/Costa Vida) once the audit items are through.
+**Then did the original Day 3 plan task: filtered fake review-text menu items on Wingstop/Costa Vida.** Root-caused via live DOM forensics (temporary `_debugFindByText`/`_debugFindByTestId`/`_debugListTestIdsContaining`/`_debugScrollTo` exports in doordash.js + matching `/api/_debug/*` routes in server.js — all narrow, fixed diagnostics, no arbitrary code execution allowed; all fully removed before commit). Confirmed on both restaurants: the customer-reviews carousel renders as `data-testid="carousel-slider"` (a shared DoorDash platform component — same testid on both Wingstop and Costa Vida), lazily mounted only once scrolled into view. Review cards render as "Reviewer Name — $XX.XX" (the dollar figure is an unrelated "amount spent" stat, not a price) and passed every existing filter in `extractMenuItems()`, producing fake menu items like "Butch H" and full review sentences ("I'll give you credit for trying but that's it.. Definitely not worth the").
+
+**Fix:** added `[data-testid="carousel-slider"]` to the existing cross-sell/recommended-carousel exclusion `closest()` selector, in both of `extractMenuItems()`'s extraction strategies (Strategy 1's `extractAtViewport`, Strategy 2's full-page fallback scan) — same pattern already used there for the recommended-items/cross-sell carousel exclusion.
+
+**Verified live:** cleared the 24h menu cache for both restaurants (`doordash_cache` table, `cache_type='menu'`, keys `1285837`/`157397`) via a node one-liner over SSH, then did a fresh `/api/food/select` for each. Wingstop: 39 items, all real menu items, zero garbage (previously included "Butch H" and the review-sentence item). Costa Vida: 23 items, all real, zero garbage. Real DoorDash cart confirmed empty throughout via a genuine `actions`-marked "my cart" voice request.
+
+**Also spotted, not fixed (out of scope for this task):** both restaurants' fresh menus included one promo-banner item that slips past the existing promo-text filter — Wingstop's "Buy 1, get 1 free" ($15) and Costa Vida's "Try DashPass with a free trial" ($15) — different wording than the `/\d+%\s*off/`, `/^free\s/`, `/^save\s/` etc. patterns already filtered. Same bug class, not the review-text issue asked for today.
+
+**Not yet committed** — holding for user go-ahead.
 
 ## Railway Testing (no Twilio needed)
 ```bash
