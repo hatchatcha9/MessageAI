@@ -3254,22 +3254,40 @@ app.post('/api/food/cart/add', async (req, res) => {
                 // for a "choice" that was never really a choice.
                 //
                 // This is a SECOND full addItemByIndex() call (re-opens the item modal from
-                // scratch) with no timeout of its own — confirmed live 2026-08-25 as the actual
-                // mechanism behind a multi-minute hang with zero app-level log output (the FIRST
-                // call had already returned ITEM_NOT_ADDED cleanly; this retry was the "something
-                // outside that clean return path" that reopened the modal and then stalled,
-                // requiring a manual `kill -9` + service restart to recover). Race it against a
-                // generous timeout — matches the ~79s documented worst-case for other browser ops
-                // — so a stuck retry surfaces as a clear error instead of hanging the request (and
-                // the underlying browser/service) indefinitely.
+                // scratch) — confirmed live 2026-08-25 as the actual mechanism behind a
+                // multi-minute hang with zero app-level log output (the FIRST call had already
+                // returned ITEM_NOT_ADDED cleanly; this retry was the "something outside that
+                // clean return path" that reopened the modal and then stalled, requiring a
+                // manual `kill -9` + service restart to recover). doordash.js's addItemByIndex
+                // has since had every naked page.evaluate() in its own body wrapped with a
+                // bounded evalWithTimeout(), so it should now always return on its own — that's
+                // the primary fix. This Promise.race is only a defense-in-depth backstop for
+                // whatever unbounded call might still be lurking (its helper functions like
+                // autoSelectAllRequiredOptions() haven't been individually audited yet).
+                //
+                // IMPORTANT: a bare Promise.race does NOT cancel the loser — addItemByIndex()
+                // is wrapped in doordash.js's serial op lock (withOpLock/locked()), so merely
+                // racing it from out here would leave that lock held by the abandoned call
+                // until it finishes on its own, silently queueing every other DoorDash request
+                // behind a call nobody's waiting on anymore — and if it later succeeds for
+                // real, db.addToCart() never runs for it, so the real DoorDash cart and the
+                // local cart would silently diverge. So on timeout we don't just stop waiting —
+                // we force-close the browser (closeBrowser() is exported unlocked specifically
+                // so it can be called while another op is in flight). That makes the abandoned
+                // call's next page.* call throw, so it actually unwinds through its own catch
+                // and releases the lock for real, at the cost of a fresh browser launch on the
+                // next request. Timeout set to 180s — comfortably above the 98-147s range
+                // observed for genuinely-successful single-call adds today, since a retry (full
+                // fresh navigate+search+modal+select cycle) is likely to take at least that long.
                 let retryResult;
                 try {
                     retryResult = await Promise.race([
                         doordashUI.addItemByIndex(itemIndex, { selectFirst: false, selections: autoSels, skipOptionsCheck: true, restaurantUrl: current.url }, item),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('retry addItemByIndex timed out after 75000ms')), 75000))
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('retry addItemByIndex timed out after 180000ms')), 180000))
                     ]);
                 } catch (retryErr) {
-                    console.error('[Food] Single-option auto-fill retry hung/failed:', retryErr.message);
+                    console.error('[Food] Single-option auto-fill retry hung/failed — force-closing browser to release the op lock:', retryErr.message);
+                    await doordashUI.closeBrowser().catch(() => {});
                     retryResult = { success: false, error: 'ITEM_NOT_ADDED', message: retryErr.message };
                 }
                 return await finishAdd(retryResult);

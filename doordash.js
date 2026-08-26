@@ -5488,7 +5488,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         page.on('request', _cartMutationHandler);
 
         // If page is mid-render (raw Next.js SSR streaming), wait for React to hydrate
-        const rawContent = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+        const rawContent = await evalWithTimeout(page, () => document.body?.innerText || '', 8000, 'read body text for hydration check').catch(() => '');
         if (rawContent.includes('self.__next_f') || (rawContent.length < 150 && page.url().includes('doordash.com'))) {
             console.log('[DoorDash] Page is mid-render, waiting for hydration...');
             await page.waitForFunction(
@@ -5645,7 +5645,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             } else {
 
             // First scroll to top
-            await page.evaluate(() => window.scrollTo(0, 0));
+            await evalWithTimeout(page, () => window.scrollTo(0, 0), 5000, 'scroll to top').catch(() => {});
             await delay(300);
 
             // Scroll directly to the item's cached position — avoids full-page scroll
@@ -5664,7 +5664,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 // menu, e.g. Costa Vida's Appetizers/Beverages sections past ~2400px). Scale
                 // the checkpoint range to the page's actual height instead of a hardcoded cap
                 // — capped at 12000px as a sanity bound, not a full unbounded scan.
-                const scrollHeight = await page.evaluate(() => document.body.scrollHeight).catch(() => 2400);
+                const scrollHeight = await evalWithTimeout(page, () => document.body.scrollHeight, 8000, 'read scrollHeight').catch(() => 2400);
                 const maxY = Math.min(scrollHeight || 2400, 12000);
                 searchYPositions = [];
                 for (let y = 0; y <= maxY; y += 400) searchYPositions.push(y);
@@ -5673,7 +5673,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
             for (let scrollAttempt = 0; scrollAttempt < searchYPositions.length && !clicked; scrollAttempt++) {
                 const scrollY = Math.max(0, searchYPositions[scrollAttempt]);
-                await page.evaluate((y) => window.scrollTo(0, y), scrollY);
+                await evalWithTimeout(page, (y) => window.scrollTo(0, y), 5000, `scroll to y=${scrollY}`, scrollY).catch(() => {});
                 await delay(800); // give React virtual scroll time to render items
 
                 // Try to find and click the item at current scroll position.
@@ -5833,7 +5833,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             console.log('[DoorDash] Name-based search failed, trying position-based at each scroll position...');
 
             // Scroll past "Order it again" section first
-            await page.evaluate(() => {
+            await evalWithTimeout(page, () => {
                 const targetSections = ['most ordered', 'featured items', 'entrees', 'popular items'];
                 const allElements = document.querySelectorAll('h1, h2, h3, h4, span, div');
                 for (const el of allElements) {
@@ -5850,7 +5850,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 }
                 // Default scroll past Order it again section
                 window.scrollBy(0, 400);
-            });
+            }, 8000, 'scroll past order-it-again section').catch(() => {});
             await delay(500);
 
             // Scroll and collect all visible items
@@ -5858,7 +5858,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             const seenTexts = new Set();
 
             for (let scrollStep = 0; scrollStep < 8; scrollStep++) {
-                const items = await page.evaluate(() => {
+                const items = await evalWithTimeout(page, () => {
                     const results = [];
                     const elements = document.querySelectorAll('button, a, article, [role="button"], div[tabindex="0"]');
 
@@ -5882,7 +5882,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         }
                     }
                     return results;
-                });
+                }, 8000, `collect visible items @scrollStep=${scrollStep}`).catch(() => []);
 
                 for (const item of items) {
                     if (!seenTexts.has(item.name)) {
@@ -5891,7 +5891,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     }
                 }
 
-                await page.evaluate(() => window.scrollBy(0, 350));
+                await evalWithTimeout(page, () => window.scrollBy(0, 350), 5000, 'scrollBy 350').catch(() => {});
                 await delay(300);
             }
 
@@ -5902,7 +5902,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                 console.log(`[DoorDash] Clicking item ${index + 1}: "${target.name}"`);
 
                 // Scroll to the position where we found this item
-                await page.evaluate((scrollY) => window.scrollTo(0, scrollY), target.scrollY);
+                await evalWithTimeout(page, (scrollY) => window.scrollTo(0, scrollY), 5000, 'scroll to found item', target.scrollY).catch(() => {});
                 await delay(300);
 
                 // Now click at the position (with timeout guard)
@@ -5913,7 +5913,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     ]);
                 } catch (clickErr) {
                     console.log(`[DoorDash] mouse.click timeout — JS click fallback`);
-                    await page.evaluate(({x, y}) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, { x: target.x, y: target.y });
+                    await evalWithTimeout(page, ({x, y}) => { const el = document.elementFromPoint(x, y); if (el) el.click(); }, 5000, 'JS click fallback', { x: target.x, y: target.y }).catch(() => {});
                 }
                 clicked = true;
             } else {
@@ -5946,7 +5946,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             await delay(1000);
 
             // Check if modal is a "restaurant closed" notice (not a real item modal)
-            const closedMsg = await page.evaluate(() => {
+            const closedMsg = await evalWithTimeout(page, () => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return null;
                 const text = modal.textContent || '';
@@ -5956,7 +5956,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     return buttons.join(', ');
                 }
                 return null;
-            }).catch(() => null);
+            }, 8000, 'check restaurant-closed modal').catch(() => null);
 
             if (closedMsg !== null) {
                 console.log(`[DoorDash] Restaurant is closed — modal buttons: ${closedMsg}`);
@@ -6070,7 +6070,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
             // Modal still open with no detected required options — check if add button says "Make X required selection"
             await takeScreenshot('modal-still-open');
-            const addBtnText = await page.evaluate(() => {
+            const addBtnText = await evalWithTimeout(page, () => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return '';
                 const btns = modal.querySelectorAll('button');
@@ -6081,7 +6081,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     }
                 }
                 return '';
-            });
+            }, 8000, 'read add-button text').catch(() => '');
 
             if (addBtnText) {
                 // Button still says "Make X required selection" — extract options once more and surface them
@@ -6100,23 +6100,23 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
             // No modal opened. Verify the cart actually has items (the click may have been
             // absorbed by a CF Turnstile overlay which intercepts all pointer events).
             await delay(800);
-            const cartCount = await page.evaluate(() => {
+            const cartCount = await evalWithTimeout(page, () => {
                 const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
                 const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
                 return match ? parseInt(match[1]) : 0;
-            });
+            }, 8000, 'read cart count').catch(() => 0);
             console.log(`[DoorDash] No modal detected. Cart item count: ${cartCount}`);
             if (cartCount === 0) {
                 // Check if CF overlay was blocking (must be visible, not just present in DOM)
-                const cfOverlay = await page.evaluate(() => {
+                const cfOverlay = await evalWithTimeout(page, () => {
                     const el = document.querySelector('[data-testid="turnstile/overlay"]');
                     if (!el) return false;
                     const s = window.getComputedStyle(el);
                     return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-                }).catch(() => false);
+                }, 8000, 'check CF overlay visible').catch(() => false);
                 if (cfOverlay) {
                     console.log('[DoorDash] CF overlay still present — hiding and retrying with CDP click...');
-                    const retryCoords = await page.evaluate((name) => {
+                    const retryCoords = await evalWithTimeout(page, (name) => {
                         document.querySelectorAll('[data-testid="turnstile/overlay"]').forEach(el => {
                             el.style.pointerEvents = 'none';
                             el.style.display = 'none';
@@ -6136,7 +6136,7 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                             }
                         }
                         return null;
-                    }, searchName);
+                    }, 8000, 'find item coords after CF clear', searchName).catch(() => null);
                     await delay(300);
                     if (retryCoords) {
                         await page.mouse.click(retryCoords.x, retryCoords.y);
@@ -6151,11 +6151,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                         stopDebugScreenshots();
                         return { success: false, needsOptions: true, requiredOptions: requiredOpts, message: 'This item has required options' };
                     }
-                    const cartCountAfter = await page.evaluate(() => {
+                    const cartCountAfter = await evalWithTimeout(page, () => {
                         const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
                         const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
                         return match ? parseInt(match[1]) : 0;
-                    });
+                    }, 8000, 'read cart count after CF retry').catch(() => 0);
                     if (cartCountAfter === 0) {
                         stopDebugScreenshots();
                         return { success: false, error: 'CF overlay blocked item add — try again' };
@@ -6164,11 +6164,11 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
                     // No CF overlay and cart still empty — click didn't register or item needs a modal
                     // we didn't detect. Try one more wait + check before giving up.
                     await delay(1500);
-                    const cartCountRetry = await page.evaluate(() => {
+                    const cartCountRetry = await evalWithTimeout(page, () => {
                         const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]');
                         const match = (btn?.textContent || btn?.getAttribute('aria-label') || '').match(/(\d+)\s*item/i);
                         return match ? parseInt(match[1]) : 0;
-                    });
+                    }, 8000, 'read cart count retry').catch(() => 0);
                     if (cartCountRetry === 0) {
                         // Check if a modal appeared late
                         const lateModal = await page.$('[role="dialog"], [aria-modal="true"]');
