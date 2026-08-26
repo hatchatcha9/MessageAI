@@ -6234,7 +6234,7 @@ async function extractRequiredOptions() {
         // - Ignore sections marked "Optional"
         // - Ignore "Recommended" or "Top Recommended" sections (cross-selling)
 
-        const optionGroups = await page.evaluate(() => {
+        const optionGroups = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return [];
 
@@ -6380,7 +6380,7 @@ async function extractRequiredOptions() {
             }
 
             return groups;
-        });
+        }, 8000, 'extract structured required options');
 
         console.log(`[DoorDash] Found ${optionGroups.length} REQUIRED option groups`);
         optionGroups.forEach(g => {
@@ -6390,7 +6390,7 @@ async function extractRequiredOptions() {
         await takeScreenshot('options-extracted');
 
         // Check add button to see how many required selections are needed
-        const requiredCount = await page.evaluate(() => {
+        const requiredCount = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return 0;
             for (const btn of modal.querySelectorAll('button')) {
@@ -6399,7 +6399,7 @@ async function extractRequiredOptions() {
                 if (m) return parseInt(m[1], 10);
             }
             return 0;
-        }).catch(() => 0);
+        }, 8000, 'read required-selections count from add button').catch(() => 0);
 
         if (requiredCount > 0) {
             console.log(`[DoorDash] Add button says ${requiredCount} required selections needed, structured found ${optionGroups.length}`);
@@ -6414,16 +6414,16 @@ async function extractRequiredOptions() {
             }
 
             // Dump modal HTML to file for inspection
-            const modalHtml = await page.evaluate(() => {
+            const modalHtml = await evalWithTimeout(page, () => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 return modal ? modal.innerHTML : 'NO MODAL FOUND';
-            });
+            }, 8000, 'dump modal HTML for broad-extraction fallback');
             const htmlPath = path.join(BROWSER_DATA_DIR, 'modal-debug.html');
             fs.writeFileSync(htmlPath, modalHtml);
             console.log(`[DoorDash] Modal HTML saved to: ${htmlPath}`);
 
             // Broad extraction: find ALL radiogroups and groups with "Required" anywhere
-            const broadGroups = await page.evaluate((reqCount) => {
+            const broadGroups = await evalWithTimeout(page, (reqCount) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return [];
 
@@ -6586,7 +6586,7 @@ async function extractRequiredOptions() {
                 }
 
                 return groups;
-            }, requiredCount);
+            }, 10000, 'broad extraction of required option groups', requiredCount);
 
             if (broadGroups.length > 0) {
                 console.log(`[DoorDash] Broad extraction found ${broadGroups.length} groups`);
@@ -6710,7 +6710,7 @@ async function clearPreSelectedOptions() {
     try {
         console.log('[DoorDash] Checking for pre-selected options from previous orders...');
 
-        const cleared = await page.evaluate(() => {
+        const cleared = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return { found: false };
 
@@ -6750,7 +6750,7 @@ async function clearPreSelectedOptions() {
             }
 
             return { found: false };
-        });
+        }, 8000, 'check for pre-selected options');
 
         if (cleared.found) {
             console.log(`[DoorDash] Cleared pre-selected options: ${JSON.stringify(cleared)}`);
@@ -6788,7 +6788,7 @@ function cleanOptionLabel(text) {
  * check tried first missed real selections DoorDash marks some other way.
  */
 async function readRequiredGroupSelections() {
-    return page.evaluate(() => {
+    return evalWithTimeout(page, () => {
         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
         if (!modal) return [];
         const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -6825,7 +6825,7 @@ async function readRequiredGroupSelections() {
             });
         });
         return results;
-    }).catch(() => []);
+    }, 8000, 'read current required-group selections').catch(() => []);
 }
 
 /**
@@ -6838,21 +6838,21 @@ async function autoSelectAllRequiredOptions() {
         await takeScreenshot('before-auto-select-all');
 
         // Scroll modal bottom→top to trigger lazy loading of all sections
-        await page.evaluate(() => {
+        await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (modal) { modal.scrollTop = modal.scrollHeight; }
-        });
+        }, 5000, 'scroll modal to bottom').catch(() => {});
         await delay(300);
-        await page.evaluate(() => {
+        await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (modal) modal.scrollTop = 0;
-        });
+        }, 5000, 'scroll modal to top').catch(() => {});
         await delay(300);
 
         // Count-feedback approach: iterate ALL groups, click each one, keep it only if
         // the required count decreases. This works regardless of pre-selected state,
         // optional vs required detection, or element type (label/radio/[role="radio"]).
-        const getCount = async () => page.evaluate(() => {
+        const getCount = async () => evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return 0;
             for (const btn of modal.querySelectorAll('button')) {
@@ -6860,7 +6860,7 @@ async function autoSelectAllRequiredOptions() {
                 if (m) return parseInt(m[1]);
             }
             return 0;
-        }).catch(() => 0);
+        }, 5000, 'read required-selections count (polled)').catch(() => 0);
 
         // Diagnostic + optional/recommended classification, computed in ONE evaluate() call
         // against ONE DOM snapshot. This matters: a separate call (e.g. calling the standalone
@@ -6871,7 +6871,7 @@ async function autoSelectAllRequiredOptions() {
         // means by "group N". That exact cross-call index mismatch is a previously-confirmed real
         // bug class in this codebase (see the 2026-08-21 Wingstop wrong-order fix); reusing this
         // one snapshot for both classification and the click loop below avoids it entirely.
-        const groupDiag = await page.evaluate(() => {
+        const groupDiag = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return [];
             return Array.from(modal.querySelectorAll('[role="radiogroup"], [role="group"]')).map((g, i) => {
@@ -6910,7 +6910,7 @@ async function autoSelectAllRequiredOptions() {
                     inputs: g.querySelectorAll('input[type="radio"],input[type="checkbox"]').length
                 };
             });
-        }).catch(() => []);
+        }, 8000, 'diagnose required/optional groups in modal').catch(() => []);
         const numGroups = groupDiag.length;
         let remaining = await getCount();
         console.log(`[DoorDash] AutoSelect: ${remaining} required selections, ${numGroups} groups in modal`);
@@ -6962,7 +6962,7 @@ async function autoSelectAllRequiredOptions() {
             const group = modalLoc.locator('[role="radiogroup"], [role="group"]').nth(gIdx);
 
             // Get clickable target: prefer label, then [role="radio"], then stepper button, skip if none
-            const targetInfo = await page.evaluate((idx) => {
+            const targetInfo = await evalWithTimeout(page, (idx) => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return null;
                 const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -6989,7 +6989,7 @@ async function autoSelectAllRequiredOptions() {
                 // see a trailing "+$price" marker that a hard 40-char cutoff could cut off
                 // before it's reached, leaving a raw untrimmed fragment in the selection.
                 return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: (target.textContent || target.getAttribute('aria-label') || '').trim(), isStepper: !!stepper && !label && !radio && !roleBtn && !input };
-            }, gIdx);
+            }, 5000, `find clickable target for group[${gIdx}]`, gIdx).catch(() => null);
 
             if (!targetInfo) continue;
 
@@ -7032,7 +7032,7 @@ async function autoSelectAllRequiredOptions() {
             // silently fail to register React state on some Toggle-component groups
             // (Wingstop) while a plain in-page element.click() reliably does.
             if (!clickOk) {
-                const nativeOk = await page.evaluate((idx) => {
+                const nativeOk = await evalWithTimeout(page, (idx) => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                     if (!modal) return false;
                     const grp = modal.querySelectorAll('[role="radiogroup"], [role="group"]')[idx];
@@ -7046,7 +7046,7 @@ async function autoSelectAllRequiredOptions() {
                     if (!target || target.disabled) return false;
                     target.click();
                     return true;
-                }, gIdx).catch(() => false);
+                }, 5000, `native click fallback for group[${gIdx}]`, gIdx).catch(() => false);
                 if (nativeOk) {
                     console.log(`[DoorDash] AutoSelect[${gIdx}]: native element.click() fallback dispatched`);
                     clickOk = true;
@@ -7120,7 +7120,7 @@ async function applyOptionSelections(selections) {
         const modal = page.locator('[role="dialog"], [aria-modal="true"]').first();
 
         // DEBUG: dump actual modal option structure
-        const debugHtml = await page.evaluate(() => {
+        const debugHtml = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return 'no modal';
             const optItems = modal.querySelectorAll('[data-anchor-id="OptionItem"]');
@@ -7138,7 +7138,7 @@ async function applyOptionSelections(selections) {
                 return 'RADIOGROUP (no OptionItems): ' + rg.outerHTML.substring(0, 800) + ' || ' + firstChildHtml;
             }
             return `no OptionItems or radiogroup. Modal innerHTML (first 500): ${modal.innerHTML.substring(0, 500)}`;
-        });
+        }, 8000, 'dump modal option structure (debug)').catch(e => `evaluate failed: ${e.message}`);
         console.log('[DEBUG] Modal structure:', debugHtml);
 
         // Helper: parse "Make N required selections" count from add button text
@@ -7161,11 +7161,11 @@ async function applyOptionSelections(selections) {
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}", groupName="${sel.groupName || 'N/A'}"`);
 
-            const groupCount = await page.evaluate(() => {
+            const groupCount = await evalWithTimeout(page, () => {
                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                 if (!modal) return 0;
                 return modal.querySelectorAll('[role="radiogroup"], [role="group"]').length;
-            });
+            }, 8000, 'count option groups in modal').catch(() => 0);
             console.log(`[DoorDash] Modal has ${groupCount} option groups`);
 
             // Prefer resolving the target group by NAME over trusting sel.groupIndex as-is.
@@ -7191,7 +7191,7 @@ async function applyOptionSelections(selections) {
             // carried index is actually wrong.
             let indexAlreadyCorrect = false;
             if (sel.groupName && sel.optionText && sel.groupIndex < groupCount && sel.groupIndex >= 0) {
-                indexAlreadyCorrect = await page.evaluate(({ gi, optText }) => {
+                indexAlreadyCorrect = await evalWithTimeout(page, ({ gi, optText }) => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                     const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
                     const grp = groups?.[gi];
@@ -7200,7 +7200,7 @@ async function applyOptionSelections(selections) {
                     const texts = Array.from(grp.querySelectorAll('label, [role="radio"], [role="checkbox"], button'))
                         .map(el => (el.textContent || '').toLowerCase().trim());
                     return texts.some(t => t.startsWith(wanted) || wanted.startsWith(t));
-                }, { gi: sel.groupIndex, optText: sel.optionText }).catch(() => false);
+                }, 8000, 'check if carried group index already correct', { gi: sel.groupIndex, optText: sel.optionText }).catch(() => false);
             }
 
             if (sel.groupName && !indexAlreadyCorrect) {
@@ -7242,7 +7242,7 @@ async function applyOptionSelections(selections) {
                     // specific option this selection wants (which the caller already knows
                     // precisely, e.g. "Lemon Pepper Seasoning") and use whichever unselected
                     // group actually contains it.
-                    const optMatchIdx = await page.evaluate((wantedOpt) => {
+                    const optMatchIdx = await evalWithTimeout(page, (wantedOpt) => {
                         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                         if (!modal) return -1;
                         const groups = Array.from(modal.querySelectorAll('[role="radiogroup"], [role="group"]'));
@@ -7256,7 +7256,7 @@ async function applyOptionSelections(selections) {
                             if (texts.some(t => t.startsWith(wanted) || wanted.startsWith(t))) return i;
                         }
                         return -1;
-                    }, sel.optionText).catch(() => -1);
+                    }, 8000, 'resolve group by scanning option text', sel.optionText).catch(() => -1);
                     if (optMatchIdx >= 0 && optMatchIdx !== sel.groupIndex) {
                         console.log(`[DoorDash] Resolved group for option "${sel.optionText}" to index ${optMatchIdx} by scanning option text (name lookup failed)`);
                         sel.groupIndex = optMatchIdx;
@@ -7298,7 +7298,7 @@ async function applyOptionSelections(selections) {
             // recalculation, real progressive disclosure of the next required group).
             if (!clicked) {
                 try {
-                    const inputResult = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                    const inputResult = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                         if (!modal) return { ok: false };
                         const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -7319,12 +7319,12 @@ async function applyOptionSelections(selections) {
                         const already = target.checked;
                         if (!already) target.click();
                         return { ok: true, already, id: target.id };
-                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+                    }, 8000, 'Strategy 0: native input click', { groupIdx: sel.groupIndex, optText, optIdx });
 
                     if (inputResult.ok) {
                         await delay(400);
-                        const nowChecked = inputResult.already || await page.evaluate(
-                            (id) => document.getElementById(id)?.checked, inputResult.id
+                        const nowChecked = inputResult.already || await evalWithTimeout(page,
+                            (id) => document.getElementById(id)?.checked, 5000, 'Strategy 0: read checked state', inputResult.id
                         ).catch(() => null);
                         if (nowChecked === true) {
                             console.log(`[DoorDash] Strategy 0: native input.click() registered (id=${inputResult.id})`);
@@ -7333,7 +7333,7 @@ async function applyOptionSelections(selections) {
                             console.log(`[DoorDash] Strategy 0: native click did not register checked state`);
                         }
                     } else if (inputResult.noInputs) {
-                        const stepResult = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                        const stepResult = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                             const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
                             const group = groups[groupIdx];
@@ -7352,7 +7352,7 @@ async function applyOptionSelections(selections) {
                             if (!target || target.disabled) return { ok: false };
                             target.click();
                             return { ok: true };
-                        }, { groupIdx: sel.groupIndex, optText, optIdx });
+                        }, 8000, 'Strategy 0b: native stepper click', { groupIdx: sel.groupIndex, optText, optIdx });
                         if (stepResult.ok) {
                             await delay(400);
                             console.log(`[DoorDash] Strategy 0b: native stepper button.click() dispatched`);
@@ -7430,7 +7430,11 @@ async function applyOptionSelections(selections) {
 
             // Strategy 2: coordinate click after scrollIntoView — logs elementFromPoint for overlay diagnosis
             if (!clicked) {
-                const coords = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                // This call has no surrounding try/catch (unlike every other Strategy below),
+                // so it's the one call in this function a naked hang could most easily wedge
+                // the whole applyOptionSelections()/addItemByIndex() chain through — bound it
+                // and fall back to null (same as "no target found") on timeout.
+                const coords = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                     if (!modal) return null;
                     const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -7446,7 +7450,7 @@ async function applyOptionSelections(selections) {
                     const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
                     const el = document.elementFromPoint(cx, cy);
                     return { x: cx, y: cy, tag: el?.tagName, cls: (el?.className || '').substring(0, 80) };
-                }, { groupIdx: sel.groupIndex, optText, optIdx });
+                }, 8000, 'Strategy 2: coordinate lookup', { groupIdx: sel.groupIndex, optText, optIdx }).catch(() => null);
                 if (coords) {
                     console.log(`[DoorDash] Strategy 2: mouse.click at (${Math.round(coords.x)}, ${Math.round(coords.y)}), elementAtPoint=${coords.tag}.${coords.cls}`);
                     await delay(200);
@@ -7512,7 +7516,7 @@ async function applyOptionSelections(selections) {
                     // groups both already read as 0-required (DoorDash pre-defaults them),
                     // so a before/after count comparison can't detect a same-count swap
                     // between two non-empty options (e.g. Regular → Extra).
-                    const info = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                    const info = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                         if (!modal) return null;
                         const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -7533,7 +7537,7 @@ async function applyOptionSelections(selections) {
                             alreadyChecked: input ? input.checked : null,
                             atPointTag: atPoint?.tagName, atPointCls: (atPoint?.className || '').toString().substring(0, 60),
                         };
-                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+                    }, 8000, 'Strategy 2c: locate labeled option button', { groupIdx: sel.groupIndex, optText, optIdx });
                     if (info) {
                         console.log(`[DoorDash] Strategy 2c: click labeled option button at (${Math.round(info.x)}, ${Math.round(info.y)}), alreadyChecked=${info.alreadyChecked}, elementAtPoint=${info.atPointTag}.${info.atPointCls}`);
                         if (info.alreadyChecked) {
@@ -7546,7 +7550,7 @@ async function applyOptionSelections(selections) {
                             await delay(200);
                             await page.mouse.click(info.x, info.y);
                             await delay(600);
-                            const nowChecked = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                            const nowChecked = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                                 const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                                 const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
                                 const group = groups?.[groupIdx];
@@ -7557,7 +7561,7 @@ async function applyOptionSelections(selections) {
                                 if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
                                 const input = target?.querySelector('input[type="radio"], input[type="checkbox"]');
                                 return input ? input.checked : null;
-                            }, { groupIdx: sel.groupIndex, optText, optIdx });
+                            }, 5000, 'Strategy 2c: read checked state', { groupIdx: sel.groupIndex, optText, optIdx });
                             if (nowChecked === true) {
                                 console.log(`[DoorDash] Strategy 2c registered! (input.checked now true)`);
                                 clicked = true;
@@ -7578,7 +7582,7 @@ async function applyOptionSelections(selections) {
             // the center point per Strategy 2c's elementAtPoint diagnostic).
             if (!clicked) {
                 try {
-                    const inputCoords = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                    const inputCoords = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                         if (!modal) return null;
                         const groups = modal.querySelectorAll('[role="radiogroup"], [role="group"]');
@@ -7593,13 +7597,13 @@ async function applyOptionSelections(selections) {
                         input.scrollIntoView({ block: 'center', inline: 'nearest' });
                         const rect = input.getBoundingClientRect();
                         return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, w: rect.width, h: rect.height };
-                    }, { groupIdx: sel.groupIndex, optText, optIdx });
+                    }, 8000, 'Strategy 2d: locate nested input', { groupIdx: sel.groupIndex, optText, optIdx });
                     if (inputCoords && inputCoords.w > 0 && inputCoords.h > 0) {
                         console.log(`[DoorDash] Strategy 2d: click nested input directly at (${Math.round(inputCoords.x)}, ${Math.round(inputCoords.y)})`);
                         await delay(200);
                         await page.mouse.click(inputCoords.x, inputCoords.y);
                         await delay(600);
-                        const nowChecked = await page.evaluate(({ groupIdx, optText, optIdx }) => {
+                        const nowChecked = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                             const groups = modal?.querySelectorAll('[role="radiogroup"], [role="group"]');
                             const group = groups?.[groupIdx];
@@ -7610,7 +7614,7 @@ async function applyOptionSelections(selections) {
                             if (!target) target = buttons[Math.min(optIdx, buttons.length - 1)];
                             const input = target?.querySelector('input[type="radio"], input[type="checkbox"]');
                             return input ? input.checked : null;
-                        }, { groupIdx: sel.groupIndex, optText, optIdx });
+                        }, 5000, 'Strategy 2d: read checked state', { groupIdx: sel.groupIndex, optText, optIdx });
                         if (nowChecked === true) {
                             console.log(`[DoorDash] Strategy 2d registered! (input.checked now true)`);
                             clicked = true;
@@ -7684,8 +7688,10 @@ async function clickAddToOrderButton() {
     console.log('[DoorDash] Looking for Add to Order button...');
     await takeScreenshot('looking-for-add-button');
 
-    // Find the Add button and get its coordinates (don't click inside evaluate)
-    const buttonCoords = await page.evaluate(() => {
+    // Find the Add button and get its coordinates (don't click inside evaluate).
+    // This function has no surrounding try/catch of its own — every evaluate() below is
+    // individually bounded (and falls back safely) rather than relying on an outer handler.
+    const buttonCoords = await evalWithTimeout(page, () => {
         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
         if (!modal) return { found: false, reason: 'no modal' };
 
@@ -7754,7 +7760,7 @@ async function clickAddToOrderButton() {
         // Return all button texts for debugging
         const allBtnTexts = Array.from(buttons).map(b => b.textContent?.trim().substring(0, 60) || '').filter(t => t.length > 0);
         return { found: false, reason: 'no matching button found', allButtons: allBtnTexts };
-    });
+    }, 8000, 'locate Add to Order button').catch(() => ({ found: false, reason: 'evaluate timeout' }));
 
     console.log('[DoorDash] Add button result:', JSON.stringify(buttonCoords));
 
@@ -7766,7 +7772,7 @@ async function clickAddToOrderButton() {
             console.log('[DoorDash] Button still loading ($0.00) — waiting up to 20s for CF Turnstile to clear...');
             for (let w = 0; w < 20; w++) {
                 await delay(1000);
-                const refreshed = await page.evaluate(() => {
+                const refreshed = await evalWithTimeout(page, () => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                     if (!modal) return null;
                     for (const btn of modal.querySelectorAll('button')) {
@@ -7774,7 +7780,7 @@ async function clickAddToOrderButton() {
                         if (t.toLowerCase().includes('add to') || t.toLowerCase().includes('add for')) return t;
                     }
                     return null;
-                }).catch(() => null);
+                }, 5000, 'poll for Add button price to load').catch(() => null);
                 if (refreshed && !refreshed.includes('$0.00') && !refreshed.toLowerCase().startsWith('loading')) {
                     console.log('[DoorDash] Button loaded:', refreshed.substring(0, 50));
                     break;
@@ -7785,10 +7791,10 @@ async function clickAddToOrderButton() {
 
         console.log(`[DoorDash] Clicking Add button at (${buttonCoords.x}, ${buttonCoords.y}): ${buttonCoords.text}`);
         // Disable any Turnstile overlay that may have appeared on the modal
-        await page.evaluate(() => {
+        await evalWithTimeout(page, () => {
             const overlays = document.querySelectorAll('[data-testid="turnstile/overlay"], [class*="Overlay"], [class*="overlay"]');
             overlays.forEach(el => { el.style.pointerEvents = 'none'; });
-        }).catch(() => {});
+        }, 5000, 'disable Turnstile overlay pointer-events').catch(() => {});
 
         // Try mouse click first; fall back to JS dispatch (bypasses visual overlays)
         await page.mouse.click(buttonCoords.x, buttonCoords.y).catch(() => {});
@@ -7803,7 +7809,7 @@ async function clickAddToOrderButton() {
 
         // Fallback: JS click directly on the button element (bypasses pointer-event overlays)
         console.log('[DoorDash] Mouse click did not close modal — trying JS dispatch...');
-        const jsClicked = await page.evaluate(() => {
+        const jsClicked = await evalWithTimeout(page, () => {
             const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
             if (!modal) return false;
             for (const btn of modal.querySelectorAll('button')) {
@@ -7817,7 +7823,7 @@ async function clickAddToOrderButton() {
                 }
             }
             return false;
-        }).catch(() => false);
+        }, 8000, 'JS-dispatch click on Add button').catch(() => false);
 
         await delay(2000);
         await takeScreenshot('after-add-button-click');
@@ -7842,7 +7848,7 @@ async function clickAddToOrderButton() {
 // GraphQL call already having fired), causing the caller to keep retrying against a
 // modal whose "Add" button no longer exists. Recognize this state as success too.
 async function _isPostAddConfirmation() {
-    return await page.evaluate(() => {
+    return await evalWithTimeout(page, () => {
         const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
         if (!modal) return false;
         const texts = Array.from(modal.querySelectorAll('button')).map(b => (b.textContent || '').trim().toLowerCase());
@@ -7850,7 +7856,7 @@ async function _isPostAddConfirmation() {
             t.includes('continue to store') || t.includes('continue shopping') ||
             t === 'done' || t.includes('view cart')
         );
-    }).catch(() => false);
+    }, 5000, 'check for post-add confirmation dialog').catch(() => false);
 }
 
 // Error types for better handling
@@ -8367,8 +8373,11 @@ async function readBrowserCart() {
         const url = page.url();
         if (!url.includes('doordash.com')) return null;
 
-        // Try to read from the cart sidebar on the current page
-        const items = await page.evaluate(() => {
+        // Try to read from the cart sidebar on the current page. This is the app's own
+        // ground-truth cart check this whole file's history relies on ("never trust a fire-
+        // and-forget response, always cross-check with readBrowserCart()") — it defeats that
+        // purpose if it can hang forever itself, so every evaluate() here is bounded.
+        const items = await evalWithTimeout(page, () => {
             const results = [];
             // Cart items are in elements with data-anchor-id containing "CartItem"
             const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
@@ -8386,7 +8395,7 @@ async function readBrowserCart() {
                 if (name && name.length > 1) results.push({ name, quantity: qty, price });
             }
             return results;
-        });
+        }, 8000, 'read cart items from sidebar');
 
         if (items && items.length > 0) {
             console.log(`[DoorDash] readBrowserCart: found ${items.length} items in sidebar`);
@@ -8403,19 +8412,19 @@ async function readBrowserCart() {
         console.log('[DoorDash] readBrowserCart: no sidebar items, navigating to /home to open cart drawer');
         await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 45000 });
         await new Promise(r => setTimeout(r, 3000));
-        const opened = await page.evaluate(() => {
+        const opened = await evalWithTimeout(page, () => {
             const btn = document.querySelector('[data-anchor-id="HeaderOrderCart"]')
                 || document.querySelector('[aria-label*="cart" i]');
             if (btn) { btn.click(); return true; }
             return false;
-        });
+        }, 8000, 'open cart drawer');
         if (!opened) {
             console.log('[DoorDash] readBrowserCart: no cart icon found on current page');
             return null;
         }
         await new Promise(r => setTimeout(r, 1200));
 
-        const drawerItems = await page.evaluate(() => {
+        const drawerItems = await evalWithTimeout(page, () => {
             const results = [];
             const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
             for (const el of cartItemEls) {
@@ -8431,7 +8440,7 @@ async function readBrowserCart() {
                 if (name && name.length > 1) results.push({ name, quantity: qty, price });
             }
             return results;
-        });
+        }, 8000, 'read cart items from drawer');
 
         console.log(`[DoorDash] readBrowserCart: found ${drawerItems.length} items after opening drawer`);
         return drawerItems.length > 0 ? drawerItems : null;
