@@ -404,6 +404,7 @@
       -webkit-tap-highlight-color: transparent;
     }
     #checkout-cancel.hidden { display: none; }
+    #checkout-cancel:disabled { opacity: 0.5; }
     #checkout-msg {
       font-size: 12px;
       line-height: 1.4;
@@ -1141,12 +1142,15 @@
   const checkoutEstimate = document.getElementById('checkout-estimate');
   const checkoutMsg = document.getElementById('checkout-msg');
   let checkoutConfirming = false;
+  let checkoutConfirmShownAt = 0;
 
   function resetCheckoutUI() {
     checkoutConfirming = false;
+    checkoutConfirmShownAt = 0;
     checkoutBtn.textContent = 'Place Order';
     checkoutBtn.classList.remove('confirm');
     checkoutBtn.disabled = false;
+    checkoutCancel.disabled = false;
     checkoutCancel.classList.add('hidden');
     checkoutEstimate.classList.add('hidden');
     checkoutMsg.classList.add('hidden');
@@ -1160,6 +1164,17 @@
     return { subtotal, delivery, service, tax, total: subtotal + delivery + service + tax };
   }
 
+  // This exact touchscreen's resistive digitizer is documented elsewhere in this codebase to
+  // double-fire a single physical tap ("contact bounce") — see screen.html's tap debounce. A
+  // bounced first tap on "Place Order" could previously run BOTH click handler invocations
+  // back-to-back: the first sets checkoutConfirming=true synchronously, and the immediately-
+  // following bounced click already saw it true and proceeded straight to the real charge —
+  // the confirm screen was set but never actually seen/consciously tapped by the user. Ignoring
+  // any click that lands within this window of showing the confirm screen forces a second,
+  // deliberate tap. 600ms matches the debounce screen.html already uses for the same hardware
+  // quirk.
+  const CHECKOUT_CONFIRM_DEBOUNCE_MS = 600;
+
   checkoutBtn.addEventListener('click', async () => {
     if (!checkoutConfirming) {
       const est = estimateTotal();
@@ -1172,9 +1187,12 @@
       checkoutBtn.textContent = `Confirm — ${money(est.total)}`;
       checkoutBtn.classList.add('confirm');
       checkoutConfirming = true;
+      checkoutConfirmShownAt = Date.now();
       return;
     }
+    if (Date.now() - checkoutConfirmShownAt < CHECKOUT_CONFIRM_DEBOUNCE_MS) return;
     checkoutBtn.disabled = true;
+    checkoutCancel.disabled = true;
     checkoutBtn.textContent = 'Placing order…';
     checkoutMsg.classList.add('hidden');
     try {

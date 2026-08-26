@@ -319,6 +319,16 @@ Committed `1b59c53`, pushed.
 
 **Also spotted, not fixed (out of scope for this task):** both restaurants' fresh menus included one promo-banner item that slips past the existing promo-text filter — Wingstop's "Buy 1, get 1 free" ($15) and Costa Vida's "Try DashPass with a free trial" ($15) — different wording than the `/\d+%\s*off/`, `/^free\s/`, `/^save\s/` etc. patterns already filtered. Same bug class, not the review-text issue asked for today.
 
+Committed `801d343`, pushed.
+
+**Then fixed audit finding #2: food.html's checkout double-tap/cancel race (`public/food.html`).** Two real bugs in the two-tap checkout confirm flow, both matching this exact touchscreen's documented resistive-digitizer "contact bounce" behavior (a single physical tap can dispatch two `click` events):
+1. **A bounced first tap could skip the confirmation screen entirely.** The click handler had no time gate — the first (of two bounced) click synchronously set `checkoutConfirming = true` and returned; the immediately-following bounced click saw that flag already true and ran straight through to the real `/api/food/checkout` POST, so the user never actually saw or consciously tapped "Confirm — $X.XX" before being charged.
+2. **The Cancel button stayed clickable during the in-flight checkout request.** Tapping Cancel mid-request called `resetCheckoutUI()`, which re-enabled the "Place Order" button and cleared `checkoutConfirming` — a second real tap sequence could then fire a second `/api/food/checkout` POST before the first one had resolved.
+
+**Fix:** added a 600ms debounce window (`checkoutConfirmShownAt`, matching the debounce value screen.html already uses for the same hardware quirk) — any click landing within that window of showing the confirm screen is ignored, so a bounce can no longer complete both steps in one gesture. Also disable the Cancel button (native `disabled`, blocks the click event outright) for the duration of the real checkout request, re-enabled by `resetCheckoutUI()` on every exit path (error/dry-run/success, the last via `renderCart()`'s existing call to it).
+
+**Verified live with zero real-money risk:** loaded the real `food.html` in a Playwright browser pointed at the Pi, injected a fake cart item directly into JS state (no real DoorDash cart mutation), and stubbed `window.fetch` for `/api/food/checkout` only (a 1.5s-delayed fake success response) so no real network call could reach DoorDash. Confirmed: two synchronous `.click()` calls (simulating a bounce) produced **0** checkout calls, confirm text stayed showing; a genuine tap after waiting out the debounce produced exactly **1** call; Cancel was `disabled` immediately and a click on it while disabled was a no-op (state stayed `checkoutConfirming: true` mid-flight); after the stubbed request resolved, UI reset correctly (cart cleared, Cancel re-enabled, checkout button hidden). Real DoorDash cart confirmed empty before and after via a genuine `actions`-marked "my cart" voice check.
+
 **Not yet committed** — holding for user go-ahead.
 
 ## Railway Testing (no Twilio needed)
