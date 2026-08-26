@@ -299,6 +299,20 @@ User asked for one more deep bug check, this time across the entire codebase, no
 ### Not fixed — session paused here per user request
 User asked to pause and save all of this for the upcoming weekly report rather than starting a fix pass. Nothing above has been touched. When resuming, suggested priority order: (1) the scheduled-order lock bypass (#4) since it's the most architecturally serious and easiest to reason about (route `placeFullOrder`/`placeAdditionalOrder`'s internal calls through the already-`locked()` exports instead of the unlocked local functions), (2) the food.html checkout double-tap/cancel-race (#7/#8) since it's a direct, easily-reproducible real-money bug on the actual device, (3) extend today's `evalWithTimeout()` treatment to the voice/SMS retry call sites (#1) and add a `timeout=` to the Piper subprocess call (#3), (4) the 5 helper-function naked-evaluate audit (#2) — largest single chunk of work, do last since it's the most mechanical/repetitive.
 
+## Session 2026-08-26 (Day 3 of weekly plan) — fixed audit finding #1: scheduled-order lock bypass
+
+Started Day 3 by first committing+pushing the Day 2 fix that had been verified live but never committed (`2b2cf18`, bounding all naked `page.evaluate()` calls in `addItemByIndex` + the `closeBrowser()` backstop — see the "Session 2026-08-25 continued further" entry above). Repo/Pi/origin now in sync.
+
+**Then fixed audit finding #1 (the top-priority item from the 2026-08-25 full-codebase audit):** `placeFullOrder`/`placeAdditionalOrder` were exported unlocked in `doordash.js`'s `module.exports`, unlike every other browser-touching export (`placeOrder`, `checkoutCurrentCart`, `searchRestaurantsNearAddress`, `clearBrowserCart` are all already wrapped with `locked()`). Since `server.js`'s `checkScheduledOrders()` (fires every 60s via `setInterval`) calls `doordash.placeFullOrder(...)` directly, a scheduled order could run concurrently with an interactive voice/touchscreen session on the same shared browser page — real double-charge/wrong-order risk, not hypothetical.
+
+**Fix:** wrapped both exports with the existing `locked()` helper — `placeFullOrder: locked(placeFullOrder)`, `placeAdditionalOrder: locked(placeAdditionalOrder)`. Left `placeFullOrder`'s own internal calls to `searchRestaurant`/`addItemToCart`/`checkout`/`placeOrder` as raw local (unlocked) function calls, unchanged — calling one of the `locked()` exports from inside an already-locked call would deadlock against `withOpLock`'s single-promise-chain design (the outer call would never resolve until the inner one does, but the inner one queues behind the still-unresolved outer call).
+
+**Verified:** `node -c doordash.js` syntax-clean; deployed to the Pi, `frog-server` restarted cleanly (browser launched, Wingstop pre-warm succeeded); confirmed via `node -e` on the Pi that `dd.placeFullOrder` is now the `locked()` wrapper function, not the raw export; real DoorDash cart confirmed genuinely empty afterward via a real `"my cart"` voice request (exact `actions` marker present, not a hallucinated empty response). Did not attempt a live concurrent-scheduled-order race test — orchestrating a real scheduled order to fire while driving a simultaneous interactive session wasn't worth the real-money risk for what is a mechanical, low-risk change consistent with an already-proven pattern used successfully elsewhere in this exact file for months.
+
+**Not committed yet** — holding for user go-ahead before committing/pushing.
+
+**Next up:** audit finding #2 (food.html checkout double-tap/cancel race) per the suggested priority order, then finding #3 (extend timeout guards to voice/SMS retry paths + Piper subprocess), then the original Day 3 plan item (filter fake review-text menu items on Wingstop/Costa Vida) once the audit items are through.
+
 ## Railway Testing (no Twilio needed)
 ```bash
 # Send test message directly (no Twilio signature check)

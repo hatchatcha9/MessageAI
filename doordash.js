@@ -8555,9 +8555,16 @@ module.exports = {
     checkout,
     placeOrder: locked(placeOrder),
     getOrderConfirmation,
-    placeFullOrder,
+    // Locked: this drives the entire multi-step order flow (login/search/add/checkout/place)
+    // over the one shared browser page. server.js's checkScheduledOrders() fires this every
+    // 60s and previously called it unlocked — able to run concurrently with an interactive
+    // voice/touchscreen session on the same page (double-charge/wrong-order risk). Internally
+    // placeFullOrder calls the raw unlocked local functions (searchRestaurant, addItemToCart,
+    // checkout, placeOrder), not these locked exports — calling a locked() export from inside
+    // an already-locked call would deadlock against withOpLock's single promise chain.
+    placeFullOrder: locked(placeFullOrder),
     checkoutCurrentCart: locked(checkoutCurrentCart),
-    placeAdditionalOrder,
+    placeAdditionalOrder: locked(placeAdditionalOrder),
     handlePopups,
     takeScreenshot,
     isLoggedIn,
