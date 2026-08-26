@@ -252,10 +252,21 @@ def speak(text):
             try:
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                     wav_path = f.name
-                subprocess.run(
-                    [PIPER_BIN, '--model', PIPER_MODEL, '--output_file', wav_path],
-                    input=text.encode(), check=True, capture_output=True
-                )
+                try:
+                    # This is the only synchronous, blocking step in the single-threaded voice
+                    # loop with no bound — a hung piper process (no timeout= before this) would
+                    # freeze wake word, tap-to-speak, AND dictation entirely, forever, since
+                    # nothing else in the loop runs until speak() returns. 30s matches this
+                    # file's own convention for "a network/subprocess round trip should be done
+                    # by now" (see the VOICE_ENDPOINT/stream requests above); real piper
+                    # generation for a sentence-length utterance normally takes ~1-2s.
+                    subprocess.run(
+                        [PIPER_BIN, '--model', PIPER_MODEL, '--output_file', wav_path],
+                        input=text.encode(), check=True, capture_output=True, timeout=30
+                    )
+                except subprocess.TimeoutExpired:
+                    print("[frog] Piper TTS timed out after 30s — skipping this utterance")
+                    return False
                 with wave.open(wav_path, 'rb') as wf:
                     src_rate = wf.getframerate()
                     data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)

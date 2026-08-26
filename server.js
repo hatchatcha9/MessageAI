@@ -548,6 +548,32 @@ function formatCheckoutError(error) {
     return "Checkout ran into an issue. Your cart is saved — try saying 'checkout' again or reply 'help'.";
 }
 
+// Wraps a doordash.addItemByIndex() call with a generous timeout + closeBrowser() backstop.
+// A bare await here can wedge doordash.js's shared serial op lock indefinitely if a still-
+// unaudited helper function it calls into (applyOptionSelections/autoSelectAllRequiredOptions/
+// extractRequiredOptions/clickAddToOrderButton/clearPreSelectedOptions) hangs — every other
+// DoorDash request (search, select, checkout, even "show my cart") would then silently queue
+// behind an abandoned call nobody's waiting on anymore. On timeout, closeBrowser() (exported
+// unlocked specifically so it can run while another op is in flight) forces the abandoned call's
+// next page.* call to throw, so it actually unwinds through its own catch and releases the lock
+// for real, at the cost of a fresh browser launch on the next request. 180s matches the
+// food.html /api/food/cart/add fix's calibration (commit 2b2cf18) against the 98-147s range
+// observed for genuine successful single-call adds. This was previously only applied to
+// food.html's touchscreen route — the voice/SMS command path (the primary, older interface)
+// made the identical unguarded calls, meaning a hang there wedged the lock for BOTH surfaces.
+async function addItemByIndexGuarded(...args) {
+    try {
+        return await Promise.race([
+            doordash.addItemByIndex(...args),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('addItemByIndex timed out after 180000ms')), 180000))
+        ]);
+    } catch (err) {
+        console.error('[DoorDash] addItemByIndex hung/failed — force-closing browser to release the op lock:', err.message);
+        await doordash.closeBrowser().catch(() => {});
+        return { success: false, error: 'ITEM_NOT_ADDED', message: err.message };
+    }
+}
+
 // Process commands from AI response
 // Commands buildSystemPrompt()'s voice branch never documents (SMS/text-flow only:
 // budget filtering, DoorDash credential setup, order-status/scheduling). Until now
@@ -1067,12 +1093,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                 const itemText = prefsText.pendingDoordashItem;
                 const numText = itemText.menuIndex;
                 try {
-                    let addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
+                    let addResultText = await addItemByIndexGuarded(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
                     // If browser was closed (server restart), re-navigate and retry
                     if (!addResultText.success && addResultText.browserNotOpen && prefsText.currentRestaurantUrl) {
                         console.log('[Recovery] Browser not open - navigating back to restaurant page...');
                         await doordash.navigateToRestaurantPage(prefsText.currentRestaurantUrl);
-                        addResultText = await doordash.addItemByIndex(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
+                        addResultText = await addItemByIndexGuarded(numText, { selectFirst: false, selections: selectionsText, skipOptionsCheck: true, restaurantUrl: prefsText.currentRestaurantUrl }, itemText);
                     }
                     if (addResultText.success) {
                         const addedNamesText = [itemText.name];
@@ -1092,7 +1118,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             db.setUserPreferences(user.id, prefsText);
                             for (const queued of queuedAfterText) {
                                 try {
-                                    const qRes = await doordash.addItemByIndex(queued.num,
+                                    const qRes = await addItemByIndexGuarded(queued.num,
                                         { selectFirst: false, restaurantUrl: prefsText.currentRestaurantUrl }, queued.item);
                                     if (qRes.success) {
                                         const selectedOptionsQ = (!queued.item.label && Array.isArray(qRes.selectedOptions) && qRes.selectedOptions.length > 0)
@@ -1196,12 +1222,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             const itemOpt = prefsOpt.pendingDoordashItem;
             const numOpt = itemOpt.menuIndex;
             try {
-                let addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
+                let addResultOpt = await addItemByIndexGuarded(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
                 // If browser was closed (server restart), re-navigate and retry
                 if (!addResultOpt.success && addResultOpt.browserNotOpen && prefsOpt.currentRestaurantUrl) {
                     console.log('[Recovery] Browser not open - navigating back to restaurant page...');
                     await doordash.navigateToRestaurantPage(prefsOpt.currentRestaurantUrl);
-                    addResultOpt = await doordash.addItemByIndex(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
+                    addResultOpt = await addItemByIndexGuarded(numOpt, { selectFirst: false, selections: selectionsOpt, skipOptionsCheck: true, restaurantUrl: prefsOpt.currentRestaurantUrl }, itemOpt);
                 }
                 if (addResultOpt.success) {
                     const addedNames = [itemOpt.name];
@@ -1220,7 +1246,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         db.setUserPreferences(user.id, prefsOpt);
                         for (const queued of queuedAfterOpt) {
                             try {
-                                const qRes = await doordash.addItemByIndex(queued.num,
+                                const qRes = await addItemByIndexGuarded(queued.num,
                                     { selectFirst: false, restaurantUrl: prefsOpt.currentRestaurantUrl }, queued.item);
                                 if (qRes.success) {
                                     const selectedOptionsQ = (!queued.item.label && Array.isArray(qRes.selectedOptions) && qRes.selectedOptions.length > 0)
@@ -1430,13 +1456,13 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             { selectFirst: false, restaurantUrl: prefs.currentRestaurantUrl }; // Don't auto-select, let user choose
 
                         // Add item via browser automation
-                        let addResult = await doordash.addItemByIndex(num, addOptions, item);
+                        let addResult = await addItemByIndexGuarded(num, addOptions, item);
                         // If browser was closed (server restart), re-navigate and retry
                         if (!addResult.success && addResult.browserNotOpen && prefs.currentRestaurantUrl) {
                             console.log('[Recovery] Browser not open - navigating back to restaurant page...');
                             try {
                                 await doordash.navigateToRestaurantPage(prefs.currentRestaurantUrl);
-                                addResult = await doordash.addItemByIndex(num, addOptions, item);
+                                addResult = await addItemByIndexGuarded(num, addOptions, item);
                             } catch (e) {
                                 addResult = { success: false, error: 'Browser session expired. Please search for a restaurant again.' };
                             }
@@ -1488,7 +1514,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 prefs.pendingDoordashSelections = autoSelections;
                                 db.setUserPreferences(user.id, prefs);
                                 try {
-                                    const autoResult = await doordash.addItemByIndex(num, { selectFirst: false, selections: autoSelections, skipOptionsCheck: true, restaurantUrl: prefs.currentRestaurantUrl }, item);
+                                    const autoResult = await addItemByIndexGuarded(num, { selectFirst: false, selections: autoSelections, skipOptionsCheck: true, restaurantUrl: prefs.currentRestaurantUrl }, item);
                                     if (autoResult.success) {
                                         prefs.pendingDoordashItem = null;
                                         prefs.pendingDoordashOptions = null;
@@ -1902,7 +1928,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 lowerItem.startsWith(m.name.toLowerCase())
                             );
                             if (menuIdx >= 0) {
-                                const addResult = await doordash.addItemByIndex(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
+                                const addResult = await addItemByIndexGuarded(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
                                 if (addResult.success) {
                                     db.addToCart(user.id, lastOrder.restaurant_id, {
                                         id: `doordash-${menuIdx}`, name: item.name,
