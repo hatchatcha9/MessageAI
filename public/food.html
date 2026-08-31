@@ -1215,8 +1215,10 @@
       cartItems = [];
       renderCart();
       updateCartBar();
-      checkoutMsg.textContent = `Order placed! ${data.restaurant} — ${money(data.total)}. Say "order status" to Frog to check on delivery.`;
-      checkoutMsg.className = 'success';
+      checkoutMsg.textContent = data.unconfirmed
+        ? (data.message || `Submitted ${data.restaurant} — ${money(data.total)}, but not confirmed. Check your DoorDash app.`)
+        : `Order placed! ${data.restaurant} — ${money(data.total)}. Say "order status" to Frog to check on delivery.`;
+      checkoutMsg.className = data.unconfirmed ? 'error' : 'success';
       checkoutMsg.classList.remove('hidden');
     } catch {
       checkoutMsg.textContent = 'Could not reach the server.';

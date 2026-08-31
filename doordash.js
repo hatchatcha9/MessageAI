@@ -985,10 +985,13 @@ function delay(ms) {
 // ~79s worst-case with zero further log output). Wrap evaluate() calls that sit inside a
 // bounded loop with this so a stuck call throws instead of hanging the whole function.
 function evalWithTimeout(pageObj, fn, timeoutMs, label, arg) {
-    return Promise.race([
-        arg !== undefined ? pageObj.evaluate(fn, arg) : pageObj.evaluate(fn),
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`evaluate timed out after ${timeoutMs}ms${label ? ` (${label})` : ''}`)), timeoutMs))
-    ]);
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`evaluate timed out after ${timeoutMs}ms${label ? ` (${label})` : ''}`)), timeoutMs);
+    });
+    const evalP = arg !== undefined ? pageObj.evaluate(fn, arg) : pageObj.evaluate(fn);
+    // clear the loser's timer so it doesn't pile up under sustained load
+    return Promise.race([evalP, timeout]).finally(() => clearTimeout(timer));
 }
 
 // Debug screenshot interval - captures screenshots every N seconds during item selection
@@ -1943,6 +1946,21 @@ async function addItemToCart(itemName, options = {}) {
         await addButton.click();
         await delay(1500);
 
+        // Verify the customization modal actually closed. If it's still open, a
+        // required option probably wasn't satisfied and nothing was added — the
+        // scheduled-order path (placeFullOrder) must not proceed to checkout
+        // thinking this item is in the cart.
+        const modalStillOpen = await evalWithTimeout(page, () => {
+            const m = document.querySelector('[role="dialog"], [aria-modal="true"]');
+            if (!m) return false;
+            const s = window.getComputedStyle(m);
+            return s.display !== 'none' && s.visibility !== 'hidden';
+        }, 5000, 'addItemToCart: modal closed check').catch(() => false);
+        if (modalStillOpen) {
+            await takeScreenshot('add-item-modal-stuck');
+            return { success: false, error: `Could not add "${itemName}" — its options may need attention` };
+        }
+
         console.log(`[DoorDash] Added ${itemName} to cart`);
         return { success: true, item: itemName };
 
@@ -2244,16 +2262,20 @@ async function placeOrder() {
             await delay(1000);
         }
 
+        let leftCheckoutButUnconfirmed = false;
         if (!confirmationDetected) {
             await takeScreenshot('order-confirmation-timeout');
             // Even if we don't detect confirmation, check the page state
             const finalUrl = page.url();
             console.log('[DoorDash] Final URL after order attempt:', finalUrl);
 
-            // If URL changed from checkout, assume success
+            // Left the checkout page but nothing positively confirmed the order.
+            // That's a weak signal (DoorDash usually redirects on success), not a
+            // guarantee — flag it as unconfirmed rather than a clean success.
             if (!finalUrl.includes('/checkout')) {
-                console.log('[DoorDash] No longer on checkout page - assuming success');
+                console.log('[DoorDash] No longer on checkout page - treating as UNCONFIRMED (no positive confirmation seen)');
                 confirmationDetected = true;
+                leftCheckoutButUnconfirmed = true;
             }
         }
 
@@ -2264,6 +2286,7 @@ async function placeOrder() {
         if (confirmationDetected || confirmation.orderNumber) {
             return {
                 success: true,
+                unconfirmed: leftCheckoutButUnconfirmed && !confirmation.orderNumber ? true : undefined,
                 ...confirmation
             };
         }
@@ -2874,6 +2897,30 @@ async function checkoutCurrentCart(options = {}) {
             return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.' };
         }
 
+        // Capture the real order total from the checkout page BEFORE placing — the
+        // page navigates away after, and server.js was otherwise rebuilding the
+        // saved-order record from the local cart + hardcoded fee estimates.
+        let orderTotals = null;
+        try {
+            const totalFromBtn = (btnText.match(/\$\s?(\d+(?:\.\d{2})?)/) || [])[1];
+            const summary = await evalWithTimeout(page, () => document.body.innerText, 5000, 'checkout summary text').catch(() => '');
+            const grab = (label) => {
+                const m = summary.match(new RegExp(label + '[^$]*\\$\\s?(\\d+(?:\\.\\d{2})?)', 'i'));
+                return m ? parseFloat(m[1]) : undefined;
+            };
+            orderTotals = {
+                subtotal: grab('subtotal'),
+                tax: grab('(?:estimated )?tax'),
+                deliveryFee: grab('delivery fee'),
+                serviceFee: grab('service fee'),
+                total: totalFromBtn ? parseFloat(totalFromBtn) : grab('total'),
+            };
+            if (Object.values(orderTotals).every(v => v === undefined)) orderTotals = null;
+            else console.log('[DoorDash] Captured order totals from checkout page:', JSON.stringify(orderTotals));
+        } catch (e) {
+            console.log('[DoorDash] Could not capture order totals:', e.message);
+        }
+
         console.log('[DoorDash] Clicking Place Order...');
         await orderBtn.click();
 
@@ -2900,7 +2947,7 @@ async function checkoutCurrentCart(options = {}) {
 
         if (isConfirmedUrl || isConfirmedText) {
             console.log('[DoorDash] Order confirmed!');
-            return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot };
+            return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals };
         }
 
         // Still on checkout page — check for error messages
@@ -2910,9 +2957,28 @@ async function checkoutCurrentCart(options = {}) {
             return { success: false, error: errorText };
         }
 
-        // Clicked Place Order but no confirmation — assume it went through (DoorDash sometimes stays on checkout briefly)
-        console.log('[DoorDash] Place Order clicked — no clear confirmation page, assuming success');
-        return { success: true, message: 'Order submitted - check DoorDash app to confirm', orderUrl: currentUrl, scheduledSlot: selectedSlot };
+        // No positive confirmation. Instead of blindly assuming success, check
+        // whether the Place Order button is still sitting there enabled — DoorDash
+        // removes/replaces it once the order actually submits. If it's still
+        // clickable, the order almost certainly did NOT go through, and the cart
+        // is intact, so this is a safe-to-retry failure rather than a silent
+        // "maybe charged".
+        const placeBtnStillLive = await evalWithTimeout(page, () => {
+            const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const b = btns.find(x => /place order|submit order/i.test(x.textContent || ''));
+            if (!b) return false;
+            const s = window.getComputedStyle(b);
+            if (s.display === 'none' || s.visibility === 'hidden') return false;
+            return !(b.disabled === true || b.getAttribute('aria-disabled') === 'true' || b.getAttribute('aria-busy') === 'true');
+        }, 5000, 'post-order place-button check').catch(() => false);
+
+        if (placeBtnStillLive) {
+            console.log('[DoorDash] No confirmation and Place Order button still live — treating as NOT placed (cart intact, safe to retry)');
+            return { success: false, error: 'Could not confirm the order was placed. Your cart is still here — try again.' };
+        }
+
+        console.log('[DoorDash] Place Order clicked, button gone, but no confirmation page seen — reporting UNCONFIRMED');
+        return { success: true, unconfirmed: true, message: 'Order submitted but not confirmed — check your DoorDash app.', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals };
 
     } catch (error) {
         console.error('[DoorDash] Checkout error:', error.message);
@@ -3914,7 +3980,7 @@ async function extractMenuItems() {
             pricesFound = true;
             console.log('[DoorDash] Prices detected on page ✓');
         } catch (e) {
-            const pageContent = await page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'eval failed');
+            const pageContent = await evalWithTimeout(page, () => document.body.innerText.substring(0, 300), 5000, 'no-price diag').catch(() => 'eval failed');
             console.log('[DoorDash] No prices after 15s — page content:', pageContent);
             await takeScreenshot('extract-menu-no-prices');
 
@@ -4069,7 +4135,10 @@ async function extractMenuItems() {
         // Final pass at the top (items at top may have been unloaded while at bottom)
         await evaluateWithTimeout(() => window.scrollTo(0, 0)).catch(() => {});
         await delay(800);
-        const topBatch = await extractAtViewport().catch(() => []);
+        const topBatch = await Promise.race([
+            extractAtViewport(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('top-batch extract timeout')), 8000))
+        ]).catch(() => []);
         for (const item of topBatch) {
             const key = item.name.toLowerCase();
             if (!allItemsMap.has(key)) allItemsMap.set(key, item);
@@ -4086,7 +4155,7 @@ async function extractMenuItems() {
         let fallback = [];
         {
             console.log('[DoorDash] Trying strategy 2 (generic elements)...');
-            fallback = await page.evaluate(() => {
+            fallback = await evaluateWithTimeout(() => {
                 const results = [];
                 const seen = new Set();
                 const all = document.querySelectorAll('button, article, div, [role="button"]');
@@ -4135,7 +4204,7 @@ async function extractMenuItems() {
                     results.push({ name, price, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
                 }
                 return results.slice(0, 60);
-            });
+            }).catch(e => { console.log('[DoorDash] Strategy 2 evaluate timed out/failed:', e.message); return []; });
             console.log(`[DoorDash] Strategy 2 (generic): ${fallback.length} items`);
         }
 
@@ -5013,12 +5082,12 @@ async function selectRestaurantFromSearch(indexOrUrl) {
             const turnstileStart = Date.now();
             let triedSolver = false;
             for (let t = 0; t < 30; t++) {
-                const overlayPresent = await page.evaluate(() => {
+                const overlayPresent = await evalWithTimeout(page, () => {
                     const el = document.querySelector('[data-testid="turnstile/overlay"]');
                     if (!el) return false;
                     const s = window.getComputedStyle(el);
                     return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
-                }).catch(() => false);
+                }, 5000, 'turnstile overlay check').catch(() => false);
                 if (!overlayPresent) {
                     if (t > 0) console.log(`[DoorDash] Turnstile overlay cleared after ${t}s`);
                     else console.log('[DoorDash] No Turnstile overlay detected');
@@ -5053,7 +5122,7 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 // JS navigate to search page from homepage context
                 const retrySearchUrl = sessionState.lastSearchUrl || DOORDASH_URL;
                 console.log('[DoorDash] Retry: JS navigate to search page:', retrySearchUrl);
-                await page.evaluate((url) => { window.location.href = url; }, retrySearchUrl);
+                await evalWithTimeout(page, (url) => { window.location.href = url; }, 8000, 'JS nav to search', retrySearchUrl).catch(() => {});
                 await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                 await waitForCFChallenge(20000);
                 await delay(2000);
@@ -5061,10 +5130,10 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 const storeId = targetUrl.match(/\/store\/(?:[^/?#]*\/)?(\d+)/)?.[1];
                 let retryNavOk = false;
                 if (storeId) {
-                    const linkHref = await page.evaluate((id) => {
+                    const linkHref = await evalWithTimeout(page, (id) => {
                         const a = document.querySelector(`a[href*="/store/"][href*="${id}"]`);
                         return a ? a.href : null;
-                    }, storeId);
+                    }, 5000, 'retry link lookup', storeId).catch(() => null);
                     if (linkHref) {
                         console.log('[DoorDash] Retry: clicking restaurant link:', linkHref);
                         const link = page.locator(`a[href*="/store/"][href*="${storeId}"]`).first();
@@ -5076,13 +5145,13 @@ async function selectRestaurantFromSearch(indexOrUrl) {
                 if (!retryNavOk) {
                     // Fallback to JS navigate from search context
                     console.log('[DoorDash] Retry: link not found — JS navigate to store');
-                    await page.evaluate((url) => { window.location.href = url; }, targetUrl);
+                    await evalWithTimeout(page, (url) => { window.location.href = url; }, 8000, 'JS nav to store', targetUrl).catch(() => {});
                     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
                 }
                 await delay(2000);
                 await waitForCFChallenge(30000);
                 finalUrl = page.url();
-                bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 150)).catch(() => '');
+                bodySnippet = await evalWithTimeout(page, () => document.body.innerText.substring(0, 150), 5000, 'retry body snippet').catch(() => '');
                 console.log('[DoorDash] After retry — URL:', finalUrl, '| Body:', bodySnippet);
             }
         } else {
@@ -7158,6 +7227,43 @@ async function applyOptionSelections(selections) {
             ]);
         };
 
+        // Is the option we actually wanted now selected in its group?
+        //   true  → confirmed selected
+        //   false → confirmed a DIFFERENT option is selected (our click missed / hit the wrong thing)
+        //   null  → couldn't tell
+        // Used to guard the "required count was already 0, so assume the click worked"
+        // shortcut in Strategies 1/1b/2b — without it a missed click on an
+        // already-satisfied radiogroup silently locks in the wrong flavor/size.
+        const targetOptionSelected = async (groupIdx, optText, optIdx) => {
+            return evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
+                const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
+                const groups = modal && modal.querySelectorAll('[role="radiogroup"], [role="group"]');
+                const group = groups && groups[groupIdx];
+                if (!group) return null;
+                const lower = (optText || '').toLowerCase().trim();
+                const isChecked = (el) => !!el && (el.checked === true
+                    || el.getAttribute('aria-checked') === 'true'
+                    || el.getAttribute('aria-selected') === 'true');
+                const optionEls = Array.from(group.querySelectorAll(
+                    'label, [role="radio"], [role="checkbox"], button[data-is-interactive="true"]'
+                ));
+                if (!optionEls.length) return null;
+                const matchesText = (el) => lower && (el.textContent || '').toLowerCase().trim().startsWith(lower);
+                let target = lower ? optionEls.find(matchesText) : optionEls[Math.min(optIdx, optionEls.length - 1)];
+                if (!target && !lower) return null;
+                if (!target) return null;
+                const targetInput = target.matches('input') ? target : target.querySelector('input[type="radio"], input[type="checkbox"]');
+                if (isChecked(targetInput) || isChecked(target)) return true;
+                // Is some OTHER option in this group selected instead?
+                const anyOther = optionEls.some(el => {
+                    if (el === target) return false;
+                    const inp = el.matches('input') ? el : el.querySelector('input[type="radio"], input[type="checkbox"]');
+                    return isChecked(inp) || isChecked(el);
+                });
+                return anyOther ? false : null;
+            }, 5000, 'verify target option selected', { groupIdx, optText, optIdx }).catch(() => null);
+        };
+
         for (const sel of selections) {
             console.log(`[DoorDash] Processing selection: group=${sel.groupIndex}, option=${sel.optionIndex}, text="${sel.optionText || 'N/A'}", groupName="${sel.groupName || 'N/A'}"`);
 
@@ -7385,9 +7491,17 @@ async function applyOptionSelections(selections) {
                     });
                     await delay(600);
                     const afterCount = await getRequiredCount();
-                    if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                    if (afterCount < beforeCount) {
                         console.log(`[DoorDash] Locator click registered! (${beforeCount} → ${afterCount} required)`);
                         clicked = true;
+                    } else if (beforeCount === 0 && afterCount === 0) {
+                        const verified = await targetOptionSelected(sel.groupIndex, optText, optIdx);
+                        if (verified !== false) {
+                            console.log(`[DoorDash] Locator click accepted (count already 0, target selected=${verified})`);
+                            clicked = true;
+                        } else {
+                            console.log(`[DoorDash] Locator click NOT accepted — a different option is selected in this group`);
+                        }
                     } else {
                         console.log(`[DoorDash] Locator click did not register (still ${afterCount} required)`);
                     }
@@ -7416,9 +7530,17 @@ async function applyOptionSelections(selections) {
                         await targetStepper.click({ timeout: 5000 });
                         await delay(600);
                         const afterCount = await getRequiredCount();
-                        if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                        if (afterCount < beforeCount) {
                             console.log(`[DoorDash] Stepper click registered! (${beforeCount} → ${afterCount} required)`);
                             clicked = true;
+                        } else if (beforeCount === 0 && afterCount === 0) {
+                            const verified = await targetOptionSelected(sel.groupIndex, optText, optIdx);
+                            if (verified !== false) {
+                                console.log(`[DoorDash] Stepper click accepted (count already 0, target selected=${verified})`);
+                                clicked = true;
+                            } else {
+                                console.log(`[DoorDash] Stepper click NOT accepted — a different option is selected in this group`);
+                            }
                         } else {
                             console.log(`[DoorDash] Stepper click did not register (still ${afterCount} required)`);
                         }
@@ -7429,11 +7551,11 @@ async function applyOptionSelections(selections) {
             }
 
             // Strategy 2: coordinate click after scrollIntoView — logs elementFromPoint for overlay diagnosis
-            if (!clicked) {
-                // This call has no surrounding try/catch (unlike every other Strategy below),
-                // so it's the one call in this function a naked hang could most easily wedge
-                // the whole applyOptionSelections()/addItemByIndex() chain through — bound it
-                // and fall back to null (same as "no target found") on timeout.
+            if (!clicked) try {
+                // The evaluate is bounded + .catch'd, but page.mouse.click / getRequiredCount
+                // below could still throw on a transient page state — a bare throw here used to
+                // escape the whole `for (const sel of selections)` loop, silently dropping every
+                // remaining selection. Keep it inside this try/catch like every other Strategy.
                 const coords = await evalWithTimeout(page, ({ groupIdx, optText, optIdx }) => {
                     const modal = document.querySelector('[role="dialog"], [aria-modal="true"]');
                     if (!modal) return null;
@@ -7462,6 +7584,8 @@ async function applyOptionSelections(selections) {
                         clicked = true;
                     }
                 }
+            } catch (e) {
+                console.log(`[DoorDash] Strategy 2 error:`, e.message.substring(0, 150));
             }
 
             // Strategy 2b: click [role="radio"] ARIA element (DoorDash uses these instead of <input type="radio">)
@@ -7485,9 +7609,17 @@ async function applyOptionSelections(selections) {
                         await target.click({ timeout: 4000 });
                         await delay(600);
                         const afterCount = await getRequiredCount();
-                        if (afterCount < beforeCount || (beforeCount === 0 && afterCount === 0)) {
+                        if (afterCount < beforeCount) {
                             console.log(`[DoorDash] Strategy 2b registered! (${beforeCount} → ${afterCount})`);
                             clicked = true;
+                        } else if (beforeCount === 0 && afterCount === 0) {
+                            const verified = await targetOptionSelected(sel.groupIndex, optText, optIdx);
+                            if (verified !== false) {
+                                console.log(`[DoorDash] Strategy 2b accepted (count already 0, target selected=${verified})`);
+                                clicked = true;
+                            } else {
+                                console.log(`[DoorDash] Strategy 2b NOT accepted — a different option is selected in this group`);
+                            }
                         } else {
                             console.log(`[DoorDash] Strategy 2b no change (${afterCount} required)`);
                         }
@@ -8240,7 +8372,7 @@ async function removeCartItem(itemName) {
         let removedAny = false;
 
         for (let attempt = 0; attempt < 20; attempt++) {
-            const clicked = await page.evaluate((target) => {
+            const clicked = await evalWithTimeout(page, (target) => {
                 function score(name) {
                     name = name.toLowerCase().trim();
                     if (name === target) return 3;
@@ -8269,7 +8401,7 @@ async function removeCartItem(itemName) {
                 if (!decBtn) return false;
                 decBtn.click();
                 return true;
-            }, target);
+            }, 8000, 'removeCartItem match', target);
 
             if (!clicked) break;
             removedAny = true;
@@ -8429,11 +8561,21 @@ async function readBrowserCart() {
             const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
             for (const el of cartItemEls) {
                 if (el.tagName === 'BUTTON') continue;
-                const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"]')
+                const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"], [data-anchor-id*="ItemName"], h3, h4')
                     || el.querySelector('span[class*="name"], p[class*="name"]');
                 const qtyEl = el.querySelector('[data-anchor-id*="CartItemQuantity"], [data-anchor-id*="quantity"]');
                 const priceEl = el.querySelector('[data-anchor-id*="CartItemPrice"], [data-testid*="price"]');
-                const name = nameEl ? nameEl.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
+                let name = nameEl ? nameEl.textContent.trim() : '';
+                if (!name) {
+                    // No name node — derive from the row text without swallowing the
+                    // options / price / quantity-stepper text (DoorDash sometimes
+                    // renders the whole row with no newlines, so split('\n')[0] used
+                    // to return the entire concatenated string as the "name").
+                    const raw = (el.textContent || '').trim();
+                    name = raw.split('\n')[0].split('$')[0].replace(/\s{2,}/g, ' ').trim();
+                    name = name.replace(/\d+\s*cal.*$/i, '').replace(/\s+\d+\s*×.*$/i, '').trim();
+                    if (name.length > 80) name = '';
+                }
                 const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
                 const priceText = priceEl ? priceEl.textContent.trim() : '';
                 const price = parseFloat((priceText.match(/\$?([\d.]+)/) || [])[1] || '0');

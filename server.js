@@ -1789,26 +1789,30 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             }
                         });
 
-                        // Estimate fees (DoorDash typical: delivery $2.99, service ~15%, tax ~8%)
-                        const deliveryFee = 2.99;
-                        const serviceFee = subtotal * 0.15;
-                        const tax = subtotal * 0.08;
-                        const total = subtotal + deliveryFee + serviceFee + tax;
+                        // Prefer the real totals scraped off the DoorDash checkout page;
+                        // fall back to a local-cart estimate only if scraping failed.
+                        const rt = result.orderTotals || {};
+                        const estDelivery = 2.99, estService = subtotal * 0.15, estTax = subtotal * 0.08;
+                        const realSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal : subtotal;
+                        const total = typeof rt.total === 'number'
+                            ? rt.total
+                            : realSubtotal + estDelivery + estService + estTax;
 
                         // Get user address
                         const userAddress = db.getUserAddress(user.id) || 'Address on file';
 
-                        db.createOrder(
+                        const orderId = db.createOrder(
                             user.id,
                             prefs.currentRestaurant,
                             restaurantName,
                             cart.items[prefs.currentRestaurant] || [],
                             userAddress,
-                            subtotal.toFixed(2),
+                            realSubtotal.toFixed(2),
                             total.toFixed(2),
                             prefs.currentRestaurantUrl || null,
                             result.orderUrl || null
                         );
+                        if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
                         db.clearCart(user.id);
                         prefs.currentRestaurant = null;
                         prefs.currentRestaurantSource = null;
@@ -1816,8 +1820,10 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         prefs.scheduledOrder = null;
                         db.setUserPreferences(user.id, prefs);
 
-                        additionalContext = `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`;
-                        actions.push({ type: 'order_placed_doordash', restaurant: restaurantName });
+                        additionalContext = result.unconfirmed
+                            ? `\n\nI submitted the order but couldn't confirm it went through — check your DoorDash app to be sure. Reply "order status" to track it.`
+                            : `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`;
+                        actions.push({ type: 'order_placed_doordash', restaurant: restaurantName, unconfirmed: !!result.unconfirmed });
                     } else {
                         additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
                     }
@@ -1858,16 +1864,22 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
                     const restaurantName = currentRestaurant?.name || 'DoorDash Order';
                     const slotLabel = result.scheduledSlot || scheduledTime;
-                    db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
-                        cart.items[prefs.currentRestaurant] || [], address, '0', '0',
+                    const rt = result.orderTotals || {};
+                    const schedSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal.toFixed(2) : '0';
+                    const schedTotal = typeof rt.total === 'number' ? rt.total.toFixed(2) : '0';
+                    const schedOrderId = db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
+                        cart.items[prefs.currentRestaurant] || [], address, schedSubtotal, schedTotal,
                         prefs.currentRestaurantUrl || null, result.orderUrl || null);
+                    if (result.unconfirmed) db.updateOrderStatus(schedOrderId, 'unconfirmed');
                     db.clearCart(user.id);
                     prefs.currentRestaurant = null;
                     prefs.currentRestaurantSource = null;
                     prefs.currentRestaurantUrl = null;
                     db.setUserPreferences(user.id, prefs);
-                    additionalContext = `\n\nOrder placed! Scheduled delivery: ${slotLabel}. Reply "order status" to check on it.`;
-                    actions.push({ type: 'order_placed_doordash_scheduled', restaurant: restaurantName, slot: slotLabel });
+                    additionalContext = result.unconfirmed
+                        ? `\n\nSubmitted for scheduled delivery (${slotLabel}) but couldn't confirm — check your DoorDash app. Reply "order status" to track it.`
+                        : `\n\nOrder placed! Scheduled delivery: ${slotLabel}. Reply "order status" to check on it.`;
+                    actions.push({ type: 'order_placed_doordash_scheduled', restaurant: restaurantName, slot: slotLabel, unconfirmed: !!result.unconfirmed });
                 } else {
                     additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
                 }
@@ -3427,13 +3439,15 @@ app.post('/api/food/checkout', async (req, res) => {
             return res.status(502).json({ error: formatCheckoutError(result.error) });
         }
 
-        const subtotal = items.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
-        const deliveryFee = 2.99;
-        const serviceFee = subtotal * 0.15;
-        const tax = subtotal * 0.08;
-        const total = subtotal + deliveryFee + serviceFee + tax;
+        const estSubtotal = items.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
+        const rt = result.orderTotals || {};
+        const subtotal = typeof rt.subtotal === 'number' ? rt.subtotal : estSubtotal;
+        const total = typeof rt.total === 'number'
+            ? rt.total
+            : subtotal + 2.99 + subtotal * 0.15 + subtotal * 0.08;
 
-        db.createOrder(user.id, current.id, current.name, items, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
+        const orderId = db.createOrder(user.id, current.id, current.name, items, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
+        if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
         db.clearCart(user.id);
         const prefs = db.getUserPreferences(user.id);
         prefs.currentRestaurant = null;
@@ -3441,7 +3455,15 @@ app.post('/api/food/checkout', async (req, res) => {
         prefs.currentRestaurantUrl = null;
         db.setUserPreferences(user.id, prefs);
 
-        res.json({ success: true, total: total.toFixed(2), restaurant: current.name });
+        res.json({
+            success: true,
+            unconfirmed: !!result.unconfirmed,
+            total: total.toFixed(2),
+            restaurant: current.name,
+            message: result.unconfirmed
+                ? "Order submitted, but DoorDash didn't show a confirmation — check your DoorDash app to be sure."
+                : undefined,
+        });
     } catch (err) {
         console.error('[Food] /api/food/checkout error:', err.message);
         res.status(502).json({ error: formatCheckoutError(err?.message || String(err)) });
