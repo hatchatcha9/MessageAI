@@ -4294,17 +4294,22 @@ app.listen(PORT, async () => {
         }
     }
 
-    // Prewarm the browser onto whatever restaurant page was last selected, so the
-    // first tap-to-add right after a restart doesn't hit the browserNotOpen
-    // cold-start gap (addItemByIndex bails immediately if page/context aren't up
-    // yet, and that bail only helps the *next* request, not the one that hit it).
+    // Prewarm the browser on boot so the first tap-to-add right after a restart
+    // doesn't eat the cold-start browser-launch + CF-challenge latency
+    // (addItemByIndex bails immediately if page/context aren't up yet, and that
+    // bail only helps the *next* request, not the one that hit it).
+    //
+    // Deliberately homepage-only, NOT prewarmRestaurantPage(cachedRestaurant.url):
+    // db.getCachedCurrentRestaurant() can be stale (a restaurant from a prior day's
+    // session), and the prewarm is queued behind the shared op lock — a stale entry
+    // would navigate the shared page away from whatever restaurant a fresh session
+    // (started right after boot) is actively using. Observed 2026-08-29: a stale
+    // "smoothies" restaurant hijacked an active Costa Vida add → "0 items found".
+    // prewarmBrowser() only ever touches /home and is a no-op once the page is
+    // already on doordash.com, so it cannot drag an active session anywhere.
     if (doordashUI) {
-        const startupUser = db.getOrCreateUser(PI_DEVICE_ID);
-        const startupRestaurant = db.getCachedCurrentRestaurant(startupUser.id);
-        if (startupRestaurant && startupRestaurant.url) {
-            console.log(`[Startup] Prewarming browser for cached restaurant: ${startupRestaurant.name || startupRestaurant.id}`);
-            doordashUI.prewarmRestaurantPage(startupRestaurant.url)
-                .catch(err => console.error('[Startup] Prewarm failed:', err.message));
-        }
+        console.log('[Startup] Prewarming DoorDash browser (homepage)...');
+        doordashUI.prewarmBrowser()
+            .catch(err => console.error('[Startup] Prewarm failed:', err.message));
     }
 });

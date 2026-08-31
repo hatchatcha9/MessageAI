@@ -8499,9 +8499,24 @@ function locked(fn) {
     return function(...args) { return withOpLock(() => fn(...args)); };
 }
 
-async function prewarmRestaurantPage(restaurantUrl) {
+// Bumped every time a newer restaurant-prewarm intent is registered. A prewarm
+// that has been sitting in the op-lock queue while a newer one was requested must
+// NOT run its page.goto() — it would drag the shared browser page (and any active
+// user session that started right after boot) to a now-stale restaurant. Observed
+// 2026-08-29: a stale "smoothies" restaurant left in the cache hijacked an active
+// Costa Vida add mid-session ("Item 13 not found on page. Only found 0 items.").
+let _preWarmSeq = 0;
+
+function prewarmRestaurantPage(restaurantUrl) {
+    const mySeq = ++_preWarmSeq;
     _preWarmUrl = restaurantUrl;
-    _preWarmPromise = (async () => {
+    // Self-locks via withOpLock (was exported through locked() before) so the seq
+    // can be captured synchronously at call time, before queuing.
+    _preWarmPromise = withOpLock(async () => {
+        if (mySeq !== _preWarmSeq) {
+            console.log('[DoorDash] Pre-warm superseded before it ran — skipping stale nav to', (restaurantUrl || '').substring(0, 80));
+            return;
+        }
         try {
             if (!page || !context) await launchBrowser();
             // Quick health check
@@ -8532,7 +8547,7 @@ async function prewarmRestaurantPage(restaurantUrl) {
         } catch (e) {
             console.log('[DoorDash] Pre-warm error:', e.message);
         }
-    })();
+    });
     return _preWarmPromise;
 }
 
@@ -8609,15 +8624,13 @@ module.exports = {
     getOrderStatus: locked(getOrderStatus),
     exportCookies,
     importCookies,
-    // Locked like every other browser-touching export: prewarmRestaurantPage() was
-    // previously unlocked, on the assumption that a "background" prewarm running
-    // concurrently with a real operation was harmless. Confirmed live it isn't — a
-    // startup prewarm's own page.goto() destroyed a concurrently-running
-    // clearBrowserCart()'s cart-drawer state, reproducing the exact "wrong drawer,
-    // 0 items" bug the /home-navigation fix in clearBrowserCart() was meant to
-    // prevent. Callers already treat this as fire-and-forget (.catch(()=>{})), so
-    // queueing behind the lock instead of running concurrently costs nothing they
-    // were relying on.
-    prewarmRestaurantPage: locked(prewarmRestaurantPage),
+    // prewarmRestaurantPage self-locks via withOpLock internally (so it can capture
+    // its supersede-seq synchronously at call time) — do NOT wrap it in locked()
+    // again here. It runs behind the same serial op lock as every other
+    // browser-touching export: a startup/background prewarm's own page.goto() was
+    // confirmed live to destroy a concurrently-running clearBrowserCart()'s
+    // cart-drawer state ("wrong drawer, 0 items"). Callers treat it as
+    // fire-and-forget (.catch(()=>{})), so queueing behind the lock costs nothing.
+    prewarmRestaurantPage,
     prewarmBrowser,
 };
