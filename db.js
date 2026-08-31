@@ -16,6 +16,13 @@ if (!process.env.ENCRYPTION_KEY) {
     console.error('[db] ENCRYPTION_KEY env var is not set — refusing to start to avoid silent data loss');
     process.exit(1);
 }
+// aes-256-gcm needs a 32-byte key. Buffer.from(badKey,'hex') silently yields a
+// short/garbled buffer and createCipheriv() then throws on the FIRST encrypt
+// call (mid-request), not at boot — validate the shape up front instead.
+if (!/^[0-9a-fA-F]{64}$/.test(process.env.ENCRYPTION_KEY)) {
+    console.error('[db] ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes) for aes-256-gcm');
+    process.exit(1);
+}
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 const ALGORITHM = 'aes-256-gcm';
 
@@ -162,16 +169,38 @@ function getUserByPhone(phoneNumber) {
     return db.prepare('SELECT * FROM users WHERE phone_number = ?').get(phoneNumber);
 }
 
+// PINs are hashed with scrypt + a per-user random salt, stored as
+// "scrypt:<saltHex>:<hashHex>". Old rows are bare sha256 hex (unsalted, single
+// round) — verifyUserPin() still accepts those and transparently re-hashes to
+// scrypt on the next successful check.
+function _scryptHash(pin, salt) {
+    return crypto.scryptSync(String(pin), salt, 32).toString('hex');
+}
+
 function setUserPin(userId, pin) {
-    const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
-    db.prepare('UPDATE users SET pin_hash = ? WHERE id = ?').run(pinHash, userId);
+    const salt = crypto.randomBytes(16);
+    const stored = `scrypt:${salt.toString('hex')}:${_scryptHash(pin, salt)}`;
+    db.prepare('UPDATE users SET pin_hash = ? WHERE id = ?').run(stored, userId);
 }
 
 function verifyUserPin(userId, pin) {
     const user = db.prepare('SELECT pin_hash FROM users WHERE id = ?').get(userId);
     if (!user || !user.pin_hash) return false;
-    const pinHash = crypto.createHash('sha256').update(pin).digest('hex');
-    return user.pin_hash === pinHash;
+
+    if (user.pin_hash.startsWith('scrypt:')) {
+        const [, saltHex, hashHex] = user.pin_hash.split(':');
+        const expected = Buffer.from(hashHex, 'hex');
+        const actual = Buffer.from(_scryptHash(pin, Buffer.from(saltHex, 'hex')), 'hex');
+        return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+    }
+
+    // Legacy unsalted sha256 hex
+    const legacy = crypto.createHash('sha256').update(String(pin)).digest('hex');
+    const a = Buffer.from(legacy, 'hex');
+    const b = Buffer.from(user.pin_hash, 'hex');
+    const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
+    if (ok) setUserPin(userId, pin); // upgrade in place
+    return ok;
 }
 
 function setUserAddress(userId, address) {
@@ -360,10 +389,17 @@ function createOrder(userId, restaurantId, restaurantName, items, address, subto
     return result.lastInsertRowid;
 }
 
+// A corrupt/empty items column shouldn't blow up order history — degrade to [],
+// matching the graceful-parse pattern used elsewhere in this file.
+function _parseItems(raw) {
+    try { return JSON.parse(raw || '[]'); }
+    catch { return []; }
+}
+
 function getOrder(orderId) {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     if (order) {
-        order.items = JSON.parse(order.items);
+        order.items = _parseItems(order.items);
     }
     return order;
 }
@@ -376,7 +412,7 @@ function getUserOrders(userId, limit = 10) {
 
     return orders.map(order => ({
         ...order,
-        items: JSON.parse(order.items)
+        items: _parseItems(order.items)
     }));
 }
 
