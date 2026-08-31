@@ -381,6 +381,15 @@
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
   }
 
+  // Escape anything from the Spotify API before it goes into an HTML string —
+  // device names are user-set and could contain quotes/angle brackets that break
+  // out of the attribute or inject markup.
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   async function loadDevices() {
     const list = document.getElementById('device-list');
     list.innerHTML = '<div class="device-empty">Loading…</div>';
@@ -392,9 +401,9 @@
         return;
       }
       list.innerHTML = data.devices.map(d => `
-        <div class="device-row${d.isActive ? ' active' : ''}" data-id="${d.id}">
+        <div class="device-row${d.isActive ? ' active' : ''}" data-id="${escHtml(d.id)}">
           ${deviceIcon(d.type)}
-          <div class="device-name">${d.name.replace(/</g, '&lt;')}</div>
+          <div class="device-name">${escHtml(d.name)}</div>
           ${d.isActive ? '<svg class="device-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
         </div>
       `).join('');

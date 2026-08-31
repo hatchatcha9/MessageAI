@@ -2,10 +2,17 @@ const https = require('https');
 
 const WEATHER_API_KEY = process.env.OPENWEATHER_API_KEY;
 
-// Convert "City, State" or "City State" (e.g. "Draper, Utah") → "City,US" for OpenWeather compatibility
+// Convert "City, State[, Country]" (e.g. "Draper, Utah", "Salt Lake City, Utah")
+// → "City,US" for OpenWeather compatibility. The city is everything before the
+// first comma — splitting on whitespace instead truncated any multi-word city
+// ("Salt Lake City, Utah" → "Salt,US").
 function normalizeLocation(location) {
-    const parts = location.trim().replace(/,/g, ' ').split(/\s+/).filter(Boolean);
-    return parts.length >= 2 ? parts[0] + ',US' : location.trim();
+    const raw = location.trim();
+    if (raw.includes(',')) {
+        const city = raw.split(',')[0].trim();
+        if (city) return city + ',US';
+    }
+    return raw;
 }
 
 function fetchUrl(url) {

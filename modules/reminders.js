@@ -4,15 +4,45 @@ const path = require('path');
 const REMINDERS_PATH = path.join(__dirname, '..', 'reminders.json');
 
 // In-memory store: userId -> [{ id, fireAt, message, timeout }]
+// Keyed by String(userId): setReminder() gets a numeric sqlite user.id, but
+// restoreFromDisk() reads JSON object keys which are always strings — without
+// normalizing, reminders restored after a restart became invisible to
+// getReminders()/cancelReminder() while still firing in the background.
 const reminderStore = new Map();
 let nextId = 1;
+
+const _key = (userId) => String(userId);
+
+// setTimeout's delay is a signed 32-bit int (~24.85 days). A larger delay
+// silently overflows and fires almost immediately ("in 1000 hours" → now).
+// longTimeout() chains max-sized chunks so far-future reminders fire when they
+// should; the returned holder is what cancelReminder() clears.
+const MAX_DELAY = 2147483647;
+function longTimeout(fn, ms) {
+    const holder = { _t: null, _cleared: false };
+    const arm = (remaining) => {
+        if (holder._cleared) return;
+        if (remaining <= MAX_DELAY) {
+            holder._t = setTimeout(fn, Math.max(0, remaining));
+        } else {
+            holder._t = setTimeout(() => arm(remaining - MAX_DELAY), MAX_DELAY);
+        }
+    };
+    arm(ms);
+    return holder;
+}
+function clearLongTimeout(holder) {
+    if (!holder) return;
+    holder._cleared = true;
+    if (holder._t) clearTimeout(holder._t);
+}
 
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 function _saveToDisk() {
     const serializable = {};
-    for (const [userId, list] of reminderStore.entries()) {
-        serializable[userId] = list.map(({ id, fireAt, message }) => ({
+    for (const [key, list] of reminderStore.entries()) {
+        serializable[key] = list.map(({ id, fireAt, message }) => ({
             id,
             fireAt: fireAt.toISOString(),
             message,
@@ -26,9 +56,10 @@ function _saveToDisk() {
 }
 
 function _removeFromStore(userId, id) {
-    const remaining = (reminderStore.get(userId) || []).filter(r => r.id !== id);
-    if (remaining.length) reminderStore.set(userId, remaining);
-    else reminderStore.delete(userId);
+    const k = _key(userId);
+    const remaining = (reminderStore.get(k) || []).filter(r => r.id !== id);
+    if (remaining.length) reminderStore.set(k, remaining);
+    else reminderStore.delete(k);
 }
 
 function restoreFromDisk(onFire) {
@@ -52,15 +83,16 @@ function restoreFromDisk(onFire) {
             const id = entry.id;
             if (id >= nextId) nextId = id + 1;
 
-            const timeout = setTimeout(() => {
+            const timeout = longTimeout(() => {
                 onFire(userId, entry.message);
                 _removeFromStore(userId, id);
                 _saveToDisk();
             }, msLeft);
 
-            const userList = reminderStore.get(userId) || [];
+            const k = _key(userId);
+            const userList = reminderStore.get(k) || [];
             userList.push({ id, fireAt, message: entry.message, timeout });
-            reminderStore.set(userId, userList);
+            reminderStore.set(k, userList);
             restored++;
         }
     }
@@ -82,32 +114,33 @@ function setReminder(userId, timeStr, message, onFire) {
     const id     = nextId++;
     const fireAt = new Date(Date.now() + ms);
 
-    const timeout = setTimeout(() => {
+    const timeout = longTimeout(() => {
         onFire(userId, message);
         _removeFromStore(userId, id);
         _saveToDisk();
     }, ms);
 
-    const list = reminderStore.get(userId) || [];
+    const k = _key(userId);
+    const list = reminderStore.get(k) || [];
     list.push({ id, fireAt, message, timeout });
-    reminderStore.set(userId, list);
+    reminderStore.set(k, list);
     _saveToDisk();
 
     return { success: true, id, fireAt, readableTime: formatMs(ms) };
 }
 
 function cancelReminder(userId, id) {
-    const list = reminderStore.get(userId) || [];
+    const list = reminderStore.get(_key(userId)) || [];
     const reminder = list.find(r => r.id === id);
     if (!reminder) return false;
-    clearTimeout(reminder.timeout);
+    clearLongTimeout(reminder.timeout);
     _removeFromStore(userId, id);
     _saveToDisk();
     return true;
 }
 
 function getReminders(userId) {
-    return reminderStore.get(userId) || [];
+    return reminderStore.get(_key(userId)) || [];
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────

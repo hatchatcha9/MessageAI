@@ -1,10 +1,24 @@
 // Restaurant utilities — cart display and order total helpers
 // Mock restaurant data has been removed. The system always uses real DoorDash.
 
+// Pull a number out of a money-ish value. normalizeStore() in doordash-api.js
+// sets deliveryFee to a display STRING ('Unknown', '$2.99', 'Free'), and cart
+// item prices can arrive as strings too — doing arithmetic on those directly
+// yields NaN or string concatenation and silently corrupts the order total.
+function parseMoney(v, fallback = 0) {
+    if (typeof v === 'number') return isFinite(v) ? v : fallback;
+    if (typeof v === 'string') {
+        if (/free/i.test(v)) return 0;
+        const m = v.match(/-?\d+(\.\d+)?/);
+        if (m) return parseFloat(m[0]);
+    }
+    return fallback;
+}
+
 // Calculate order total
 function calculateOrderTotal(items, restaurant) {
-    const subtotal = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-    const deliveryFee = restaurant.deliveryFee;
+    const subtotal = (items || []).reduce((sum, item) => sum + (parseMoney(item.price) * (item.quantity || 1)), 0);
+    const deliveryFee = parseMoney(restaurant && restaurant.deliveryFee, 2.99);
     const serviceFee = subtotal * 0.15; // 15% service fee
     const tax = subtotal * 0.0825; // 8.25% tax (Texas)
     const total = subtotal + deliveryFee + serviceFee + tax;
@@ -48,7 +62,7 @@ function formatCart(cart, currentRestaurant) {
         items.forEach(item => {
             const itemPrice = parseFloat(item.price) || 0;
             const quantity = item.quantity || 1;
-            const cleanName = item.name.split('•')[0].trim();
+            const cleanName = String(item.name || 'Item').split('•')[0].trim();
             text += `${quantity}x ${cleanName} - $${(itemPrice * quantity).toFixed(2)}\n`;
             grandSubtotal += itemPrice * quantity;
             allItems.push(item);
