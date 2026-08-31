@@ -2670,8 +2670,8 @@ async function selectScheduledDeliveryTime(targetTime) {
 }
 
 async function checkoutCurrentCart(options = {}) {
-    const { scheduledTime = null } = options;
-    console.log('[DoorDash] === CHECKING OUT CURRENT CART ===');
+    const { scheduledTime = null, previewOnly = false } = options;
+    console.log(`[DoorDash] === CHECKING OUT CURRENT CART ===${previewOnly ? ' (PREVIEW ONLY — will not place)' : ''}`);
 
     try {
         if (!page) {
@@ -2891,16 +2891,15 @@ async function checkoutCurrentCart(options = {}) {
             }
         }
 
-        const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
-        if (DRY_RUN) {
-            console.log('[DoorDash] DRY RUN — skipping Place Order click');
-            return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.' };
-        }
-
-        // Capture the real order total from the checkout page BEFORE placing — the
-        // page navigates away after, and server.js was otherwise rebuilding the
-        // saved-order record from the local cart + hardcoded fee estimates.
+        // Capture the real order total, delivery address, and payment method from
+        // the checkout page BEFORE placing — the page navigates away after, and
+        // server.js was otherwise rebuilding the saved-order record from the local
+        // cart + hardcoded fee estimates. Also drives the SMS pre-charge
+        // confirmation ("Deliver to X, pay with Visa ...1234, total $Y"). Done
+        // before the DRY_RUN / previewOnly gates so both still get real details.
         let orderTotals = null;
+        let payment = null;
+        let deliveryAddress = null;
         try {
             const totalFromBtn = (btnText.match(/\$\s?(\d+(?:\.\d{2})?)/) || [])[1];
             const summary = await evalWithTimeout(page, () => document.body.innerText, 5000, 'checkout summary text').catch(() => '');
@@ -2917,8 +2916,40 @@ async function checkoutCurrentCart(options = {}) {
             };
             if (Object.values(orderTotals).every(v => v === undefined)) orderTotals = null;
             else console.log('[DoorDash] Captured order totals from checkout page:', JSON.stringify(orderTotals));
+
+            // Payment method: "Visa ••••1234", "•••• 1234", "ending in 1234", "····1234"
+            const brandMatch = summary.match(/\b(Visa|Mastercard|Master ?Card|American Express|Amex|Discover|PayPal|Venmo|Apple Pay|Google Pay|Cash App|EBT|SNAP)\b[^\n]{0,24}?(\d{4})\b/i);
+            const bareMatch = summary.match(/(?:[•·*]{2,}|ending in|ending)\s*(\d{4})\b/i);
+            if (brandMatch) payment = { brand: brandMatch[1].replace(/master ?card/i, 'Mastercard'), last4: brandMatch[2] };
+            else if (bareMatch) payment = { brand: null, last4: bareMatch[1] };
+            if (payment) console.log(`[DoorDash] Checkout payment method: ${payment.brand || 'card'} ****${payment.last4}`);
+
+            // Delivery address DoorDash will actually ship to — best-effort. It's
+            // rendered near a "Deliver" heading; grab the first street-address-shaped
+            // line after it.
+            deliveryAddress = await evalWithTimeout(page, () => {
+                const txt = document.body.innerText || '';
+                const idx = txt.search(/deliver(y| to)?\b/i);
+                const scope = idx >= 0 ? txt.slice(idx, idx + 400) : txt.slice(0, 600);
+                const line = scope.split('\n').map(s => s.trim())
+                    .find(s => /\d{1,6}\s+\S+.*\s(st|street|ave|avenue|rd|road|dr|drive|blvd|ln|lane|way|ct|court|cir|circle|pkwy|pl|place|ter|terrace|hwy|trail|trl)\b/i.test(s)
+                        || /\d{1,6}\s+[A-Za-z].{3,40},\s*[A-Za-z]/.test(s));
+                return line || null;
+            }, 4000, 'checkout delivery address').catch(() => null);
+            if (deliveryAddress) console.log(`[DoorDash] Checkout delivery address: ${deliveryAddress}`);
         } catch (e) {
-            console.log('[DoorDash] Could not capture order totals:', e.message);
+            console.log('[DoorDash] Could not capture checkout details:', e.message);
+        }
+
+        if (previewOnly) {
+            console.log('[DoorDash] Preview only — leaving browser on checkout page, NOT placing order');
+            return { success: true, preview: true, orderTotals, payment, deliveryAddress, placeButtonText: btnText, scheduledSlot: selectedSlot };
+        }
+
+        const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
+        if (DRY_RUN) {
+            console.log('[DoorDash] DRY RUN — skipping Place Order click');
+            return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.', orderTotals, payment, deliveryAddress };
         }
 
         console.log('[DoorDash] Clicking Place Order...');

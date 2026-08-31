@@ -247,14 +247,21 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n\nScheduled order: set for ${timeDisplay} today`;
     }
 
+    // Pending checkout — the user was just shown their total, card, and delivery
+    // address and asked to confirm. Their next reply is almost certainly a yes/no.
+    if (preferences.pendingCheckout && Date.now() - preferences.pendingCheckout.at < 15 * 60 * 1000) {
+        context += `\n\nPENDING CHECKOUT: You just showed this user their order total, the payment card (last 4 digits), and the delivery address, and asked them to reply "confirm". If their message approves it ("confirm", "yes", "do it", "place it", "go ahead", "yep") → respond with [CONFIRM_ORDER] and nothing else but a short line like "Placing it now!". If they decline or hesitate ("no", "cancel", "wait", "not yet", "change something", "hold on") → respond with [CANCEL_ORDER]. Do not re-run [PLACE_ORDER].`;
+    }
+
     const isNewUser = !userAddress && (!preferences.favoriteCuisines?.length) && (db.getUserOrders(user.id, 1).length === 0);
     const onboarding = isNewUser ? `
 
-NEW USER ONBOARDING: This person just texted for the first time. Welcome them warmly and in ONE message explain:
-1. What MessageAI is ("I can find restaurants on DoorDash and order food for you via text!")
-2. Ask for their delivery address first: "What's your delivery address?"
-3. Mention DoorDash setup: "You'll also need to link your DoorDash account — say 'setup doordash email password' when ready."
-Keep it friendly and brief. Do NOT search for food yet.` : '';
+NEW USER ONBOARDING: This person is texting for the first time. Give them a short, friendly walkthrough (2 messages is fine) covering, in order:
+1. What this is: "I find restaurants on DoorDash and order food for you, all over text."
+2. How ordering works: "Tell me what you're hungry for → I'll list places → reply with a number to pick one → reply with numbers to add items → say 'checkout' when you're done."
+3. How checkout is safe: "Before anything is charged, I'll show you the exact total, which card will be used (last 4 digits), and the delivery address. You reply 'confirm' to actually place it — or 'cancel' to back out."
+4. The two setup steps you need from them now: (a) "What's your delivery address?" and (b) "link your DoorDash account by texting: setup doordash your@email.com yourpassword".
+Ask for the address first. Keep it warm and concise, no bullet-point characters. Do NOT search for food yet.` : '';
 
     if (voiceMode) {
         const gpsLoc = gps.getLocationString();
@@ -425,11 +432,25 @@ IMPORTANT - USE THESE COMMANDS IN YOUR RESPONSES:
 5. CLEAR CART - Empty the cart:
    [CLEAR_CART]
 
-6. PLACE ORDER - When user confirms order right now:
+6. PLACE ORDER - When user wants to check out:
    [PLACE_ORDER]
-   Triggers: "checkout", "place order", "order it", "confirm order", "buy it"
+   Triggers: "checkout", "place order", "order it", "buy it", "I'm ready", "let's do it"
+   IMPORTANT: This does NOT charge anything. It loads the real DoorDash checkout
+   page and the system then shows the user their delivery address, payment card,
+   and true total, and asks them to reply "confirm". Just say one short line like
+   "Pulling up your order..." — do NOT invent the total/address/card yourself.
 
-   For checkout NOW with a scheduled delivery time picked in DoorDash:
+   CONFIRM ORDER - Only when a checkout is pending (see PENDING CHECKOUT below) and
+   the user approves ("confirm", "yes", "do it", "place it", "go ahead"):
+   [CONFIRM_ORDER]
+   This is the step that actually places and charges the order.
+
+   CANCEL ORDER - When a checkout is pending and the user backs out ("cancel",
+   "no", "wait", "not yet", "hold on", "never mind"):
+   [CANCEL_ORDER]
+
+   For checkout with a scheduled delivery time picked in DoorDash (also shows the
+   same confirmation before charging):
    [PLACE_ORDER_SCHEDULED: HH:MM]
    Triggers: "place it for 6pm", "checkout but deliver at 7", "order now deliver at 5pm", "schedule delivery for X", "place it now schedule for X"
    IMPORTANT: Convert to 24-hour format (6pm → 18:00). Use when user wants to CHECK OUT NOW but have it DELIVERED at a specific future time.
@@ -582,6 +603,106 @@ async function addItemByIndexGuarded(...args) {
     }
 }
 
+// Pre-charge confirmation (SMS): [PLACE_ORDER] no longer places the order — it
+// loads the real DoorDash checkout page, reads back the delivery address, the
+// payment card, and the true total, and asks the user to reply "confirm". Only
+// [CONFIRM_ORDER] (below) then actually places and charges.
+const PENDING_CHECKOUT_TTL_MS = 15 * 60 * 1000;
+
+async function previewDoordashCheckout(user, { scheduledTime = null } = {}) {
+    if (_checkoutInFlight) return { text: `\n\nA checkout is already in progress — give it a moment.` };
+    try {
+        const result = await doordash.checkoutCurrentCart({ previewOnly: true, ...(scheduledTime ? { scheduledTime } : {}) });
+        if (!result.preview && result.dryRun) {
+            return { text: `\n\nDry run — checkout page loaded, nothing charged. (Remove DOORDASH_DRY_RUN to place real orders.)` };
+        }
+        if (!result.success) return { text: `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.` };
+
+        const prefs = db.getUserPreferences(user.id);
+        prefs.pendingCheckout = { at: Date.now(), scheduledTime: scheduledTime || null };
+        db.setUserPreferences(user.id, prefs);
+
+        const cart = db.getCart(user.id);
+        const rt = result.orderTotals || {};
+        const addr = result.deliveryAddress || db.getUserAddress(user.id) || 'the address on file';
+        const pay = result.payment
+            ? `${result.payment.brand || 'Card'} ····${result.payment.last4}`
+            : 'your default DoorDash payment method';
+        const btnAmount = (result.placeButtonText || '').match(/\$\s?\d+(?:\.\d{2})?/);
+        const totalLine = typeof rt.total === 'number'
+            ? `Total: $${rt.total.toFixed(2)}`
+            : (btnAmount ? `Total: ${btnAmount[0].replace(/\s/, '')}` : `Total: shown at DoorDash`);
+        const slot = result.scheduledSlot || scheduledTime;
+
+        const text = [
+            `\n\nReady to place your order${slot ? ` (delivery ${slot})` : ''}:`,
+            restaurants.formatCart(cart),
+            ``,
+            `Deliver to: ${addr}`,
+            `Pay with: ${pay}`,
+            totalLine,
+            ``,
+            `Reply "confirm" to place it, or "cancel" to hold off. Nothing's been charged yet.`,
+        ].join('\n');
+        return { text, action: { type: 'checkout_preview', total: rt.total, card: result.payment?.last4 || null } };
+    } catch (e) {
+        console.error('[Checkout] preview error:', e);
+        return { text: `\n\n${formatCheckoutError(e?.message || String(e))}\n\nYour cart is saved.` };
+    }
+}
+
+async function finalizeDoordashCheckout(user, { scheduledTime = null } = {}) {
+    if (_checkoutInFlight) return { text: `\n\nA checkout is already in progress — give it a moment.` };
+    _checkoutInFlight = true;
+    try {
+        const cart = db.getCart(user.id);
+        const prefs = db.getUserPreferences(user.id);
+        const restaurantIds = Object.keys(cart.items || {});
+        const result = await doordash.checkoutCurrentCart(scheduledTime ? { scheduledTime } : {});
+
+        if (result.dryRun) return { text: `\n\nDry run complete — nothing charged. (Remove DOORDASH_DRY_RUN to place real orders.)` };
+        if (!result.success) return { text: `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.` };
+
+        const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
+        const restaurantName = currentRestaurant?.name || 'DoorDash Order';
+        let subtotal = 0;
+        restaurantIds.forEach(rid => (cart.items[rid] || []).forEach(it => { subtotal += (parseFloat(it.price) || 0) * (it.quantity || 1); }));
+        const rt = result.orderTotals || {};
+        const realSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal : subtotal;
+        const total = typeof rt.total === 'number' ? rt.total : realSubtotal + 2.99 + realSubtotal * 0.15 + realSubtotal * 0.08;
+        const userAddress = db.getUserAddress(user.id) || 'Address on file';
+
+        const orderId = db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
+            cart.items[prefs.currentRestaurant] || [], userAddress,
+            realSubtotal.toFixed(2), total.toFixed(2),
+            prefs.currentRestaurantUrl || null, result.orderUrl || null);
+        if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
+        db.clearCart(user.id);
+        prefs.currentRestaurant = null;
+        prefs.currentRestaurantSource = null;
+        prefs.currentRestaurantUrl = null;
+        prefs.scheduledOrder = null;
+        prefs.pendingCheckout = null;
+        db.setUserPreferences(user.id, prefs);
+
+        const slotLabel = result.scheduledSlot || scheduledTime;
+        const text = result.unconfirmed
+            ? `\n\nI submitted the order but couldn't confirm it went through — check your DoorDash app to be sure. Reply "order status" to track it.`
+            : (slotLabel
+                ? `\n\n🎉 Order placed! Scheduled delivery: ${slotLabel}. Reply "order status" to check on it.`
+                : `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`);
+        return {
+            text,
+            action: { type: slotLabel ? 'order_placed_doordash_scheduled' : 'order_placed_doordash', restaurant: restaurantName, slot: slotLabel || undefined, unconfirmed: !!result.unconfirmed },
+        };
+    } catch (error) {
+        console.error('[Checkout] DoorDash error:', error);
+        return { text: `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.` };
+    } finally {
+        _checkoutInFlight = false;
+    }
+}
+
 // Process commands from AI response
 // Commands buildSystemPrompt()'s voice branch never documents (SMS/text-flow only:
 // budget filtering, DoorDash credential setup, order-status/scheduling). Until now
@@ -593,7 +714,9 @@ async function addItemByIndexGuarded(...args) {
 const VOICE_RESTRICTED_COMMANDS = [
     'SAVE_BUDGET', 'CLEAR_BUDGET', 'SETUP_DOORDASH', 'CHECK_DOORDASH',
     'ORDER_STATUS', 'SCHEDULE_ORDER', 'CANCEL_SCHEDULE', 'REMOVE_ITEM',
-    'PLACE_ORDER_SCHEDULED'
+    'PLACE_ORDER_SCHEDULED',
+    // SMS-only pre-charge confirmation flow — voice does one-shot checkout.
+    'CONFIRM_ORDER', 'CANCEL_ORDER'
 ];
 
 async function processCommands(response, user, phoneNumber, userMsg = '', voiceMode = false) {
@@ -1755,86 +1878,50 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             // No DoorDash credentials - prompt to set up
             additionalContext = `\n\nTo place real orders, I need your DoorDash account.\n\nSay: "setup doordash your@email.com yourpassword"\n\nYour credentials are encrypted and only used to place orders.`;
             actions.push({ type: 'doordash_required' });
-        } else {
-            // Has DoorDash credentials - attempt real order
-            const prefs = db.getUserPreferences(user.id);
-
-            // Check if this is a DoorDash order (items already in browser cart)
-            if (prefs.currentRestaurantSource === 'doordash') {
-                // Use simple checkout - items are already in the DoorDash cart
-                console.log('[Checkout] DoorDash order - using checkoutCurrentCart');
-
-                if (_checkoutInFlight) {
-                  additionalContext = `\n\nA checkout is already in progress — give it a moment.`;
-                } else {
-                 _checkoutInFlight = true;
-                 try {
-                    const result = await doordash.checkoutCurrentCart();
-
-                    if (result.dryRun) {
-                        additionalContext = `\n\n✅ Dry run complete! Checkout page loaded and Place Order button found. Everything looks ready.\n\n(Remove DOORDASH_DRY_RUN from .env to place real orders.)`;
-                    } else if (result.success) {
-                        // Create order record
-                        const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
-                        const restaurantName = currentRestaurant?.name || 'DoorDash Order';
-
-                        // Calculate totals from local cart
-                        let subtotal = 0;
-                        restaurantIds.forEach(rid => {
-                            const items = cart.items[rid];
-                            if (items) {
-                                items.forEach(item => {
-                                    subtotal += (parseFloat(item.price) || 0) * (item.quantity || 1);
-                                });
-                            }
-                        });
-
-                        // Prefer the real totals scraped off the DoorDash checkout page;
-                        // fall back to a local-cart estimate only if scraping failed.
-                        const rt = result.orderTotals || {};
-                        const estDelivery = 2.99, estService = subtotal * 0.15, estTax = subtotal * 0.08;
-                        const realSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal : subtotal;
-                        const total = typeof rt.total === 'number'
-                            ? rt.total
-                            : realSubtotal + estDelivery + estService + estTax;
-
-                        // Get user address
-                        const userAddress = db.getUserAddress(user.id) || 'Address on file';
-
-                        const orderId = db.createOrder(
-                            user.id,
-                            prefs.currentRestaurant,
-                            restaurantName,
-                            cart.items[prefs.currentRestaurant] || [],
-                            userAddress,
-                            realSubtotal.toFixed(2),
-                            total.toFixed(2),
-                            prefs.currentRestaurantUrl || null,
-                            result.orderUrl || null
-                        );
-                        if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
-                        db.clearCart(user.id);
-                        prefs.currentRestaurant = null;
-                        prefs.currentRestaurantSource = null;
-                        prefs.currentRestaurantUrl = null;
-                        prefs.scheduledOrder = null;
-                        db.setUserPreferences(user.id, prefs);
-
-                        additionalContext = result.unconfirmed
-                            ? `\n\nI submitted the order but couldn't confirm it went through — check your DoorDash app to be sure. Reply "order status" to track it.`
-                            : `\n\n🎉 Order placed! Reply "order status" anytime to check on your delivery.`;
-                        actions.push({ type: 'order_placed_doordash', restaurant: restaurantName, unconfirmed: !!result.unconfirmed });
-                    } else {
-                        additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
-                    }
-                 } catch (error) {
-                    console.error('[Checkout] DoorDash error:', error);
-                    additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
-                 } finally {
-                    _checkoutInFlight = false;
-                 }
-                }
+        } else if (prefs.currentRestaurantSource === 'doordash') {
+            if (voiceMode) {
+                // Voice/kiosk keeps the one-shot checkout — the kiosk has its own
+                // on-screen confirm flow; this pre-charge SMS confirmation is text-only.
+                const done = await finalizeDoordashCheckout(user);
+                additionalContext = done.text;
+                if (done.action) actions.push(done.action);
+            } else {
+                // SMS: [PLACE_ORDER] no longer charges. Load the real DoorDash
+                // checkout page and show the delivery address, payment card, and
+                // true total, then wait for the user to reply "confirm".
+                console.log('[Checkout] DoorDash order — building pre-charge confirmation');
+                const preview = await previewDoordashCheckout(user);
+                additionalContext = preview.text;
+                if (preview.action) actions.push(preview.action);
             }
+        }
+    }
+
+    // Confirm a pending checkout — this is what actually places and charges.
+    if (response.includes('[CONFIRM_ORDER]')) {
+        cleanResponse = cleanResponse.replace('[CONFIRM_ORDER]', '').trim();
+        const prefs = db.getUserPreferences(user.id);
+        const pending = prefs.pendingCheckout;
+        if (!pending || Date.now() - pending.at > PENDING_CHECKOUT_TTL_MS) {
+            if (pending) { prefs.pendingCheckout = null; db.setUserPreferences(user.id, prefs); }
+            additionalContext = `\n\nThere's nothing waiting to confirm. Say "checkout" and I'll show you the total, card, and address first.`;
+        } else {
+            const done = await finalizeDoordashCheckout(user, { scheduledTime: pending.scheduledTime || null });
+            additionalContext = done.text;
+            if (done.action) actions.push(done.action);
+        }
+    }
+
+    // Cancel a pending checkout (before it's charged).
+    if (response.includes('[CANCEL_ORDER]')) {
+        cleanResponse = cleanResponse.replace('[CANCEL_ORDER]', '').trim();
+        const prefs = db.getUserPreferences(user.id);
+        if (prefs.pendingCheckout) {
+            prefs.pendingCheckout = null;
+            db.setUserPreferences(user.id, prefs);
+            additionalContext = `\n\nOkay, held off — nothing was charged. Your cart's still here whenever you're ready.`;
+        } else {
+            additionalContext = `\n\nNothing to cancel — no order was pending.`;
         }
     }
 
@@ -1852,42 +1939,16 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             additionalContext = `\n\nI need your delivery address first.`;
         } else if (restaurantIds.length === 0) {
             additionalContext = `\n\nYour cart is empty! Add some items first.`;
-        } else if (_checkoutInFlight) {
-            additionalContext = `\n\nA checkout is already in progress — give it a moment.`;
         } else if (prefs.currentRestaurantSource === 'doordash') {
-            _checkoutInFlight = true;
-            try {
-                const result = await doordash.checkoutCurrentCart({ scheduledTime });
-                if (result.dryRun) {
-                    additionalContext = `\n\nDry run complete! Scheduled delivery for ${result.scheduledSlot || scheduledTime} ready.`;
-                } else if (result.success) {
-                    const currentRestaurant = db.getCachedCurrentRestaurant(user.id);
-                    const restaurantName = currentRestaurant?.name || 'DoorDash Order';
-                    const slotLabel = result.scheduledSlot || scheduledTime;
-                    const rt = result.orderTotals || {};
-                    const schedSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal.toFixed(2) : '0';
-                    const schedTotal = typeof rt.total === 'number' ? rt.total.toFixed(2) : '0';
-                    const schedOrderId = db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
-                        cart.items[prefs.currentRestaurant] || [], address, schedSubtotal, schedTotal,
-                        prefs.currentRestaurantUrl || null, result.orderUrl || null);
-                    if (result.unconfirmed) db.updateOrderStatus(schedOrderId, 'unconfirmed');
-                    db.clearCart(user.id);
-                    prefs.currentRestaurant = null;
-                    prefs.currentRestaurantSource = null;
-                    prefs.currentRestaurantUrl = null;
-                    db.setUserPreferences(user.id, prefs);
-                    additionalContext = result.unconfirmed
-                        ? `\n\nSubmitted for scheduled delivery (${slotLabel}) but couldn't confirm — check your DoorDash app. Reply "order status" to track it.`
-                        : `\n\nOrder placed! Scheduled delivery: ${slotLabel}. Reply "order status" to check on it.`;
-                    actions.push({ type: 'order_placed_doordash_scheduled', restaurant: restaurantName, slot: slotLabel, unconfirmed: !!result.unconfirmed });
-                } else {
-                    additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
-                }
-            } catch (error) {
-                console.error('[Checkout] Scheduled DoorDash error:', error);
-                additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
-            } finally {
-                _checkoutInFlight = false;
+            if (voiceMode) {
+                const done = await finalizeDoordashCheckout(user, { scheduledTime });
+                additionalContext = done.text;
+                if (done.action) actions.push(done.action);
+            } else {
+                // Same pre-charge confirmation as [PLACE_ORDER], carrying the delivery slot.
+                const preview = await previewDoordashCheckout(user, { scheduledTime });
+                additionalContext = preview.text;
+                if (preview.action) actions.push(preview.action);
             }
         } else {
             additionalContext = `\n\nScheduled checkout requires an active DoorDash restaurant. Try searching and selecting a restaurant first.`;
