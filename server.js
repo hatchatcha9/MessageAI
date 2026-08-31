@@ -50,6 +50,14 @@ const PI_DEVICE_ID = '+1PIDEVICE000';
 // instead of fighting the newer one for the shared page.
 let _selectRequestSeq = 0;
 
+// Single-flight guard for real DoorDash checkout. The touchscreen (/api/food/checkout)
+// and the voice/SMS [PLACE_ORDER]/[PLACE_ORDER_SCHEDULED] handlers both drive a real,
+// charged checkout over the one shared browser page. withUserLock() serializes voice
+// messages but does NOT cover the /api/food/* routes, so without this a double tap /
+// a voice + touch overlap could place two real orders. Reject (don't queue) a second
+// concurrent checkout.
+let _checkoutInFlight = false;
+
 // In-memory log buffer for remote debugging
 const logBuffer = [];
 const sseLogClients = []; // SSE clients subscribed to /logs/stream
@@ -1295,8 +1303,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         additionalContext = `\n\nAdded ${addedNames.join(' and ')}!\n\n${restaurants.formatCart(cartOpt)}\n\nAnything else, or say "checkout" to order?`;
                     }
                 } else if (addResultOpt.needsOptions) {
-                    // Filter out groups already answered (by name) to prevent infinite loops
-                    const answeredNames = new Set((prefsOpt.pendingDoordashSelections || []).map(s => (s.optionText || '').toLowerCase()));
+                    // Loop guard: re-prompt only for groups we haven't shown before, or ones
+                    // we have shown but that still have no selection. A previously-shown group
+                    // that now has a selection is dropped so we don't ask about it forever.
                     const prevGroupNames = new Set((prefsOpt.pendingDoordashOptions || []).map(g => g.name.toLowerCase()));
                     const newGroups = addResultOpt.requiredOptions.filter(g => !prevGroupNames.has(g.name.toLowerCase()) || !g.hasSelection);
                     // If all returned groups were already in pendingDoordashOptions, show them all (avoid empty prompt)
@@ -1755,7 +1764,11 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                 // Use simple checkout - items are already in the DoorDash cart
                 console.log('[Checkout] DoorDash order - using checkoutCurrentCart');
 
-                try {
+                if (_checkoutInFlight) {
+                  additionalContext = `\n\nA checkout is already in progress — give it a moment.`;
+                } else {
+                 _checkoutInFlight = true;
+                 try {
                     const result = await doordash.checkoutCurrentCart();
 
                     if (result.dryRun) {
@@ -1808,9 +1821,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     } else {
                         additionalContext = `\n\n${formatCheckoutError(result.error)}\n\nYour cart is saved.`;
                     }
-                } catch (error) {
+                 } catch (error) {
                     console.error('[Checkout] DoorDash error:', error);
                     additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
+                 } finally {
+                    _checkoutInFlight = false;
+                 }
                 }
             }
         }
@@ -1830,7 +1846,10 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             additionalContext = `\n\nI need your delivery address first.`;
         } else if (restaurantIds.length === 0) {
             additionalContext = `\n\nYour cart is empty! Add some items first.`;
+        } else if (_checkoutInFlight) {
+            additionalContext = `\n\nA checkout is already in progress — give it a moment.`;
         } else if (prefs.currentRestaurantSource === 'doordash') {
+            _checkoutInFlight = true;
             try {
                 const result = await doordash.checkoutCurrentCart({ scheduledTime });
                 if (result.dryRun) {
@@ -1855,6 +1874,8 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             } catch (error) {
                 console.error('[Checkout] Scheduled DoorDash error:', error);
                 additionalContext = `\n\n${formatCheckoutError(error?.message || String(error))}\n\nYour cart is saved.`;
+            } finally {
+                _checkoutInFlight = false;
             }
         } else {
             additionalContext = `\n\nScheduled checkout requires an active DoorDash restaurant. Try searching and selecting a restaurant first.`;
@@ -1919,6 +1940,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                         if (!cachedMenu && menuItems.length > 0)
                             db.cacheRestaurantMenu(user.id, lastOrder.restaurant_id, menuItems);
 
+                        const reorderMissed = [];
                         for (const item of lastOrder.items) {
                             const lowerItem = item.name.toLowerCase();
                             // Prefer exact match to avoid "Coke" matching "Coke Zero" before "Coke Bottle"
@@ -1927,6 +1949,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 m.name.toLowerCase().startsWith(lowerItem) ||
                                 lowerItem.startsWith(m.name.toLowerCase())
                             );
+                            let added = false;
                             if (menuIdx >= 0) {
                                 const addResult = await addItemByIndexGuarded(menuIdx, { selectFirst: true, restaurantUrl: lastOrder.restaurant_url }, menuItems[menuIdx]);
                                 if (addResult.success) {
@@ -1934,11 +1957,17 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                         id: `doordash-${menuIdx}`, name: item.name,
                                         price: item.price, source: 'doordash'
                                     });
+                                    added = true;
                                 }
                             }
+                            if (!added) reorderMissed.push(item.name);
                         }
                         const cart = db.getCart(user.id);
-                        additionalContext = `\n\nLoaded your last order from ${lastOrder.restaurant_name}!\n\n${restaurants.formatCart(cart)}\n\nNote: any customizations (e.g. protein choice) may be reset to defaults. Reply "show cart" to verify before checking out.`;
+                        additionalContext = `\n\nLoaded your last order from ${lastOrder.restaurant_name}!\n\n${restaurants.formatCart(cart)}`;
+                        if (reorderMissed.length > 0) {
+                            additionalContext += `\n\nCouldn't re-add: ${reorderMissed.join(', ')} — the menu may have changed. Add ${reorderMissed.length > 1 ? 'them' : 'it'} manually if you still want ${reorderMissed.length > 1 ? 'them' : 'it'}.`;
+                        }
+                        additionalContext += `\n\nNote: any customizations (e.g. protein choice) may be reset to defaults. Reply "show cart" to verify before checking out.`;
                     } else {
                         additionalContext = `\n\nCouldn't reconnect to ${lastOrder.restaurant_name}. Try searching for it again.`;
                     }
@@ -2467,6 +2496,14 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
 
     // Clean up response
     cleanResponse = cleanResponse.replace(/\n{3,}/g, '\n\n').trim();
+
+    // Defensive: each command handler above strips its own tag with a single
+    // .replace(), so a tag Claude emitted twice would leak its literal text to
+    // the user. Sweep any residual ALL-CAPS bracket token (real prose doesn't
+    // look like "[LIKE_THIS]"). Runs before additionalContext is appended so our
+    // own generated text is untouched.
+    cleanResponse = cleanResponse.replace(/\[[A-Z][A-Z0-9_]{2,}(?::[^\]]*)?\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+
     cleanResponse = (cleanResponse + additionalContext).trim();
 
     return { response: cleanResponse, actions };
@@ -2776,9 +2813,15 @@ app.post('/api/twilio/webhook', async (req, res) => {
 
 // Get user profile endpoint
 app.get('/api/user/:phoneNumber', (req, res) => {
-    // Restrict to localhost only — this endpoint is for local debugging
-    const ip = req.ip || req.connection.remoteAddress || '';
-    if (!ip.includes('127.0.0.1') && !ip.includes('::1') && !ip.includes('localhost')) {
+    // Debug-only: exposes address / cart / preferences. req.ip honors
+    // X-Forwarded-For when 'trust proxy' is set, so it can be spoofed to look like
+    // localhost. Gate on the raw TCP peer instead (unspoofable), or an explicit
+    // DEBUG_API_TOKEN for non-local use.
+    const peer = (req.socket && req.socket.remoteAddress) || '';
+    const isLoopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+    const token = process.env.DEBUG_API_TOKEN;
+    const tokenOk = !!token && (req.get('x-debug-token') === token || req.query.token === token);
+    if (!isLoopback && !tokenOk) {
         return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -3365,6 +3408,9 @@ app.post('/api/food/checkout', async (req, res) => {
     const address = db.getUserAddress(user.id);
     if (!address) return res.status(400).json({ error: 'No delivery address on file — add one in Settings first.' });
 
+    if (_checkoutInFlight) return res.status(409).json({ error: 'A checkout is already in progress — hang on.' });
+    _checkoutInFlight = true;
+
     // Note: deliberately not gated on db.hasDoorDashCredentials() — that only reflects
     // whether the voice [SETUP_DOORDASH:] flow was ever used to store encrypted
     // credentials, which is unrelated to whether the browser's own persistent profile
@@ -3399,6 +3445,8 @@ app.post('/api/food/checkout', async (req, res) => {
     } catch (err) {
         console.error('[Food] /api/food/checkout error:', err.message);
         res.status(502).json({ error: formatCheckoutError(err?.message || String(err)) });
+    } finally {
+        _checkoutInFlight = false;
     }
 });
 
