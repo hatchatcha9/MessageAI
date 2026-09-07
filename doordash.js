@@ -350,6 +350,43 @@ async function addCartItemViaAPI({ storeId, menuId, itemId, itemName, unitPrice,
 }
 
 /**
+ * Repair two artifacts that show up in DoorDash DOM-scraped item and option names
+ * when a name wraps across two text nodes or an inline calorie count is rendered
+ * with no separator between it and the name:
+ *   "Tacos -"                -> "Tacos"              (dangling separator from a 2nd line)
+ *   "10 Classic Wings860 -"  -> "10 Classic Wings"   (calorie digits glued onto the name)
+ * Both observed shapes carry a trailing " -", so the calorie-digit strip is gated on
+ * that to stay conservative — a name that legitimately ends in a number ("Route 44",
+ * "Coke 20 oz") never has the glued-digit + dangling-dash shape and is left alone.
+ * A no-op on well-formed names. Only the API paths are clean by construction; this
+ * guards every DOM-scrape fallback (extractMenuItems, extractRequiredOptions).
+ */
+function cleanScrapedName(raw) {
+    let s = String(raw || '').replace(/\s+/g, ' ').trim();
+    s = s.split('•')[0].trim();                              // drop trailing "• 96% (76)" rating
+    const DASH = '[\\u2012\\u2013\\u2014\\u2015\\u2212-]';
+    const danglingDash = new RegExp('\\s*' + DASH + '+\\s*$');
+    // Strip trailing junk in passes — a card's innerText can stack price + calories +
+    // a "+" customization marker + a dangling wrap dash in any order.
+    let prev;
+    do {
+        prev = s;
+        s = s.replace(/\s*\+?\$\d[\d.,]*.*$/, '').trim();             // price and everything after
+        s = s.replace(/\s*(\d{2,4})\s*cal(?:ories)?\.?$/i, '').trim(); // "... 860 Cal"
+        s = s.replace(/\s*\+\s*$/, '').trim();                        // bare "+" customization marker
+        s = s.replace(danglingDash, '').trim();                       // dangling wrap separator
+    } while (s !== prev);
+    // "<name><calories> -" — the wrap glued calorie digits straight onto the last word.
+    // Gated on the dangling-dash shape so a name that legitimately ends in digits
+    // ("Route 44", "Coke 20") is never touched.
+    if (new RegExp(DASH + '\\s*$').test(raw) || / \d{2,4}\s*$/.test(raw) || /\d{2,4}\s*cal/i.test(raw)) {
+        const g = s.replace(/([A-Za-z)\]®™”"’'])(\d{2,4})$/, '$1').trim();
+        if (g !== s && g.length >= 3) s = g;
+    }
+    return s;
+}
+
+/**
  * Convert DoorDash itemPage.optionLists to the requiredOptions format server.js expects.
  * Includes _apiGroupId / _apiOptions so buildNestedOptionsFromSelections can use them.
  */
@@ -4274,6 +4311,10 @@ async function extractMenuItems() {
         const deduped = [];
         const seenNames = new Set();
         for (const item of combined) {
+            // Repair "Tacos -" / "10 Classic Wings860 -" style scrape artifacts before
+            // dedup, so a cleaned name and its raw form don't both survive as two items.
+            const cleaned = cleanScrapedName(item.name);
+            if (cleaned && cleaned.length >= 3) item.name = cleaned;
             if (!seenNames.has(item.name.toLowerCase())) {
                 seenNames.add(item.name.toLowerCase());
                 deduped.push(item);
@@ -6580,6 +6621,24 @@ async function extractRequiredOptions() {
             return groups;
         }, 8000, 'extract structured required options');
 
+        // Repair scrape artifacts ("10 Classic Wings860 -" -> "10 Classic Wings") on the
+        // DOM-scraped option labels. The API path (convertOptionListsToRequired) is already
+        // clean; this only matters when we fell back to reading the modal. Applied to every
+        // return path below (structured groups and the broad-extraction fallback).
+        const cleanGroups = (gs) => {
+            for (const g of gs || []) {
+                g.name = cleanScrapedName(g.name) || g.name;
+                if (Array.isArray(g.options)) {
+                    g.options = g.options.map(o => {
+                        const c = cleanScrapedName(o);
+                        return c && c.length >= 2 ? c : o;
+                    });
+                }
+            }
+            return gs;
+        };
+        cleanGroups(optionGroups);
+
         console.log(`[DoorDash] Found ${optionGroups.length} REQUIRED option groups`);
         optionGroups.forEach(g => {
             console.log(`  - ${g.name}: ${g.options.length} options, hasSelection: ${g.hasSelection}`);
@@ -6787,6 +6846,7 @@ async function extractRequiredOptions() {
             }, 10000, 'broad extraction of required option groups', requiredCount);
 
             if (broadGroups.length > 0) {
+                cleanGroups(broadGroups);
                 console.log(`[DoorDash] Broad extraction found ${broadGroups.length} groups`);
                 broadGroups.forEach(g => console.log(`  - ${g.name}: [${g.options.slice(0,3).join(', ')}...]`));
                 const unselected = broadGroups.filter(g => !g.hasSelection);
