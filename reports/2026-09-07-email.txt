@@ -1,0 +1,240 @@
+WEEKLY REPORT - frog / MessageAI
+Week of Sep 1  |  reporting Sun Sep 7
+
+TIME LAST WEEK: ~6 hours, two sessions (Sun Aug 31 and Tue Sep 1).
+The trip cut the week short - Days 1, 2 and 4 landed; Days 3 and 5 did not
+start. Days 2 and 3 were finished in a ~2-hour catch-up today (Sun Sep 7).
+
+
+PLAN VS. ACTUAL
+  Day 1 - Fix the stale-restaurant boot-prewarm hijack .......... DONE (65739dd)
+  Day 2 - Fix Little Caesars incomplete required-options ........ DONE (604a267)
+  Day 3 - Fix scraped item/option name truncation ............... DONE (4be5269)
+  Day 4 - MEDIUM audit backlog, pick 2-3 ....................... DONE (5 commits,
+                                                                 1 item left)
+  Day 5 - Full multi-restaurant smoke test + triage ............ NOT STARTED
+
+  Plus one unplanned feature: SMS pre-charge confirmation + onboarding
+  rewrite (91a596a).
+
+
+DAY 1 - STALE-RESTAURANT BOOT-PREWARM HIJACK  (65739dd, verified live)
+
+A restaurant left cached in the DB from an old session could hijack a live,
+unrelated session: on boot the server navigated the shared browser page to
+that stale restaurant, mid-session, and reverted the persisted "current
+restaurant" to the old one - so the user's next add ran against the wrong
+store and failed. Fix: boot prewarm now loads the homepage only. The
+prewarm function also self-locks and sequence-guards so a superseded queued
+prewarm skips its navigation.
+Verified: stale restaurant cached, restart, boot goes homepage-only with no
+store nav; a fresh order then landed correctly; real cart confirmed empty.
+
+
+DAY 4 - AUDIT BACKLOG  (5 commits, Aug 31)
+
+The plan asked for 2-3 items; the whole backlog from the Aug 25 audit got
+cleared.
+
+  e89f971 - isolated module bugs
+    - restaurants.js: delivery fee is a display string, so the order-total
+      math threw or corrupted the total. Added a money parser.
+    - reminders.js: setTimeout's 32-bit ceiling made "in 1000 hours" fire
+      immediately -> now chained. String vs numeric key mismatch was making
+      restored reminders invisible while still firing.
+    - weather.js: multi-word cities ("Salt Lake City, Utah") were truncated
+      to one word -> now takes text before the first comma.
+    - spotify.html: HTML-escape device id/name.
+
+  0779f3a - db.js
+    - ENCRYPTION_KEY was presence-checked only; a bad key threw mid-request.
+      Now requires exactly 64 hex chars at boot.
+    - PINs were unsalted single-round SHA-256 -> now scrypt + per-user salt,
+      with transparent upgrade of legacy hashes. (Feature is dormant.)
+    - Order JSON parsing guarded against bad data.
+
+  6c76372 - server.js
+    - Single-flight guard: a second concurrent real checkout across the
+      touchscreen route and the voice path is now rejected, not queued.
+    - A debug endpoint's "localhost only" check was spoofable via a header ->
+      now uses the raw socket address or an explicit token.
+    - REORDER now tells the user which items it couldn't re-add.
+
+  cff2d6f - checkout honesty + real totals
+    - Checkout used to ASSUME success when it couldn't recognize the
+      confirmation page. Now it re-checks whether the order actually went
+      through; if it can't tell, the user is told to check the DoorDash app
+      rather than shown "Order placed!".
+    - Real order totals (subtotal / fees / grand total) are now scraped off
+      the checkout page and used in the saved record and the user reply.
+    - ~15 more unguarded browser calls given timeouts.
+    - Fixed cart-name parsing that was taking the whole cart-row text as the
+      item name.
+  Verified live: search / select / add with a required option group landed
+  correctly in the real cart, no regression.
+
+  REMAINING DAY 4 ITEM (not done): the saved-order record's item list is
+  still built from the local cart, not the real DoorDash cart. (Totals are
+  real now; line items aren't.)
+
+
+UNPLANNED - SMS PRE-CHARGE CONFIRMATION + ONBOARDING  (91a596a, SMS only)
+
+SMS checkout no longer charges directly. It now previews the real checkout
+page - delivery address, payment card brand + last 4, and total - and replies
+"Reply confirm or cancel. Nothing's been charged yet." A new confirm command
+does the real placement (15-minute window); cancel clears it. Voice and kiosk
+keep one-shot checkout unchanged. New-user onboarding was rewritten from a
+stub into a 2-message walkthrough: what it is, how ordering works, how
+checkout stays safe, setup steps.
+Verified: a fresh number gets the full walkthrough; "checkout" routes through
+the preview path with no order placed.
+NOT verified: the actual address/card/total scrape output and a real checkout
+placement - DoorDash's checkout page wouldn't load in the Pi's degraded
+browser this session and dry-run is set on the Pi. The scrape targets the
+same page the Railway deploy already uses.
+
+
+DAY 2 - LITTLE CAESARS REQUIRED OPTIONS  (604a267, verified live)
+
+Build-your-own pizzas were surfacing only one generic option group instead of
+the real required Sauce + Cheese groups, so cheese got auto-defaulted and the
+user never picked it. Going the GraphQL route instead of the modal surfaced
+THREE real bugs, all now fixed:
+
+  1. The itemPage GraphQL query still sent an argument DoorDash removed -
+     every call failed with a validation error, so the HTTP options fast-path
+     had been DEAD for every optioned item at every restaurant, always
+     falling back to slower DOM scraping.
+  2. The store-id extractor returned the menu id, not the store id, for
+     canonical URLs - so item-id lookups always missed.
+  3. Some stores (Little Caesars) expose item ids only in the server-streamed
+     page payload, not the DOM. Added a parser that also stamps the real id
+     onto the cached menu so it survives a restart.
+
+Verified live against the real cart, twice, including once after a full
+restart with an empty id cache - "Custom Stuffed Crust" with Sauce=Regular +
+Cheese=Regular added via the HTTP API at the correct $17.49 base.
+
+Known rough edge (reported, not a regression): Costa Vida "Single Taco" add
+still fails - DoorDash's itemPage response omits the required "Tortilla"
+group entirely.
+
+
+DAY 3 - SCRAPED NAME ARTIFACTS  (4be5269, verified live, done Sun Sep 7)
+
+The DOM-scrape fallback could mangle names when a card's name wraps across
+two text nodes or a calorie count is glued on with no separator:
+  "Tacos -"                (Taco Time)
+  "10 Classic Wings860 -"  (Wingstop option label)
+  "Small Chips & Salsa+"   (Costa Vida size option)
+A mangled name then also fails the later click-by-name lookup, so the add
+fails and the voice reply contradicts itself.
+
+Added a shared name-cleaner applied at the boundary of every DOM-scrape
+fallback (menu items and option groups). The API paths were already clean, so
+this is mostly hardening the fallback - the menu-item "-" shape no longer
+reproduces on its own now that DoorDash rewrote the card DOM and the Day 2
+server-payload parser supplies clean names.
+Verified live: fresh Taco Time (40 items) and Costa Vida (22 items) scrapes
+have zero mangled names; Costa Vida "Chips & Salsa" -> "Size" -> "Small Chips
+& Salsa" adds end-to-end into the real cart at $4.49. 24 unit cases pass.
+
+
+REPO / DEPLOY STATE
+
+  - 8 commits (65739dd..4be5269) on master, UNPUSHED - holding for the
+    go-ahead.
+  - modules/gps.js still uncommitted (GPS software done; hardware is the
+    bare-UART variant, waiting on wiring).
+  - DOORDASH_DRY_RUN=true on the Pi - no checkout path this week could have
+    charged.
+  - Both services healthy; real cart confirmed empty at each session end.
+  - clearBrowserCart() was slow/unreliable on the degraded Pi browser today
+    (didn't fully clear a test item; dry-run is on so no money risk).
+
+
+STILL OPEN (rolled into the week-of-Sep-8 plan)
+
+  - Day 4's last item - saved-order record from the real cart.
+  - Day 5 - the multi-restaurant smoke test.
+  - Costa Vida "Single Taco" - itemPage omits the Tortilla group.
+  - readBrowserCart() name-mash - seen live today:
+    "Chips & SalsaSmall Chips & Salsa, Pico De Gallo$4.49..."
+  - Verify the SMS confirmation scrape (address / card / total) end-to-end on
+    Railway.
+  - SMS SELECT doesn't update the current restaurant on a second select in
+    one session.
+
+
+======================================================================
+
+
+PLAN - week of Sep 8
+frog / MessageAI
+
+Focus shifts to the MessageAI / SMS side, plus closing the two carryover
+items from last week. Dry-run stays on the Pi except where a Railway checkout
+is explicitly called for.
+
+Pre-req (not a day): push the 8 pending commits (65739dd..4be5269) once
+confirmed.
+
+
+DAY 1 - Carryover: saved-order record from the real cart
+
+The checkout handlers build the saved order record's ITEM LIST from the local
+cart, not the real DoorDash cart just checked out. The Aug 31 work fixed the
+totals but not the line items - if local and real state drifted, the record
+won't match what was charged. Have the checkout function return the real cart
+line items alongside the totals, and build the saved record from those.
+Small, well-scoped.
+
+
+DAY 2 - Carryover: multi-restaurant smoke test + triage
+
+The Day-5 test the trip pre-empted. Search / select / add across ~5
+restaurants, no checkout, verify each against the real cart. Record what works
+and what breaks - this is the current-state baseline going into the SMS work.
+Expect the known rough edges; the point is a written triage, not fixes.
+
+
+DAY 3 - SMS: SELECT not updating the current restaurant on a 2nd select
+
+A second SELECT in one SMS session doesn't update the current restaurant
+(stays on the first pick until a manual reset). The SMS handler is separate
+from the touchscreen one, which does persist it. Fix the SMS handler to
+match, then re-run the first-time-SMS-user flow (fresh number, onboarding,
+save address, setup doordash, search, select, select again, add) that was
+blocked here on Aug 31.
+
+
+DAY 4 - SMS: verify the pre-charge confirmation scrape end-to-end (Railway)
+
+The Aug 31 SMS pre-charge confirmation feature (preview address + card last 4
++ real total, wait for "confirm") has never been verified against a real
+non-dry-run checkout page. Run it on Railway: drive a fresh SMS order to the
+confirmation step, confirm the address / card / total in the reply are the
+real scraped values, then cancel (do NOT place). One real placement only if
+the scrape looks right and you want the full loop confirmed.
+
+
+DAY 5 - readBrowserCart() proper fix
+
+The app's own ground-truth cart check still mangles names when no name node
+matches - seen live Sep 7:
+  "Chips & SalsaSmall Chips & Salsa, Pico De Gallo$4.491 x1 x1 x - $0.00"
+The Aug 31 work added selectors + a fallback but it clearly still doesn't
+match DoorDash's current cart-row markup. Get a fresh DOM dump of the cart
+page's row structure, fix the parser, verify against a real 2-item cart.
+Reuse the Day 3 name-cleaner for the trailing junk.
+
+
+NOT IN THIS WEEK (blocked / needs hardware)
+
+  - GPS wiring - the GT-U7 is the bare-UART variant; needs GPIO wiring and
+    hardware in hand. Software is done and deployed (uncommitted).
+  - food.html tap-accuracy recheck - needs real finger input on the device.
+  - Costa Vida "Single Taco" - real fix needs itemPage validation-error
+    handling or a reliable Playwright menu re-render; deferred behind the SMS
+    work.

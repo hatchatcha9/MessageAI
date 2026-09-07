@@ -384,6 +384,28 @@ All 4 items from the 2026-08-25 audit's suggested priority order are now done: #
 
 **Next per user:** continue on the MessageAI / SMS side.
 
+## Session 2026-09-07 (Sun) — week-of-Sep-1 report written; Day 2 committed; Day 3 done + committed. 2 commits, still UNPUSHED.
+
+User was away on a trip mid-week-of-Sep-1, so that plan stalled after Days 1/2/4. This session: wrote the weekly report + the week-of-Sep-8 plan (`reports/2026-09-07-weekly.md`, `reports/2026-09-08-plan.md`, plus a plain-ASCII `reports/2026-09-07-email.txt` for pasting into email), then cleared two of the three slipped items.
+
+**`604a267`** — committed the 2026-09-01 Day-2 Little Caesars required-options fix (was verified-live-but-uncommitted; `doordash.js` + `CLAUDE.md`). No code change from what was already on the Pi.
+
+**`4be5269` (Day 3)** — `extractMenuItems()` / option-label name-truncation (`"Tacos -"`, `"10 Classic Wings860 -"`, `"Small Chips & Salsa+"`). Added `cleanScrapedName()` (`doordash.js` ~line 364) — strips trailing price/calorie/`+`/dangling-dash junk in a fixpoint loop, plus a dangling-dash-gated glued-calorie-digit strip (`"Wings860"` -> `"Wings"`) that's conservative enough to leave `"Route 44"` / `"Coke 20 oz"` alone. Applied at the **Node boundary** of the DOM-scrape fallbacks only (API paths are already clean):
+- `extractMenuItems()` — clean each name before the dedup pass (so raw + cleaned don't both survive).
+- `extractRequiredOptions()` — new local `cleanGroups()` run on both the structured `optionGroups` return and the broad-extraction `broadGroups` return.
+24 unit cases pass. **Forensics finding:** the menu-item `" -"` shape no longer reproduces on its own — DoorDash rewrote the menu card DOM (no more `data-anchor-id="MenuItem"`; cards are `div.image-action-card-container`, virtualized ~6 at a time; innerText lines are clean `["Crisp Meat Burrito","$4.08","•","96% (76)"]`) and the Day-2 SSR `__next_f` parser supplies clean names + real ids. So Day 3 is mostly *hardening the fallback* for when the API path fails. The `+` artifact (`"Small Chips & Salsa+"`) IS still live on the Costa Vida DOM-scrape option path and is now stripped.
+Temp diag (`_diagMenuCards` in doordash.js + `/api/_diag/menu-cards` route in server.js) added for the DOM forensics, **both fully removed before commit** — `grep` confirms clean, `server.js` working-tree diff is empty.
+
+**Verified live on the Pi:** fresh (cache-cleared) Taco Time (40 items) + Costa Vida (22 items) + Wingstop (38 items) scrapes — zero mangled names, zero suspicious. Costa Vida "Chips & Salsa" (idx 12) -> "Size" -> "Small Chips & Salsa" DOM-scrape option path added end-to-end into the **real cart** at $4.49 (`selectedOptions: ["Small Chips & Salsa","Pico De Gallo"]` — Pico auto-defaulted, expected). Wingstop "10 Wings" still clean-fails (known stepper-item hard case, not a regression) and Cajun Fried Corn add didn't complete first-try — both amid heavy Pi browser degradation this session.
+
+**Pi state at stop:** browser went into the documented degraded state (page `document.body.innerText` returning raw `self.__next_f.push(...)` script text instead of a rendered menu; `readBrowserCart` / `clearBrowserCart` evaluate timeouts). The `pkill -9 -f Xvfb` recovery form returned ssh exit 255 and took `frog-voice` + `frog-server` down — both restarted cleanly (`systemctl reset-failed` then `start`) and are `active`. **A test "Chips & Salsa" item may still be in the real DoorDash cart** — `clearBrowserCart()` ran twice but `my cart` still showed it at **$0.00 / Subtotal $0.00** (almost certainly a stale render of an already-emptied cart; `DOORDASH_DRY_RUN=true` so zero charge risk). Worth a real `readBrowserCart()`-backed check next session, ideally after a full Pi reboot.
+
+**`readBrowserCart()` name-mash seen live** (rolled into week-of-Sep-8 Day 5): `"Chips & SalsaSmall Chips & Salsa, Pico De Gallo$4.491 ×1 ×1 × - $0.00"` — the `cff2d6f` selectors + cut-at-`$` fallback still don't match DoorDash's current cart-row markup. `cleanScrapedName()` can be reused for the trailing junk once a fresh cart-row DOM dump is in hand.
+
+**Repo:** `65739dd..4be5269` = **8 commits UNPUSHED** (`604a267` + `4be5269` new this session). `modules/gps.js` still uncommitted (pre-existing). `reports/` committed this session. User has NOT given the push go-ahead — the report notes it as a pre-req for the week-of-Sep-8 plan.
+
+**Week-of-Sep-8 plan (`reports/2026-09-08-plan.md`), SMS/MessageAI-weighted:** Day 1 = saved-order record from the real cart (audit #6 carryover — totals are real since `cff2d6f`, line items aren't); Day 2 = the multi-restaurant smoke test that the trip pre-empted; Day 3 = SMS `[SELECT]` not updating `currentRestaurant` on a 2nd select + re-run the blocked first-time-SMS-user flow; Day 4 = verify the `91a596a` SMS pre-charge confirmation scrape (address/card/total) end-to-end on **Railway** (never tested against a real checkout page); Day 5 = `readBrowserCart()` proper fix.
+
 ## Railway Testing (no Twilio needed)
 ```bash
 # Send test message directly (no Twilio signature check)
