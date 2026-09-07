@@ -17,6 +17,7 @@ const https = require('https');
 let _lastFix = null;
 let _serialPort = null;
 let _running = false;
+let _fixSeq = 0;   // monotonic — guards against a slow geocode clobbering a newer fix
 
 // ---------- NMEA parsing ----------
 
@@ -85,13 +86,16 @@ async function start() {
         return;
     }
 
-    // Auto-detect GPS port
-    const { autoDetect } = require('@serialport/bindings-cpp');
+    // Auto-detect GPS port. The GT-U7 uses a CH340 USB-serial chip and shows up
+    // as /dev/ttyUSB0 (manufacturer often "1a86"/"QinHeng"); u-blox/Prolific
+    // modules are matched by manufacturer string.
     const ports = await SerialPort.list();
     const gpsPort = ports.find(p =>
         p.path.includes('USB') || p.path.includes('ACM') ||
         (p.manufacturer || '').toLowerCase().includes('u-blox') ||
-        (p.manufacturer || '').toLowerCase().includes('prolific')
+        (p.manufacturer || '').toLowerCase().includes('prolific') ||
+        (p.manufacturer || '').toLowerCase().includes('qinheng') ||
+        (p.vendorId || '').toLowerCase() === '1a86'
     );
 
     if (!gpsPort) {
@@ -115,15 +119,25 @@ async function start() {
             Math.abs(fix.lon - _lastFix.lon) > 0.01;
 
         if (changed) {
+            const seq = ++_fixSeq;
             const city = await reverseGeocode(fix.lat, fix.lon);
+            // A newer fix may have landed while we were geocoding — don't clobber it.
+            if (seq !== _fixSeq) return;
             _lastFix = { ...fix, city };
             console.log(`[GPS] Fix: ${fix.lat}, ${fix.lon} — ${city || 'unknown city'} (${fix.sats} sats)`);
         } else {
+            _fixSeq++;
             _lastFix = { ..._lastFix, lat: fix.lat, lon: fix.lon, sats: fix.sats };
         }
     });
 
     _serialPort.on('error', (err) => console.error('[GPS] Serial error:', err.message));
+    _serialPort.on('close', () => {
+        // Device unplugged / port closed — allow a later start() to reopen it.
+        _running = false;
+        _serialPort = null;
+        console.log('[GPS] Serial port closed.');
+    });
     console.log('[GPS] Background reader started.');
 }
 
