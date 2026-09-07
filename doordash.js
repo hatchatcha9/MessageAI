@@ -243,7 +243,19 @@ function _extractAndCacheRestaurantList(data, opName = '') {
 /** Extract numeric store ID from a DoorDash store URL. */
 function extractStoreIdFromUrl(url) {
     if (!url) return null;
-    const m = url.match(/\/store\/[^/?#]*?\/(\d{5,})/) || url.match(/\/store\/(\d{5,})/);
+    // DoorDash canonical URLs are /store/<slug>-<storeId>/<menuId>/... — the number in
+    // the FIRST path segment (end of the slug) is the store id; the standalone number
+    // in the SECOND segment is the *menu* id. The old regex grabbed that second number,
+    // so canonical URLs yielded the menuId, which then (a) never matched _capturedItemIds
+    // keyed off the real store id from API bodies, killing the HTTP fast path, and
+    // (b) made fetchItemPageViaAPI 404 ("Item not found ... storeId:<menuId>").
+    const seg = url.match(/\/store\/([^/?#]+)/);
+    if (seg) {
+        const trailing = seg[1].match(/(\d{5,})$/);      // slug ends in -<storeId>
+        if (trailing) return trailing[1];
+        if (/^\d{5,}$/.test(seg[1])) return seg[1];       // /store/<storeId>?... (search result)
+    }
+    const m = url.match(/\/store\/(\d{5,})/);
     return m ? m[1] : null;
 }
 
@@ -252,7 +264,10 @@ function extractStoreIdFromUrl(url) {
  * Uses page.evaluate so browser session cookies are automatically included.
  */
 async function fetchItemPageViaAPI(storeId, itemId) {
-    const query = `query itemPage($storeId:ID!,$itemId:ID!,$isNested:Boolean!,$fulfillmentType:FulfillmentType){itemPage(storeId:$storeId,itemId:$itemId,isNested:$isNested,fulfillmentType:$fulfillmentType){itemHeader{id name description unitAmount currency menuId}optionLists{id name minNumOptions maxNumOptions numFreeOptions isOptional options{id name unitAmount defaultQuantity}}}}`;
+    // NOTE: DoorDash removed the `isNested` argument from Query.itemPage — including it
+    // now fails the whole query with GRAPHQL_VALIDATION_FAILED (400), so every options
+    // fast-path call silently fell back to Playwright DOM scraping.
+    const query = `query itemPage($storeId:ID!,$itemId:ID!,$fulfillmentType:FulfillmentType){itemPage(storeId:$storeId,itemId:$itemId,fulfillmentType:$fulfillmentType){itemHeader{id name description unitAmount currency menuId}optionLists{id name minNumOptions maxNumOptions numFreeOptions isOptional options{id name unitAmount defaultQuantity}}}}`;
     return page.evaluate(async ({ query, vars }) => {
         try {
             const resp = await fetch(
@@ -276,7 +291,7 @@ async function fetchItemPageViaAPI(storeId, itemId) {
         } catch (e) {
             return { ok: false, error: e.message };
         }
-    }, { query, vars: { storeId, itemId, isNested: false, fulfillmentType: 'Delivery' } });
+    }, { query, vars: { storeId, itemId, fulfillmentType: 'Delivery' } });
 }
 
 /**
@@ -339,8 +354,15 @@ async function addCartItemViaAPI({ storeId, menuId, itemId, itemName, unitPrice,
  * Includes _apiGroupId / _apiOptions so buildNestedOptionsFromSelections can use them.
  */
 function convertOptionListsToRequired(optionLists) {
+    // A group counts as "required to surface" if it isn't optional, OR it enforces a
+    // minimum. DoorDash sometimes ships a genuinely-required group as
+    // isOptional:false / minNumOptions:0 (e.g. Costa Vida "Tortilla") — addCartItemV2
+    // still rejects the add without it — so keying only on minNumOptions>0 under-reported
+    // and the add then failed downstream. Recommendation/upsell carousels
+    // (isOptional:true) are still excluded.
+    const isUpsellName = n => /^recommended\b|^add a|^add an\b|you may also like/i.test(n || '');
     return optionLists
-        .filter(g => !g.isOptional && (g.minNumOptions || 0) > 0)
+        .filter(g => (!g.isOptional || (g.minNumOptions || 0) > 0) && !isUpsellName(g.name))
         .map(g => ({
             name: g.name,
             options: g.options.map(o => o.name),
@@ -4357,6 +4379,65 @@ async function extractMenuItems() {
             }
         }
 
+        // SSR __next_f fallback — some stores (e.g. Little Caesars) render NO usable
+        // itemId in the DOM or React fiber, but DoorDash's server-streamed payload
+        // (self.__next_f.push([...])) still carries every item as
+        // {"__typename":"MenuPageItem","id":"<digits>","name":"<name>",...}. Parse that
+        // so fetchItemPageViaAPI's fast path (authoritative option groups) can run for
+        // these stores too, instead of always falling back to fragile DOM scraping.
+        const haveIds = storeIdForCapture && _capturedItemIds[storeIdForCapture] && _capturedItemIds[storeIdForCapture].size > 0;
+        if (!haveIds && storeIdForCapture) {
+            try {
+                const ssrPairs = await Promise.race([
+                    page.evaluate(() => {
+                        const blob = Array.from(document.querySelectorAll('script'))
+                            .map(s => s.textContent || '')
+                            .filter(t => t.includes('__next_f'))
+                            .join('\n');
+                        const re = /\\?"__typename\\?":\\?"(?:MenuPageItem|StorePageCarouselItem)\\?",\\?"id\\?":\\?"(\d{5,})\\?",\\?"name\\?":\\?"([^"\\]{2,70})\\?"/g;
+                        const out = [];
+                        const seen = new Set();
+                        let m;
+                        while ((m = re.exec(blob))) {
+                            const name = m[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+                            const key = name.toLowerCase();
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            out.push({ itemId: m[1], name });
+                        }
+                        return out;
+                    }),
+                    new Promise(r => setTimeout(() => r(null), 8000))
+                ]);
+                if (ssrPairs && ssrPairs.length > 0) {
+                    if (!_capturedItemIds[storeIdForCapture]) _capturedItemIds[storeIdForCapture] = new Map();
+                    const priceByName = new Map(menuItems.map(mi => [mi.name.toLowerCase(), Math.round((mi.price || 0) * 100)]));
+                    const idByName = new Map(ssrPairs.map(p => [p.name.toLowerCase(), p.itemId]));
+                    let n = 0;
+                    for (const p of ssrPairs) {
+                        _capturedItemIds[storeIdForCapture].set(p.name.toLowerCase(), {
+                            itemId: p.itemId,
+                            menuId: '',
+                            unitPrice: priceByName.get(p.name.toLowerCase()) || 0
+                        });
+                        n++;
+                    }
+                    // Also stamp the real itemId onto menuItems[].id so it survives into the
+                    // DB menu cache — otherwise the in-memory _capturedItemIds map is the only
+                    // copy and a cached-menu SELECT after a restart can't repopulate it.
+                    for (const mi of menuItems) {
+                        const rid = idByName.get(mi.name.toLowerCase());
+                        if (rid) mi.id = `item-${rid}`;
+                    }
+                    console.log(`[SSR] Cached ${n} item IDs from __next_f payload for storeId=${storeIdForCapture}`);
+                } else {
+                    console.log('[SSR] No __next_f item IDs found');
+                }
+            } catch (e) {
+                console.log('[SSR] Error:', e.message);
+            }
+        }
+
         console.log(`[DoorDash] extractMenuItems returning ${menuItems.length} items`);
         await takeScreenshot('extract-menu-done');
         return menuItems;
@@ -5501,7 +5582,14 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
         // Falls back to Playwright if item IDs aren't captured or the call fails.
         {
             const storeId = extractStoreIdFromUrl(options.restaurantUrl || storeNavUrl || page.url());
-            const itemApiData = storeId ? _capturedItemIds[storeId]?.get((cachedItem?.name || '').toLowerCase()) : null;
+            let itemApiData = storeId ? _capturedItemIds[storeId]?.get((cachedItem?.name || '').toLowerCase()) : null;
+            // Fallback: the cached menu item carries its real DoorDash id as "item-<digits>"
+            // (stamped by extractMenuItems' SSR pass) even after a restart clears the
+            // in-memory _capturedItemIds map.
+            if (!itemApiData?.itemId) {
+                const m = String(cachedItem?.id || '').match(/^item-(\d{5,})$/);
+                if (m) itemApiData = { itemId: m[1], menuId: '', unitPrice: Math.round((cachedItem?.price || 0) * 100) };
+            }
 
             if (storeId && itemApiData?.itemId) {
                 const t0 = Date.now();
@@ -5510,19 +5598,20 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
                     const itemPageResult = await Promise.race([
                         fetchItemPageViaAPI(storeId, itemApiData.itemId),
-                        new Promise(r => setTimeout(() => r({ ok: false, timeout: true }), 5000))
+                        new Promise(r => setTimeout(() => r({ ok: false, timeout: true }), 12000))
                     ]);
                     const t1 = Date.now();
                     console.log(`[API] itemPage: ok=${itemPageResult.ok} status=${itemPageResult.status} in ${t1 - t0}ms`);
 
                     if (itemPageResult.ok && itemPageResult.data?.data?.itemPage) {
                         const optionLists = itemPageResult.data.data.itemPage.optionLists || [];
-                        const requiredGroups = optionLists.filter(g => !g.isOptional && (g.minNumOptions || 0) > 0);
+                        // Use the same inclusive rule the payload builder uses, so we don't
+                        // add-then-fail on a group we never asked the user about.
+                        const requiredOptions = convertOptionListsToRequired(optionLists);
 
-                        if (!options.skipOptionsCheck && requiredGroups.length > 0) {
+                        if (!options.skipOptionsCheck && requiredOptions.length > 0) {
                             // Return option structure without Playwright — server.js will ask user
-                            const requiredOptions = convertOptionListsToRequired(optionLists);
-                            console.log(`[API] Item needs options (${requiredGroups.length} groups) — returning via API in ${t1 - t0}ms`);
+                            console.log(`[API] Item needs options (${requiredOptions.length} groups) — returning via API in ${t1 - t0}ms`);
                             return { success: false, needsOptions: true, requiredOptions };
                         }
 
@@ -5558,6 +5647,15 @@ async function addItemByIndex(index, options = {}, cachedItem = null) {
 
                         const errs = cartResult.data?.errors;
                         console.log(`[API] addCartItemV2 failed (${t2-t0}ms): ${JSON.stringify(errs || cartResult).substring(0, 200)}`);
+                        // itemPage's optionLists can under-report vs. what addCartItemV2
+                        // enforces (e.g. Costa Vida "Single Taco" — "Tortilla" is required at
+                        // add time but absent from the itemPage response). Reload the store
+                        // page so the Playwright fallback below starts from the same clean,
+                        // hydrated state it would have had if the fast path had been skipped.
+                        const backUrl = options.restaurantUrl || storeNavUrl;
+                        if (backUrl) {
+                            await navigateToRestaurantPage(backUrl).catch(e => console.log('[API] fallback re-nav failed:', e.message));
+                        }
                     }
                 } catch (apiErr) {
                     console.log('[API] Fast path error:', apiErr.message);

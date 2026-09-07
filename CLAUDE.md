@@ -60,12 +60,13 @@ Test via browser at http://localhost:3000 (SMS simulator UI).
 10. **Missing closing brace in PLACE_ORDER** — pre-existing syntax error fixed
 11. **Post-cart-clear search** — Claude now uses [SEARCH:] after clearing cart instead of plain text
 
-## A2P 10DLC Status
-- Campaign resubmitted 2026-03-12 after fixing:
-  - Privacy/Terms URLs now real: https://hatchatcha9.github.io/messageai-legal/
-  - Removed incorrect "lending" and "age-gated" checkboxes
-  - Updated opt-in language and sample messages
-- Awaiting approval
+## A2P 10DLC Status — APPROVED & LIVE (verified via Twilio API 2026-08-29)
+- **Brand** `BNe2c4d1b8da2b4c98b8dda6264349556d` — status APPROVED, identity VERIFIED, type SOLE_PROPRIETOR, TCR id `B7643AT`, approved 2026-03-10. No errors.
+- **Campaign** `QE2c6890da8086d771620e9b13fadeba0b` (TCR campaign id `CR87P0R`) — campaign_status VERIFIED (terminal/active), use case SOLE_PROPRIETOR, registered 2026-03-10. No errors.
+- **Messaging Service** `MG963204ab7a2e83b904872338925c41d5` ("Sole Proprietor A2P Messaging Service") — `us_app_to_person_registered: true`; inbound webhook → `https://messageai-production.up.railway.app/api/twilio/webhook` (Railway).
+- **Number** `+18013462263` attached to that Messaging Service (SMS/MMS/Voice).
+- **Sole Proprietor throughput caps:** AT&T 0.25 msg/sec (msg_class W); T-Mobile brand tier STARTER (~1,000 msgs/day). Fine for personal use, not scale.
+- The old "Awaiting approval" note was stale — it approved 2026-03-10. What made it *look* broken on 2026-08-29 was the Twilio account running out of funds → suspended → API 401s; re-funding (balance $19.76, account now "Full"/active) restored everything. Nothing to fix on the A2P side.
 
 ## Known Working
 - Real DoorDash ordering works end-to-end (orders go to 12447 S Deer Cove)
@@ -354,6 +355,34 @@ Committed `29dc96a`, pushed.
 All 4 items from the 2026-08-25 audit's suggested priority order are now done: #1 scheduled-order lock bypass, #2 food.html checkout race, #3 voice/SMS timeout guards + Piper TTS timeout, #4 this session's helper-function audit. Real DoorDash cart confirmed empty at session end. Both services healthy.
 
 **Not yet committed** — holding for user go-ahead.
+
+## Session 2026-09-01 (Tue) — "week of Sep 1" plan Day 2: Little Caesars required-options FIXED + revived the dead HTTP options fast-path. Verified live. NOT committed.
+
+**Cadence correction:** the weekly report + a new "Plan — week of Sep 1" WERE sent by email Sun 2026-08-30 (an earlier memory note wrongly said they were skipped). That plan: Day 1 = stale-restaurant boot-prewarm hijack (already done 2026-08-31 as `65739dd`, UNPUSHED); Day 2 = this; Day 3 = `extractMenuItems()` two-DOM-line name truncation + calorie-digit concat; Day 4 = MEDIUM audit backlog pick 2–3 (partly done in `e89f971`/`cff2d6f`); Day 5 = full smoke test. **Next report Sun 2026-09-07 covers this plan — Day 1 ✅, Day 2 ✅, Days 3 & 5 open, Day 4 partial.**
+
+**Day 2 task:** Little Caesars "Custom Stuffed Crust" (build-your-own pizza) surfaced only 1 generic option group instead of its real required Sauce + Cheese groups (Day-5 smoke-test finding #2).
+
+**Root-caused 3 real bugs (via a temporary `_diagItemOptions` fn + `/api/_diag/item-options` route — BOTH REMOVED before session end; `git status` shows only `doordash.js` + pre-existing `CLAUDE.md`/`modules/gps.js`):**
+1. `fetchItemPageViaAPI`'s `itemPage` GraphQL query still sends the `isNested` arg, which DoorDash removed → every call 400s `GRAPHQL_VALIDATION_FAILED` → the HTTP options fast-path has been **dead for every optioned item at every restaurant**, always falling back to Playwright DOM scraping.
+2. `extractStoreIdFromUrl` returns the **menu id**, not the store id, for canonical `/store/<slug>-<storeId>/<menuId>/` URLs (grabbed the 2nd path segment). Broke `_capturedItemIds` key matching AND made `itemPage` 404 "Item not found".
+3. Little Caesars renders NO usable itemId in DOM or React fiber — the IDs are only in the `self.__next_f` SSR payload (`{"__typename":"MenuPageItem","id":"...","name":"..."}`), which nothing parsed.
+
+**Fixes (all `doordash.js`, deployed to Pi + live-verified, NOT committed):**
+- Drop `isNested` from the `itemPage` query + vars.
+- `extractStoreIdFromUrl`: take trailing `\d{5,}` from the slug segment; fall back to bare `/store/<digits>`; then old regex.
+- New SSR `__next_f` fallback in `extractMenuItems` (when DOM+fiber capture 0 IDs): regex-parse `MenuPageItem`/`StorePageCarouselItem` `{id,name}` → populate `_capturedItemIds` AND stamp `menuItems[i].id = "item-<realId>"` so it persists into the DB menu cache (survives restart / cached SELECT).
+- `addItemByIndex` fast-path: fall back to parsing `cachedItem.id` (`/^item-(\d{5,})$/`) for the itemId.
+- `itemPage` fast-path timeout 5s → 12s (Pi cold calls run 5–11s).
+- `convertOptionListsToRequired` also surfaces `isOptional:false / min:0` groups; `addItemByIndex` uses `convertOptionListsToRequired(...).length` for the needsOptions decision (was a stricter separate filter).
+- After an API `addCartItemV2` failure, `navigateToRestaurantPage(backUrl)` before the Playwright fallback.
+
+**Verified live (real DoorDash cart, incl. once after `systemctl restart` with empty `_capturedItemIds`):** CSC discovery → `["Sauce Selection","Cheese Selection"]` (4 opts each); CSC add Sauce=Regular + Cheese=Regular → `[API] ✅ Item added via HTTP API`, real cart `1x Custom Stuffed Crust - $17.49` (verified via `my cart` voice read w/ `actions:[{show_cart}]`); cart cleared + reconfirmed empty.
+
+**KNOWN ROUGH EDGE (reported to user, left for later — not a clean regression):** Costa Vida "Single Taco" **add** fails — DoorDash's `itemPage` response OMITS the "Tortilla" required group entirely, so `addCartItemV2` → `item_validation_error: "Please select at least 1 options for Tortilla"`, then the Playwright fallback hits the pre-existing Costa-Vida "Only found 0 items" menu-render flake (2026-08-29 finding #1 signature). Real fix: on `item_validation_error`, detect the named group + re-surface ALL optionLists as `needsOptions`, OR make the post-API Playwright fallback reliably re-render the CV menu.
+
+**Resume points / testing notes:** `sqlite3` CLI NOT on Pi — use `node -e 'require("dotenv").config(); const db=require("./db"); ...'` (db.js hard-refuses without `ENCRYPTION_KEY`). `db.clearDoorDashCache(userId)` forces fresh `extractMenuItems`. LC store `1161247`/menu `31838397`; CV store `157397`/menu `1657559`; CSC itemId `11736262125`. Pi browser needed the documented manual recovery mid-session (`pkill -9 -f chrome-linux/chrome` — the `pkill Xvfb` form returns ssh exit 255 and killed `frog-voice` once). Both services `active`, cart empty, `DOORDASH_DRY_RUN=true` at session end.
+
+**Next per user:** continue on the MessageAI / SMS side.
 
 ## Railway Testing (no Twilio needed)
 ```bash
