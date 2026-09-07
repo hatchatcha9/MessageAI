@@ -170,6 +170,84 @@ STILL OPEN (rolled into the week-of-Sep-8 plan)
 ======================================================================
 
 
+QUANT TRADING SYSTEM - new project, started Sun Sep 7
+(separate repo and plan - included here as it's the same reporting week)
+
+A learning-first quant trading system in Python, built in 7 gated phases
+(0-6): data pipeline -> honest backtester -> trained model -> a math + crypto
+agent ensemble -> paper trading -> a gated ~$100 real-money test. The point
+is fluency in data pipelines, simulation, testing and statistical honesty;
+profit is secondary. Built around crypto (spot) to avoid market-hours edge
+cases. Two phases landed this session.
+
+  Phase 0 - foundations ....................... DONE (v0.0-scaffold, deaed31)
+  Phase 1 - data pipeline .................... DONE (v0.1-data, f75c99d)
+
+
+PHASE 0 - FOUNDATIONS
+
+Tested, runnable skeleton: uv for env/deps, src/quant package, ruff (lint +
+format), mypy --strict, pytest, GitHub Actions CI on every push, private repo
+pushed. config.py loads typed settings from .env - secrets optional, only
+required where used; LIVE_TRADING_ENABLED defaults false with a test locking
+that in. Definition of Done met: a fresh clone passes all four checks and CI
+is green.
+
+
+PHASE 1 - DATA PIPELINE  (31 tests)
+
+src/quant/data/, four modules:
+  - schema.sql - OHLCV bars table; composite primary key (symbol, timeframe,
+    timestamp_utc) makes a re-fetch an update, not a duplicate.
+  - store.py - connect / init_db / upsert_bars (rejects naive timestamps) /
+    load_bars (UTC-indexed).
+  - fetchers.py - a retry-with-backoff decorator, a pure normalizer that
+    absorbs yfinance's version-to-version shape drift, the fetch call, a CLI.
+  - quality.py - sanity_check (reports bad OHLC rows) and find_gaps (missing
+    days).
+
+Verified live: `python -m quant.data.fetchers BTC-USD --start 2019-01-01`
+fetched 2807 daily bars (2019-01-01 -> 2026-09-07), 0 gaps, sanity clean; a
+second run left the count at 2807 (idempotent). data/quant.sqlite is
+gitignored.
+
+
+CI CAUGHT THREE REAL ISSUES (all fixed before "done")
+
+Local checks passed; CI failed three times, each a real problem:
+  1. ruff import-sorting differed local vs CI (first-party auto-detection).
+     Pinned known-first-party in config. (483d8a1)
+  2. The whole src/quant/data/ package was untracked - .gitignore had an
+     unanchored `data/` rule (for the local DB dir) that also matched the
+     source dir. git status stayed clean because ignored files don't show,
+     and ruff (which respects .gitignore) was skipping that code too, so the
+     local green bar was a lie. Anchored to /data/. (9a19a37)
+  3. A long-line lint error that only appeared once ruff could see the files.
+     (f75c99d)
+
+
+STATE
+
+  - 10 commits 5826b6f..f75c99d on master, all pushed, CI green, tree clean.
+  - Tags v0.0-scaffold (deaed31) and v0.1-data (f75c99d).
+  - ~410 lines of Python in src/, 31 tests.
+  - No real money near this - Phase 6 ($100) is five phases out and gated on
+    the ensemble beating buy-and-hold net of fees on held-out data AND in
+    forward paper.
+
+
+NEXT - PHASE 2 (BACKTESTER + SMA BASELINE)
+
+A bar-by-bar simulator where the strategy interface structurally can't see
+the future, fills happen at the next bar's open, and costs are on by default.
+First deliverable: the interface + a lookahead cheat-test. Also the baseline
+(moving-average crossover) that the model and agents must beat after costs.
+Milestone-gated, no day allocation.
+
+
+======================================================================
+
+
 PLAN - week of Sep 8
 frog / MessageAI
 
@@ -238,3 +316,11 @@ NOT IN THIS WEEK (blocked / needs hardware)
   - Costa Vida "Single Taco" - real fix needs itemPage validation-error
     handling or a reliable Playwright menu re-render; deferred behind the SMS
     work.
+
+
+SEPARATE TRACK - QUANT TRADING SYSTEM
+
+Not a frog day and not day-allocated. Phase 2 (the backtester + SMA baseline,
+github.com/hatchatcha9/quant-system) is next when time goes there -
+milestone-gated: it advances when its tests pass, including the lookahead
+cheat-test, and every file can be explained - not on a schedule.
