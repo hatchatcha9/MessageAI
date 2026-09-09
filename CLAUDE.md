@@ -406,6 +406,22 @@ Temp diag (`_diagMenuCards` in doordash.js + `/api/_diag/menu-cards` route in se
 
 **Week-of-Sep-8 plan (`reports/2026-09-08-plan.md`), SMS/MessageAI-weighted:** Day 1 = saved-order record from the real cart (audit #6 carryover — totals are real since `cff2d6f`, line items aren't); Day 2 = the multi-restaurant smoke test that the trip pre-empted; Day 3 = SMS `[SELECT]` not updating `currentRestaurant` on a 2nd select + re-run the blocked first-time-SMS-user flow; Day 4 = verify the `91a596a` SMS pre-charge confirmation scrape (address/card/total) end-to-end on **Railway** (never tested against a real checkout page); Day 5 = `readBrowserCart()` proper fix.
 
+## Session 2026-09-09 (Tue) — week-of-Sep-8 plan Day 1: saved-order record from the real checkout cart. NOT committed.
+
+Pushed `65739dd..4be5269` (8 commits) to `origin/master` per user go-ahead — the plan's stated pre-req. `6df24a6` (session log), `72f2737` (gps.js CH340 detect), and 3 report-only commits (`a07df7d`/`5a15a2d`/`b20ad34`) stay local. Two `reports/2026-09-07-*` files still carry uncommitted tweaks from 9/7 (Quant `~3.5h` time note + a `master`→`main` fix) — untouched this session.
+
+**Day 1 task (audit finding #6):** `checkoutCurrentCart()`'s callers built `db.createOrder(...)`'s **item list** from the local SQLite cart, not the real DoorDash cart just checked out. `cff2d6f` (8/31) made the *totals* real (scraped off the checkout page); the line items stayed local, so a local/real drift (e.g. a `REMOVE_ITEM` that only logged a warning) records an order that doesn't match what was charged.
+
+**Implemented:**
+- **`doordash.js` — `scrapeCheckoutLineItems(pageRef)`** (new, right before `checkoutCurrentCart`): DOM-scrapes the checkout page's order-summary list. `data-anchor-id*="CartItem"|"OrderItem"` + `data-testid` order-item family (same selector family as `readBrowserCart()`), per-row name node (`ItemName`/`item-name`/`h3`/`h4`) with a first-line/pre-`$` text fallback, qty from a `Quantity` node or a `N×`/`qty N` text match (default 1), price from a `Price` node or first `$n.nn` in the row. Names run through `cleanScrapedName()` at the Node boundary; dupes collapsed on `name|qty|price`. Returns `[]` on any doubt.
+- **`checkoutCurrentCart()`** now scrapes line items right after the `orderTotals`/payment/address capture block and returns them as `lineItems` on all four success paths (`preview`, `dryRun`, confirmed `Order placed!`, `unconfirmed`).
+- **`server.js` — `reconcileOrderItems(localItems, scrapedItems)`** (new, right after `addItemByIndexGuarded`): when `scrapedItems` is non-empty, the record is built from it, but each row borrows `id` / `selectedOptions` / `source` from a local cart item matched on a normalized name (`&`→`and`, strip non-alphanumerics, lowercase) so `[REORDER]` still works; scraped qty wins; price falls back to the local item's when the scrape got `0`. Empty/missing `scrapedItems` → returns `localItems` unchanged (exact prior behavior).
+- Wired into **both** `createOrder` call sites: voice `finalizeDoordashCheckout()` (~707) and touch `POST /api/food/checkout` (~3541).
+
+**Verification:** 9 pure-logic unit cases for `reconcileOrderItems` pass (throwaway script — empty/null passthrough, metadata carry-over, local/real drift both directions, unmatched-item bare record, `&`/spacing/case fuzzy match, label-keyed local item, qty default). `node -c` clean locally and on the Pi; deployed both files; `frog-server` restarted healthy (prewarm complete, browser launched). **The checkout-page scrape itself is NOT live-verified** — the Pi's browser can't load the DoorDash checkout page (documented), so `scrapeCheckoutLineItems()`'s real output against DoorDash's current checkout DOM is unconfirmed. Its selectors are a best guess off the `readBrowserCart()` family; the empty-result path is a safe no-op (falls through to today's local-cart behavior). **Fold the real check into the Day 4 Railway session** — that's the only place a real checkout page renders, and Day 4 already drives an SMS order to the checkout step.
+
+**NOT committed** — holding for user go-ahead. Working tree: `doordash.js`, `server.js` (Day 1), plus the pre-existing `reports/2026-09-07-*` + `modules/gps.js`.
+
 ## Railway Testing (no Twilio needed)
 ```bash
 # Send test message directly (no Twilio signature check)

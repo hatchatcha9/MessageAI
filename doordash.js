@@ -2728,6 +2728,69 @@ async function selectScheduledDeliveryTime(targetTime) {
     }
 }
 
+/**
+ * Scrape the itemized order list off the checkout page (the order-summary block
+ * DoorDash renders next to the Place Order button). Feeds the saved-order record
+ * so it reflects what was actually checked out, not the local SQLite cart, which
+ * can drift from real state (audit #6). Best-effort: returns [] on any doubt and
+ * the caller falls back to the local cart. Same data-anchor-id family and text
+ * fallback as readBrowserCart(); names cleaned at the Node boundary.
+ * @param {import('playwright').Page} pageRef
+ * @returns {Promise<Array<{name:string, quantity:number, price:number}>>}
+ */
+async function scrapeCheckoutLineItems(pageRef) {
+    if (!pageRef) return [];
+    try {
+        const raw = await evalWithTimeout(pageRef, () => {
+            const out = [];
+            const sel = '[data-anchor-id*="CartItem"], [data-anchor-id*="OrderItem"], '
+                + '[data-testid*="order-item" i], [data-testid*="OrderCartItem"]';
+            for (const el of document.querySelectorAll(sel)) {
+                if (el.tagName === 'BUTTON') continue;
+                // Skip a node whose own ancestor already matched (avoid double-counting)
+                if (el.parentElement && el.parentElement.closest(sel)) continue;
+                const nameEl = el.querySelector('[data-anchor-id*="ItemName"], [data-testid*="item-name" i], h3, h4')
+                    || el.querySelector('span[class*="name"], p[class*="name"]');
+                let name = nameEl ? (nameEl.textContent || '').trim() : '';
+                if (!name) {
+                    const t = (el.textContent || '').trim();
+                    name = t.split('\n')[0].split('$')[0].replace(/\s{2,}/g, ' ').trim();
+                }
+                if (!name || name.length < 2 || name.length > 120) continue;
+                const qtyEl = el.querySelector('[data-anchor-id*="Quantity" i], [data-testid*="quantity" i]');
+                let qty = qtyEl ? parseInt((qtyEl.textContent.match(/\d+/) || [])[0], 10) : NaN;
+                if (!Number.isFinite(qty) || qty < 1) {
+                    const rowText = el.textContent || '';
+                    const m = rowText.match(/(?:qty|quantity)\D{0,3}(\d+)/i) || rowText.match(/^\s*(\d+)\s*[×xX]\s/);
+                    qty = m ? parseInt(m[1], 10) : 1;
+                }
+                const priceEl = el.querySelector('[data-anchor-id*="Price" i], [data-testid*="price" i]');
+                const priceText = priceEl ? priceEl.textContent
+                    : ((el.textContent || '').match(/\$\s?\d+(?:\.\d{2})?/) || [''])[0];
+                const price = parseFloat((String(priceText).match(/\$\s?(\d+(?:\.\d{2})?)/) || [])[1] || '0');
+                out.push({ name, quantity: qty, price });
+            }
+            return out;
+        }, 6000, 'scrape checkout line items').catch(() => []);
+
+        if (!Array.isArray(raw) || raw.length === 0) return [];
+        const seen = new Set();
+        const cleaned = [];
+        for (const it of raw) {
+            const name = cleanScrapedName(it.name) || it.name;
+            if (!name || name.length < 2) continue;
+            const key = `${name.toLowerCase()}|${it.quantity}|${it.price}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            cleaned.push({ name, quantity: it.quantity || 1, price: Number.isFinite(it.price) ? it.price : 0 });
+        }
+        return cleaned;
+    } catch (e) {
+        console.log('[DoorDash] scrapeCheckoutLineItems error:', e.message);
+        return [];
+    }
+}
+
 async function checkoutCurrentCart(options = {}) {
     const { scheduledTime = null, previewOnly = false } = options;
     console.log(`[DoorDash] === CHECKING OUT CURRENT CART ===${previewOnly ? ' (PREVIEW ONLY — will not place)' : ''}`);
@@ -3000,15 +3063,29 @@ async function checkoutCurrentCart(options = {}) {
             console.log('[DoorDash] Could not capture checkout details:', e.message);
         }
 
+        // Itemized order list off the checkout page. server.js was building the
+        // saved-order record's line items from the local SQLite cart, which can
+        // drift from what DoorDash actually charged (audit #6). Best-effort — an
+        // empty result just leaves the caller on its existing local-cart path.
+        let lineItems = [];
+        try {
+            lineItems = await scrapeCheckoutLineItems(page);
+            if (lineItems.length) {
+                console.log(`[DoorDash] Checkout line items (${lineItems.length}): ${lineItems.map(i => `${i.quantity}x ${i.name}`).join(', ')}`);
+            }
+        } catch (e) {
+            console.log('[DoorDash] Could not scrape checkout line items:', e.message);
+        }
+
         if (previewOnly) {
             console.log('[DoorDash] Preview only — leaving browser on checkout page, NOT placing order');
-            return { success: true, preview: true, orderTotals, payment, deliveryAddress, placeButtonText: btnText, scheduledSlot: selectedSlot };
+            return { success: true, preview: true, orderTotals, payment, deliveryAddress, lineItems, placeButtonText: btnText, scheduledSlot: selectedSlot };
         }
 
         const DRY_RUN = process.env.DOORDASH_DRY_RUN === 'true';
         if (DRY_RUN) {
             console.log('[DoorDash] DRY RUN — skipping Place Order click');
-            return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.', orderTotals, payment, deliveryAddress };
+            return { success: true, dryRun: true, message: 'Dry run complete — checkout page loaded, Place Order button found.', orderTotals, payment, deliveryAddress, lineItems };
         }
 
         console.log('[DoorDash] Clicking Place Order...');
@@ -3037,7 +3114,7 @@ async function checkoutCurrentCart(options = {}) {
 
         if (isConfirmedUrl || isConfirmedText) {
             console.log('[DoorDash] Order confirmed!');
-            return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals };
+            return { success: true, message: 'Order placed!', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals, lineItems };
         }
 
         // Still on checkout page — check for error messages
@@ -3068,7 +3145,7 @@ async function checkoutCurrentCart(options = {}) {
         }
 
         console.log('[DoorDash] Place Order clicked, button gone, but no confirmation page seen — reporting UNCONFIRMED');
-        return { success: true, unconfirmed: true, message: 'Order submitted but not confirmed — check your DoorDash app.', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals };
+        return { success: true, unconfirmed: true, message: 'Order submitted but not confirmed — check your DoorDash app.', orderUrl: currentUrl, scheduledSlot: selectedSlot, orderTotals, lineItems };
 
     } catch (error) {
         console.error('[DoorDash] Checkout error:', error.message);

@@ -603,6 +603,36 @@ async function addItemByIndexGuarded(...args) {
     }
 }
 
+// Day 1 / audit #6: the saved order record's line items were always rebuilt from
+// the local SQLite cart. cff2d6f made the *totals* real (scraped off the checkout
+// page); the line items stayed local, so a drift between local and real cart
+// state (e.g. a REMOVE_ITEM that only logged a warning) would be recorded wrong.
+// When checkoutCurrentCart() manages to scrape the real checkout line items, use
+// those for the record — but carry over each local item's id / selectedOptions /
+// source by name match so [REORDER] can still re-add them. Falls straight through
+// to the local list when the scrape came back empty.
+function reconcileOrderItems(localItems, scrapedItems) {
+    if (!Array.isArray(scrapedItems) || scrapedItems.length === 0) return localItems || [];
+    const norm = s => String(s || '').toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+    const localByName = new Map();
+    for (const li of (localItems || [])) {
+        const k = norm(li.name || li.label);
+        if (k && !localByName.has(k)) localByName.set(k, li);
+    }
+    return scrapedItems.map(si => {
+        const match = localByName.get(norm(si.name));
+        const price = Number.isFinite(si.price) && si.price > 0
+            ? si.price
+            : (match ? parseFloat(match.price) || 0 : 0);
+        return {
+            name: si.name,
+            price,
+            quantity: si.quantity || 1,
+            ...(match ? { id: match.id, selectedOptions: match.selectedOptions, source: match.source } : {}),
+        };
+    });
+}
+
 // Pre-charge confirmation (SMS): [PLACE_ORDER] no longer places the order — it
 // loads the real DoorDash checkout page, reads back the delivery address, the
 // payment card, and the true total, and asks the user to reply "confirm". Only
@@ -671,9 +701,10 @@ async function finalizeDoordashCheckout(user, { scheduledTime = null } = {}) {
         const realSubtotal = typeof rt.subtotal === 'number' ? rt.subtotal : subtotal;
         const total = typeof rt.total === 'number' ? rt.total : realSubtotal + 2.99 + realSubtotal * 0.15 + realSubtotal * 0.08;
         const userAddress = db.getUserAddress(user.id) || 'Address on file';
+        const recordItems = reconcileOrderItems(cart.items[prefs.currentRestaurant] || [], result.lineItems);
 
         const orderId = db.createOrder(user.id, prefs.currentRestaurant, restaurantName,
-            cart.items[prefs.currentRestaurant] || [], userAddress,
+            recordItems, userAddress,
             realSubtotal.toFixed(2), total.toFixed(2),
             prefs.currentRestaurantUrl || null, result.orderUrl || null);
         if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
@@ -3507,7 +3538,8 @@ app.post('/api/food/checkout', async (req, res) => {
             ? rt.total
             : subtotal + 2.99 + subtotal * 0.15 + subtotal * 0.08;
 
-        const orderId = db.createOrder(user.id, current.id, current.name, items, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
+        const recordItems = reconcileOrderItems(items, result.lineItems);
+        const orderId = db.createOrder(user.id, current.id, current.name, recordItems, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
         if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
         db.clearCart(user.id);
         const prefs = db.getUserPreferences(user.id);
