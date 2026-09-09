@@ -173,6 +173,9 @@ STILL OPEN (rolled into the week-of-Sep-8 plan)
 QUANT TRADING SYSTEM - new project, started Sun Sep 7
 (separate repo and plan - included here as it's the same reporting week)
 
+TIME: ~3.5 h, one session (Sun Sep 7) - estimate. Covers the full phased
+plan, a shareable plan page, and Phases 0 + 1.
+
 A learning-first quant trading system in Python, built in 7 gated phases
 (0-6): data pipeline -> honest backtester -> trained model -> a math + crypto
 agent ensemble -> paper trading -> a gated ~$100 real-money test. The point
@@ -228,7 +231,7 @@ Local checks passed; CI failed three times, each a real problem:
 
 STATE
 
-  - 10 commits 5826b6f..f75c99d on master, all pushed, CI green, tree clean.
+  - 10 commits 5826b6f..f75c99d on main, all pushed, CI green, tree clean.
   - Tags v0.0-scaffold (deaed31) and v0.1-data (f75c99d).
   - ~410 lines of Python in src/, 31 tests.
   - No real money near this - Phase 6 ($100) is five phases out and gated on
