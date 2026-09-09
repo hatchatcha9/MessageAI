@@ -430,6 +430,21 @@ This also means **Day 1's checkout-line-item scrape can't be verified on the Pi 
 
 Costa Vida "Single Taco" add — left alone; the week-of-Sep-8 plan explicitly defers it behind the SMS work.
 
+## Session 2026-09-09 continued — week-of-Sep-8 plan Day 3: SMS `[SELECT]` split-brain on a 2nd select. Fixed, verified live. NOT committed.
+
+**Repro (Pi now runs `TWILIO_ENABLED=true`, so `/api/message` works there).** Seeded test SMS user `+15550199001` (address + creds), copied the cached "tacos" search + Taco Time (`29280516`) and Costa Vida (`157397`) menus onto it so those two selects take the fast (no-browser) path.
+
+- **Fast-cache path is NOT buggy.** search → `[SELECT: 4]` Taco Time → `[SELECT: 5]` Costa Vida: `prefs.currentRestaurant` AND `getCachedCurrentRestaurant()` both flipped to `157397` correctly. A 2nd (and 3rd) `[SELECT]` updates state fine when the target's menu is already cached.
+- **The bug is the scrape path.** `prefs.currentRestaurant = restaurantId` was only assigned *inside* `if (menuResult.success)`, `db.cacheCurrentRestaurant()` only on that path's success branch, and there was an explicit `prefs.currentRestaurant = null` revert when `extractMenuItems()` came back empty. So a 2nd `[SELECT]` to a not-yet-cached restaurant whose menu scrape then failed/timed out (flaky Pi browser, or a real scrape failure) left **`prefs.currentRestaurant` = the new pick while `getCachedCurrentRestaurant()` still returned the OLD one.** Downstream `[ADD_ITEM_NUM]` reads the cache → items land on the previous restaurant. Reproduced live: 1st select Costa Vida `157397`, then `[SELECT: 6]` Cafe Rio `157395` (no cached menu) → `extractMenuItems` hit `Extract evaluate timeout` → ended `prefs=157395` but `cachedCurrentRestaurant=157397/Costa Vida`.
+
+**Fix (`server.js`, SMS `[SELECT: N]` handler ~927):** the moment the selection resolves to a valid `restaurantId` + `selectedRestaurant`, persist `prefs.currentRestaurant/Source/Url` + clear pending-option state + `db.clearCart` + `db.cacheCurrentRestaurant({...menu: <cached or []>})` **together, before the menu load**. The fast path and scrape-success path then refine the cache with the real menu. Removed the empty-menu `currentRestaurant = null` revert — the selection stays put with an empty menu, so `[ADD_ITEM_NUM]` still fails cleanly ("couldn't load the menu items, try picking the number again") but prefs and the cache can never disagree. Mirrors `/api/food/select`, which persists right after the nav resolves and never reverts.
+
+**Verified live:** re-ran the exact repro. With the fix, the 2nd select to non-cached Cafe Rio (`extractMenuItems` still timing out on the degraded browser) now leaves **both `prefs.currentRestaurant` and `getCachedCurrentRestaurant()` = `157395`/Cafe Rio (menu 0)** — no split brain. Fast-path selects unchanged. Pi browser was in the documented degraded state this session (`page.evaluate` timeouts on scrape + `readBrowserCart`) — didn't block the Day 3 state-logic verification since the fast path needs no browser and the fix persists before any scrape.
+
+Onboarding / `[SAVE_ADDRESS]` / `[SETUP_DOORDASH]` / first `[SELECT]` were already verified working on 8/31 (commit `91a596a`); the 2nd-select split brain was the one open item from that first-time-SMS-user flow.
+
+**NOT committed** — holding for go-ahead. Working tree: `server.js` (Day 3).
+
 ## Railway Testing (no Twilio needed)
 ```bash
 # Send test message directly (no Twilio signature check)

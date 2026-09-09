@@ -928,6 +928,36 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     console.log(`[SELECT] index=${num} name=${selectedRestaurant.name} url=${selectedRestaurant.url}`);
                     additionalContext = `\n\nLoading ${selectedRestaurant.name}...`;
 
+                    // Persist the selection NOW — before the menu load — and update
+                    // prefs + the cached-restaurant record together so they can't
+                    // diverge. Previously prefs.currentRestaurant was only written
+                    // inside the menu-load success branches (and cacheCurrentRestaurant
+                    // only on the scrape path), so a 2nd [SELECT] whose menu scrape
+                    // then failed on a flaky browser left prefs pointing at the new
+                    // pick while the cache still held the OLD one — a split brain that
+                    // sent later [ADD_ITEM_NUM]s to the wrong restaurant. Mirrors
+                    // /api/food/select, which persists right after the selection
+                    // resolves and never reverts.
+                    prefs.currentRestaurant = restaurantId;
+                    prefs.currentRestaurantSource = 'doordash';
+                    prefs.currentRestaurantUrl = selectedRestaurant.url || null;
+                    prefs.menuPage = 0;
+                    delete prefs.pendingDoordashItem;
+                    delete prefs.pendingDoordashOptions;
+                    delete prefs.pendingDoordashSelections;
+                    delete prefs.pendingQueuedItems;
+                    db.setUserPreferences(user.id, prefs);
+                    db.clearCart(user.id);
+                    doordash.clearBrowserCart().catch(() => {});
+                    db.cacheCurrentRestaurant(user.id, {
+                        id: restaurantId,
+                        name: selectedRestaurant.name,
+                        categories: [],
+                        url: selectedRestaurant.url,
+                        source: 'doordash',
+                        menu: db.getCachedRestaurantMenu(user.id, restaurantId) || [],
+                    });
+
                     // Fast path: cached menu — return instantly + pre-warm browser in background
                     const cachedMenuFast = db.getCachedRestaurantMenu(user.id, restaurantId);
                     if (cachedMenuFast && cachedMenuFast.length > 0) {
@@ -1052,11 +1082,12 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                                 cleanResponse = menuText;
                                 additionalContext = '';
                             } else {
-                                // Don't leave a dead restaurant selected — clear it so ADD_ITEM_NUM fails cleanly
-                                prefs.currentRestaurant = null;
-                                prefs.currentRestaurantUrl = null;
-                                db.setUserPreferences(user.id, prefs);
-                                additionalContext = `\n\nReached ${restaurantName} but couldn't load menu items. Try selecting again?`;
+                                // Menu didn't load. The selection is already persisted
+                                // (prefs + cache, above) with an empty menu, so
+                                // ADD_ITEM_NUM still fails cleanly — but we no longer
+                                // null currentRestaurant back out, which used to leave
+                                // prefs and the cached record disagreeing.
+                                additionalContext = `\n\nReached ${restaurantName} but couldn't load the menu items. Try picking the number again?`;
                             }
                             actions.push({ type: 'select_restaurant_doordash', restaurant: restaurantName, menuItemCount: menuItems.length });
 
