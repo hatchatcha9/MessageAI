@@ -253,15 +253,24 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
         context += `\n\nPENDING CHECKOUT: You just showed this user their order total, the payment card (last 4 digits), and the delivery address, and asked them to reply "confirm". If their message approves it ("confirm", "yes", "do it", "place it", "go ahead", "yep") → respond with [CONFIRM_ORDER] and nothing else but a short line like "Placing it now!". If they decline or hesitate ("no", "cancel", "wait", "not yet", "change something", "hold on") → respond with [CANCEL_ORDER]. Do not re-run [PLACE_ORDER].`;
     }
 
+    const hasDoorDash = db.hasDoorDashCredentials(user.id);
     const isNewUser = !userAddress && (!preferences.favoriteCuisines?.length) && (db.getUserOrders(user.id, 1).length === 0);
-    const onboarding = isNewUser ? `
+    let onboarding = '';
+    if (isNewUser && !hasDoorDash) {
+        onboarding = `
 
-NEW USER ONBOARDING: This person is texting for the first time. Give them a short, friendly walkthrough (2 messages is fine) covering, in order:
+NEW USER ONBOARDING — STEP 1 (account setup): This person is texting for the first time and has NOT linked a DoorDash account yet. Reply in plain text only: no asterisks, no markdown, no bold, no bullet characters. Give a short, warm walkthrough (2 messages is fine) covering, in order:
 1. What this is: "I find restaurants on DoorDash and order food for you, all over text."
-2. How ordering works: "Tell me what you're hungry for → I'll list places → reply with a number to pick one → reply with numbers to add items → say 'checkout' when you're done."
-3. How checkout is safe: "Before anything is charged, I'll show you the exact total, which card will be used (last 4 digits), and the delivery address. You reply 'confirm' to actually place it — or 'cancel' to back out."
-4. The two setup steps you need from them now: (a) "What's your delivery address?" and (b) "link your DoorDash account by texting: setup doordash your@email.com yourpassword".
-Ask for the address first. Keep it warm and concise, no bullet-point characters. Do NOT search for food yet.` : '';
+2. How ordering works: "Tell me what you're hungry for, I'll list places, reply with a number to pick one, reply with numbers to add items, then say 'checkout'."
+3. How checkout is safe: "Before anything is charged I'll show you the exact total, the card that will be used (last 4 digits), and the delivery address. You reply 'confirm' to place it, or 'cancel' to back out."
+4. The FIRST setup step — ask them to link their DoorDash account by texting: setup doordash your@email.com yourpassword
+5. Reassure them: their password is encrypted the moment it arrives, is only ever stored in encrypted form, and is never written to logs, saved in plain text, or shared or posted anywhere. Also tell them you will actually sign in to check it works before confirming.
+Ask ONLY for the DoorDash account setup right now. Do NOT ask for their address yet — that comes after their DoorDash login is verified. Do NOT search for food yet.`;
+    } else if (isNewUser && hasDoorDash) {
+        onboarding = `
+
+NEW USER ONBOARDING — STEP 2 (delivery address): This person has already linked and verified their DoorDash account but has NOT given a delivery address yet. Reply in plain text only (no asterisks or markdown). Briefly confirm their DoorDash account is linked and that their password is stored only in encrypted form, then ask for their delivery address so orders can be delivered. Do NOT search for food until you have an address.`;
+    }
 
     if (voiceMode) {
         const gpsLoc = gps.getLocationString();
@@ -1905,8 +1914,40 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
             additionalContext = `\n\nThat doesn't look like a valid email. Please try again with format: setup doordash email@example.com password`;
         } else {
             db.setDoorDashCredentials(user.id, email, password);
-            additionalContext = `\n\nDoorDash credentials saved! Your account is now linked. When you place an order, I'll submit it directly to DoorDash.`;
             actions.push({ type: 'doordash_setup', email });
+
+            // Don't tell them it's linked until a real DoorDash sign-in with these
+            // credentials actually succeeds. On failure, drop the stored creds so
+            // their onboarding state stays honest (still needs DoorDash setup).
+            let verified = false;
+            let verifyErr = null;
+            try {
+                if (typeof doordash.prewarmBrowser === 'function') {
+                    await doordash.prewarmBrowser().catch(() => {});
+                } else if (typeof doordash.launchBrowser === 'function') {
+                    await doordash.launchBrowser().catch(() => {});
+                }
+                const r = await Promise.race([
+                    doordash.login(email, password, { force: true }),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('login timed out')), 90000)),
+                ]);
+                verified = !!(r && r.success);
+                if (!verified) verifyErr = (r && (r.error || r.message)) || 'sign-in did not complete';
+            } catch (e) {
+                verifyErr = e && e.message ? e.message : String(e);
+            }
+
+            if (verified) {
+                actions.push({ type: 'doordash_verified', email });
+                additionalContext = `\n\nDoorDash account linked and verified — I signed in successfully. Your password was encrypted the moment it arrived; it's never stored in plain text, written to logs, or shared anywhere. Last step: what's your delivery address?`;
+            } else {
+                db.clearDoorDashCredentials(user.id);
+                const wantsCode = /\bcode\b|verif|otp|2fa|two[-\s]?factor/i.test(verifyErr || '');
+                const hint = wantsCode
+                    ? ` It looks like DoorDash wanted to text you a login code — that sign-in method isn't supported here yet.`
+                    : '';
+                additionalContext = `\n\nI couldn't sign in to DoorDash with that email and password, so nothing was saved.${hint} Double-check them and send it again as: setup doordash your@email.com yourpassword`;
+            }
         }
     }
 
@@ -2703,9 +2744,31 @@ function withUserLock(phoneNumber, fn) {
     return next;
 }
 
+// SMS clients (iMessage in particular) don't render markdown — **bold**, *italic*,
+// `code`, # headings and "* " bullets all show up as literal asterisks/hashes.
+// Strip the syntax, keep the words. Voice output is handled separately (it has its
+// own "no symbols" rules in the prompt) so this only runs for SMS.
+function stripSmsMarkdown(text) {
+    if (typeof text !== 'string') return text;
+    return text
+        .replace(/\*\*\*([^\n*]+?)\*\*\*/g, '$1')                       // ***bolditalic***
+        .replace(/\*\*([^\n*]+?)\*\*/g, '$1')                            // **bold**
+        .replace(/(^|[\s(“"'])\*(?!\s)([^\n*]+?)(?<!\s)\*(?=[\s).,!?:;”"']|$)/g, '$1$2') // *italic* (leaves "3 * 4" alone)
+        .replace(/__([^\n_]+?)__/g, '$1')                                // __underline__
+        .replace(/`([^\n`]+?)`/g, '$1')                                  // `code`
+        .replace(/^\s{0,3}#{1,6}\s+/gm, '')                              // # heading
+        .replace(/^\s*[*+]\s+/gm, '- ')                                  // "* item" / "+ item" bullets -> "- item"
+        .replace(/[ \t]+$/gm, '')
+        .trim();
+}
+
 // Handle incoming message
 async function handleMessage(phoneNumber, message, voiceMode = false) {
-    return withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message, voiceMode));
+    const result = await withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message, voiceMode));
+    if (!voiceMode && result && typeof result.response === 'string') {
+        result.response = stripSmsMarkdown(result.response);
+    }
+    return result;
 }
 
 async function _handleMessage(phoneNumber, message, voiceMode = false) {
@@ -3526,10 +3589,68 @@ app.post('/api/food/cart/clear', (req, res) => {
     res.json({ items: [] });
 });
 
+// Pre-charge confirmation for the touchscreen. Loads the REAL DoorDash checkout
+// page (places nothing) and returns the delivery address + payment card last-4 +
+// real order total so food.html can show a "Deliver to X / Pay with Visa ....1234
+// / Total $Y" screen the user has to confirm before /api/food/checkout will place.
+// Same guarantee the SMS [PLACE_ORDER] -> preview -> [CONFIRM_ORDER] flow gives.
+// Stamps prefs.foodCheckoutPreviewAt so /api/food/checkout can refuse to charge
+// without a recent preview (server-side backstop, not just a UI convention).
+const FOOD_CHECKOUT_PREVIEW_TTL_MS = 10 * 60 * 1000;
+
+app.post('/api/food/checkout/preview', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const user = db.getOrCreateUser(PI_DEVICE_ID);
+    const current = db.getCachedCurrentRestaurant(user.id);
+    if (!current) return res.status(400).json({ error: 'No restaurant selected.' });
+
+    const cart = db.getCart(user.id);
+    const items = cart.items[current.id] || [];
+    if (items.length === 0) return res.status(400).json({ error: 'Your cart is empty.' });
+
+    const savedAddress = db.getUserAddress(user.id);
+    if (!savedAddress) return res.status(400).json({ error: 'No delivery address on file — add one in Settings first.' });
+
+    if (_checkoutInFlight) return res.status(409).json({ error: 'A checkout is already in progress — hang on.' });
+
+    try {
+        const result = await doordashUI.checkoutCurrentCart({ previewOnly: true });
+        if (!result.success) {
+            return res.status(502).json({ error: formatCheckoutError(result.error) });
+        }
+
+        const rt = result.orderTotals || {};
+        const btnAmount = (result.placeButtonText || '').match(/\$\s?(\d+(?:\.\d{2})?)/);
+        const realTotal = typeof rt.total === 'number'
+            ? rt.total
+            : (btnAmount ? parseFloat(btnAmount[1]) : null);
+        const estSubtotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
+        const shownTotal = realTotal != null
+            ? realTotal
+            : estSubtotal + 2.99 + estSubtotal * 0.15 + estSubtotal * 0.08;
+
+        const prefs = db.getUserPreferences(user.id);
+        prefs.foodCheckoutPreviewAt = Date.now();
+        db.setUserPreferences(user.id, prefs);
+
+        res.json({
+            restaurant: current.name,
+            deliveryAddress: result.deliveryAddress || savedAddress,
+            deliveryAddressIsReal: !!result.deliveryAddress,
+            payment: result.payment || null,            // { brand, last4 } | null
+            total: shownTotal.toFixed(2),
+            totalIsReal: realTotal != null,
+        });
+    } catch (err) {
+        console.error('[Food] /api/food/checkout/preview error:', err.message);
+        res.status(502).json({ error: formatCheckoutError(err?.message || String(err)) });
+    }
+});
+
 // Places a real DoorDash order — mirrors the voice [PLACE_ORDER] handler above (same
 // checkoutCurrentCart() call, same order-record bookkeeping) but returns structured
-// JSON instead of a spoken sentence. food.html requires a confirm tap before calling
-// this; nothing upstream of here should call it without the user having seen the total.
+// JSON instead of a spoken sentence. Requires a recent /api/food/checkout/preview
+// (the address + card + total the user confirmed) — refuses to charge without one.
 app.post('/api/food/checkout', async (req, res) => {
     if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
     const user = db.getOrCreateUser(PI_DEVICE_ID);
@@ -3543,8 +3664,18 @@ app.post('/api/food/checkout', async (req, res) => {
     const address = db.getUserAddress(user.id);
     if (!address) return res.status(400).json({ error: 'No delivery address on file — add one in Settings first.' });
 
+    const prefs = db.getUserPreferences(user.id);
+    if (Date.now() - (prefs.foodCheckoutPreviewAt || 0) > FOOD_CHECKOUT_PREVIEW_TTL_MS) {
+        return res.status(428).json({ error: 'Review the delivery address, card, and total first.', needsPreview: true });
+    }
+
     if (_checkoutInFlight) return res.status(409).json({ error: 'A checkout is already in progress — hang on.' });
     _checkoutInFlight = true;
+
+    // Consume the preview stamp now — one confirmed preview authorises one place
+    // attempt (success or failure), never a silent second charge on a stale window.
+    delete prefs.foodCheckoutPreviewAt;
+    db.setUserPreferences(user.id, prefs);
 
     // Note: deliberately not gated on db.hasDoorDashCredentials() — that only reflects
     // whether the voice [SETUP_DOORDASH:] flow was ever used to store encrypted
@@ -3573,11 +3704,14 @@ app.post('/api/food/checkout', async (req, res) => {
         const orderId = db.createOrder(user.id, current.id, current.name, recordItems, address, subtotal.toFixed(2), total.toFixed(2), current.url || null, result.orderUrl || null);
         if (result.unconfirmed) db.updateOrderStatus(orderId, 'unconfirmed');
         db.clearCart(user.id);
-        const prefs = db.getUserPreferences(user.id);
-        prefs.currentRestaurant = null;
-        prefs.currentRestaurantSource = null;
-        prefs.currentRestaurantUrl = null;
-        db.setUserPreferences(user.id, prefs);
+        // Re-read — `prefs` above is a snapshot from before the multi-minute
+        // checkoutCurrentCart() call.
+        const donePrefs = db.getUserPreferences(user.id);
+        donePrefs.currentRestaurant = null;
+        donePrefs.currentRestaurantSource = null;
+        donePrefs.currentRestaurantUrl = null;
+        delete donePrefs.foodCheckoutPreviewAt;
+        db.setUserPreferences(user.id, donePrefs);
 
         res.json({
             success: true,

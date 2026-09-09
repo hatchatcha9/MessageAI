@@ -371,6 +371,16 @@
       margin-top: 4px;
       padding-top: 5px;
     }
+    .est-row.confirm-line {
+      gap: 12px;
+      align-items: baseline;
+    }
+    .est-row.confirm-line > span:last-child {
+      color: var(--ink);
+      font-weight: 600;
+      text-align: right;
+      word-break: break-word;
+    }
     .est-hint {
       font-size: 10.5px;
       color: var(--muted-2);
@@ -606,11 +616,10 @@
       <div id="cart-total-row"><span>Subtotal</span><span id="cart-total">$0.00</span></div>
       <div id="checkout-msg" class="hidden"></div>
       <div id="checkout-estimate" class="hidden">
-        <div class="est-row"><span>Delivery</span><span id="est-delivery">$0.00</span></div>
-        <div class="est-row"><span>Est. service fee</span><span id="est-service">$0.00</span></div>
-        <div class="est-row"><span>Est. tax</span><span id="est-tax">$0.00</span></div>
-        <div class="est-row est-total"><span>Est. total</span><span id="est-total">$0.00</span></div>
-        <div class="est-hint">Estimate only — DoorDash sets the real delivery fee, tax, and tip at checkout.</div>
+        <div class="est-row confirm-line"><span>Deliver to</span><span id="confirm-address">—</span></div>
+        <div class="est-row confirm-line"><span>Pay with</span><span id="confirm-card">—</span></div>
+        <div class="est-row est-total"><span id="confirm-total-label">Total</span><span id="est-total">$0.00</span></div>
+        <div class="est-hint" id="confirm-hint">Check the address and card before you confirm.</div>
       </div>
       <button id="checkout-btn">Place Order</button>
       <button id="checkout-cancel" class="hidden">Cancel</button>
@@ -1136,17 +1145,19 @@
     } catch {}
   }
 
-  // ── Checkout (two-tap: estimate/confirm, then the real charge) ────────────
+  // ── Checkout (tap Place Order → load real checkout → confirm address/card/total → charge) ──
   const checkoutBtn = document.getElementById('checkout-btn');
   const checkoutCancel = document.getElementById('checkout-cancel');
   const checkoutEstimate = document.getElementById('checkout-estimate');
   const checkoutMsg = document.getElementById('checkout-msg');
   let checkoutConfirming = false;
   let checkoutConfirmShownAt = 0;
+  let previewLoading = false;
 
   function resetCheckoutUI() {
     checkoutConfirming = false;
     checkoutConfirmShownAt = 0;
+    previewLoading = false;
     checkoutBtn.textContent = 'Place Order';
     checkoutBtn.classList.remove('confirm');
     checkoutBtn.disabled = false;
@@ -1154,14 +1165,6 @@
     checkoutCancel.classList.add('hidden');
     checkoutEstimate.classList.add('hidden');
     checkoutMsg.classList.add('hidden');
-  }
-
-  function estimateTotal() {
-    const subtotal = cartItems.reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (i.quantity || 1), 0);
-    const delivery = 2.99;
-    const service = subtotal * 0.15;
-    const tax = subtotal * 0.08;
-    return { subtotal, delivery, service, tax, total: subtotal + delivery + service + tax };
   }
 
   // This exact touchscreen's resistive digitizer is documented elsewhere in this codebase to
@@ -1172,22 +1175,53 @@
   // the confirm screen was set but never actually seen/consciously tapped by the user. Ignoring
   // any click that lands within this window of showing the confirm screen forces a second,
   // deliberate tap. 600ms matches the debounce screen.html already uses for the same hardware
-  // quirk.
+  // quirk. previewLoading (set synchronously) guards the same bounce over the async preview call.
   const CHECKOUT_CONFIRM_DEBOUNCE_MS = 600;
 
   checkoutBtn.addEventListener('click', async () => {
     if (!checkoutConfirming) {
-      const est = estimateTotal();
-      document.getElementById('est-delivery').textContent = money(est.delivery);
-      document.getElementById('est-service').textContent = money(est.service);
-      document.getElementById('est-tax').textContent = money(est.tax);
-      document.getElementById('est-total').textContent = money(est.total);
-      checkoutEstimate.classList.remove('hidden');
-      checkoutCancel.classList.remove('hidden');
-      checkoutBtn.textContent = `Confirm — ${money(est.total)}`;
-      checkoutBtn.classList.add('confirm');
-      checkoutConfirming = true;
-      checkoutConfirmShownAt = Date.now();
+      if (previewLoading) return;
+      previewLoading = true;
+      checkoutBtn.disabled = true;
+      checkoutBtn.textContent = 'Loading checkout…';
+      checkoutMsg.classList.add('hidden');
+      try {
+        // Loads the REAL DoorDash checkout page server-side and returns the
+        // delivery address, payment card last-4, and real total. /api/food/checkout
+        // refuses to charge without this step having run.
+        const res = await fetch('/api/food/checkout/preview', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+          checkoutMsg.textContent = data.error || "Couldn't load checkout to confirm your card and address.";
+          checkoutMsg.className = 'error';
+          resetCheckoutUI();
+          checkoutMsg.classList.remove('hidden');   // after reset — reset re-hides it
+          return;
+        }
+        document.getElementById('confirm-address').textContent = data.deliveryAddress || 'your saved address';
+        document.getElementById('confirm-card').textContent = data.payment && data.payment.last4
+          ? `${data.payment.brand || 'Card'} ••••${data.payment.last4}`
+          : 'your default DoorDash card';
+        document.getElementById('est-total').textContent = money(data.total);
+        document.getElementById('confirm-total-label').textContent = data.totalIsReal ? 'Total' : 'Est. total';
+        document.getElementById('confirm-hint').textContent = (data.payment && data.payment.last4)
+          ? 'Check the address and card before you confirm.'
+          : "Couldn't read your card's last 4 — it'll be your default DoorDash card. Check the address.";
+        checkoutEstimate.classList.remove('hidden');
+        checkoutCancel.classList.remove('hidden');
+        checkoutBtn.textContent = `Confirm — ${money(data.total)}`;
+        checkoutBtn.classList.add('confirm');
+        checkoutBtn.disabled = false;
+        checkoutConfirming = true;
+        checkoutConfirmShownAt = Date.now();
+      } catch {
+        checkoutMsg.textContent = 'Could not reach the server.';
+        checkoutMsg.className = 'error';
+        resetCheckoutUI();
+        checkoutMsg.classList.remove('hidden');   // after reset — reset re-hides it
+      } finally {
+        previewLoading = false;
+      }
       return;
     }
     if (Date.now() - checkoutConfirmShownAt < CHECKOUT_CONFIRM_DEBOUNCE_MS) return;

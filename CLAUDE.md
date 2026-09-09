@@ -406,7 +406,7 @@ Temp diag (`_diagMenuCards` in doordash.js + `/api/_diag/menu-cards` route in se
 
 **Week-of-Sep-8 plan (`reports/2026-09-08-plan.md`), SMS/MessageAI-weighted:** Day 1 = saved-order record from the real cart (audit #6 carryover — totals are real since `cff2d6f`, line items aren't); Day 2 = the multi-restaurant smoke test that the trip pre-empted; Day 3 = SMS `[SELECT]` not updating `currentRestaurant` on a 2nd select + re-run the blocked first-time-SMS-user flow; Day 4 = verify the `91a596a` SMS pre-charge confirmation scrape (address/card/total) end-to-end on **Railway** (never tested against a real checkout page); Day 5 = `readBrowserCart()` proper fix.
 
-## Session 2026-09-09 (Tue) — week-of-Sep-8 plan Day 1: saved-order record from the real checkout cart. NOT committed.
+## Session 2026-09-09 (Tue) — week-of-Sep-8 plan Day 1: saved-order record from the real checkout cart. Committed de404ca, pushed.
 
 Pushed `65739dd..4be5269` (8 commits) to `origin/master` per user go-ahead — the plan's stated pre-req. `6df24a6` (session log), `72f2737` (gps.js CH340 detect), and 3 report-only commits (`a07df7d`/`5a15a2d`/`b20ad34`) stay local. Two `reports/2026-09-07-*` files still carry uncommitted tweaks from 9/7 (Quant `~3.5h` time note + a `master`→`main` fix) — untouched this session.
 
@@ -430,7 +430,7 @@ This also means **Day 1's checkout-line-item scrape can't be verified on the Pi 
 
 Costa Vida "Single Taco" add — left alone; the week-of-Sep-8 plan explicitly defers it behind the SMS work.
 
-## Session 2026-09-09 continued — week-of-Sep-8 plan Day 3: SMS `[SELECT]` split-brain on a 2nd select. Fixed, verified live. NOT committed.
+## Session 2026-09-09 continued — week-of-Sep-8 plan Day 3: SMS `[SELECT]` split-brain on a 2nd select. Fixed, verified live. Committed ed9247a, pushed.
 
 **Repro (Pi now runs `TWILIO_ENABLED=true`, so `/api/message` works there).** Seeded test SMS user `+15550199001` (address + creds), copied the cached "tacos" search + Taco Time (`29280516`) and Costa Vida (`157397`) menus onto it so those two selects take the fast (no-browser) path.
 
@@ -443,7 +443,40 @@ Costa Vida "Single Taco" add — left alone; the week-of-Sep-8 plan explicitly d
 
 Onboarding / `[SAVE_ADDRESS]` / `[SETUP_DOORDASH]` / first `[SELECT]` were already verified working on 8/31 (commit `91a596a`); the 2nd-select split brain was the one open item from that first-time-SMS-user flow.
 
-**NOT committed** — holding for go-ahead. Working tree: `server.js` (Day 3).
+Committed `ed9247a`, pushed.
+
+## Session 2026-09-09 continued — pre-charge confirmation on the kiosk (address + card last-4 + total before you buy). Verified; committed end of day.
+
+User asked for a confirmation before an order is placed that shows the card's last 4 and the delivery address. SMS already had this (`91a596a`: `[PLACE_ORDER]` → `previewDoordashCheckout()` shows `Deliver to: X / Pay with: Visa ····1234 / Total: $Y`, waits for "confirm"). Kiosk `food.html` did NOT — it was a two-tap confirm on a client-side *estimated* total, no card, no address. Voice left as one-shot (not requested). Chosen shape: review-and-confirm (show the last 4, not a typed challenge), one combined screen, kiosk + SMS.
+
+**`server.js`:**
+- New **`POST /api/food/checkout/preview`** — runs `doordashUI.checkoutCurrentCart({ previewOnly: true })` (loads the real DoorDash checkout page, places nothing), returns `{ restaurant, deliveryAddress, deliveryAddressIsReal, payment: {brand,last4}|null, total, totalIsReal }`. Address falls back to `db.getUserAddress`. On `!result.success` → 502. On success, stamps `prefs.foodCheckoutPreviewAt = Date.now()`.
+- **`POST /api/food/checkout`** now refuses to charge without a preview: if `Date.now() - prefs.foodCheckoutPreviewAt > FOOD_CHECKOUT_PREVIEW_TTL_MS` (10 min) → `428 {needsPreview:true}`. The stamp is consumed at the top of the handler (one preview authorises one place attempt, success or fail — no silent second charge on a stale window). Server-side backstop, not just a UI convention. Voice's `finalizeDoordashCheckout()` path is untouched (doesn't go through this route).
+
+**`public/food.html`:**
+- First "Place Order" tap → async `POST /api/food/checkout/preview` (btn → "Loading checkout…", new synchronous `previewLoading` flag guards the resistive-screen double-tap over the async gap, same role `checkoutConfirming` plays for the 2nd tap).
+- Combined confirm panel: **Deliver to** {address}, **Pay with** {brand} ••••{last4} (or "your default DoorDash card" + a caveat hint when the last-4 scrape came back null), **Total** {real total} (label drops to "Est. total" when `totalIsReal` is false).
+- 2nd tap (after the existing 600 ms debounce) → `POST /api/food/checkout` places.
+- Preview failure → error message stays visible (`resetCheckoutUI()` then `remove('hidden')` — reset re-hides it), no confirm panel, button usable for a retry.
+- Removed the old client-side `estimateTotal()` fee guess and its Delivery/Service/Tax rows.
+
+**Verified (frog-server on the Pi + Playwright against `food.html`):**
+- Gate: `POST /api/food/checkout` with no preview → `428 needsPreview`. With a fresh stamp → passes the gate into the real checkout attempt (which 502s only because the Pi browser can't load DoorDash's checkout page — pre-existing). Stamp consumed (`undefined` after).
+- Preview endpoint on the Pi → `502 "Couldn't load the checkout page"` in ~24 s (degraded browser). A failed preview does NOT stamp `foodCheckoutPreviewAt`, so checkout stays gated.
+- `food.html` UI (stubbed `fetch`): confirm panel renders address + "Visa ••••4821" + "$18.34", label "Total"; 2nd tap → stubbed dry-run → "Dry run — nothing charged."; triple-click bounce on the 1st tap → exactly **1** preview call; `payment:null` → "your default DoorDash card" + caveat hint + "Est. total"; preview 502 → error message stays visible, retry then succeeds.
+
+**Not verified on the Pi:** a real successful preview (real scraped address/card/total) — the Pi browser can't load DoorDash's checkout page. Same constraint as Day 1 / Day 4; the real end-to-end check belongs on Railway.
+
+## Session 2026-09-09 continued — SMS: full data wipe for a real user; plain-text output; onboarding reorder + login verification. Committed end of day.
+
+**User data wipe (`+18018006072`, done):** the user's real SMS data lives on the **Railway** deploy, not the Pi (Pi DB had no row for that number). `POST /api/clear` on Railway handled conversations + cart + prefs + doordash_cache. The rest (saved address, DoorDash login, 3 order rows, 1 cart row) needed container access — got it via `railway login` (user did it) + a temp registered SSH key + `ssh-keyscan ssh.railway.com >> known_hosts` + `railway ssh -i <key> "cd /app && … | node"`. Verified after: all child rows 0, `address_encrypted`/`doordash_credentials_encrypted`/`pin_hash` NULL, `preferences` `{}`, and `isNewUser` recomputes **true**. Temp Railway SSH key removed afterward; local key files deleted; `railway` CLI left installed and logged in as `hatchatcha9@gmail.com`. `scripts/wipe-user.js` added (full one-shot wipe for a phone number — `railway run`/`railway ssh` `node scripts/wipe-user.js +1…`), tested against the Pi DB.
+
+**`server.js` changes (committed, NOT yet on Railway):**
+1. **`stripSmsMarkdown()`** applied in `handleMessage()` for `!voiceMode` only — iMessage renders `**bold**` / `*x*` / `__u__` / `` `code` `` / `#` / `* ` bullets as literal characters. Strips the syntax, keeps the text; leaves real `2 * 3` alone. 11 unit cases pass. Voice path untouched (has its own no-symbols prompt rules).
+2. **Onboarding reordered** in `buildSystemPrompt()` — was one block that said "ask for the address first". Now two phases keyed on `db.hasDoorDashCredentials(user.id)`: **Step 1** (no DoorDash) = explain the service + ask them to `setup doordash email password` first, tell them the password is encrypted on arrival / never logged / never plaintext / never shared, and that it'll be verified by a real sign-in; do NOT ask for address yet. **Step 2** (DoorDash linked, no address) = confirm the link, then ask for the address.
+3. **`[SETUP_DOORDASH]` now verifies the login.** After `db.setDoorDashCredentials`, runs `doordash.login(email, password, { force: true })` behind a 90s `Promise.race`. Only replies "linked and verified" on `success`. On failure → `db.clearDoorDashCredentials(user.id)` + an honest "couldn't sign in, nothing saved" message (with an OTP hint when `verifyErr` mentions a code / 2FA). New `doordash_verified` action on success.
+
+**Open — flagged to user, not resolved (revisit tomorrow):** real login verification (#3) fights the single-shared-browser architecture. (a) DoorDash email+password login almost always demands an OTP this flow can't enter — many *correct* passwords will report "couldn't sign in" and wedge onboarding at step 1. (b) `login(force:true)` signs the one shared browser into the user's account, evicting the test-account session (or jamming it at the OTP wall) and breaking ordering for the whole instance. Options on the table: keep as-is, soften to store+format-check only ("I'll confirm on your first order"), or a non-`force` reachability check. **None of the 2026-09-09 SMS/kiosk work is on Railway yet** — needs a Railway deploy, and #3's approach may change first.
 
 ## Railway Testing (no Twilio needed)
 ```bash
