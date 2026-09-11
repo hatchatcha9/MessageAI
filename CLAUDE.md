@@ -498,11 +498,33 @@ Fresh Pi reboot at session start (uptime ~2min), full prewarm, then drove search
 
 **Day 2 baseline, going into the rest of the SMS work:** 4 of 5 restaurants added a real item cleanly (Costa Vida, Little Caesars, Taco Time, Cafe Rio); Wingstop's 2 tested items both hit the hidden-second-required-group bug (a wider-than-previously-known instance of the existing Costa-Vida-Single-Taco bug class). No hangs, no silent wrong-adds, no real-money risk anywhere. `readBrowserCart()`'s display-mash bug (Day 5) reproduces reliably whenever a fresh item add exercises the fallback cart-row scrape.
 
-## Railway Testing (no Twilio needed)
+## Session 2026-09-11 continued — week-of-Sep-8 plan Day 4: Railway deploy + pre-charge scrape verification. Paused mid-session by user request; 2 new bugs found, nothing fixed, nothing charged.
+
+User decided the open `[SETUP_DOORDASH]` login-verification question (see 2026-09-09 entry above): **keep the real `login(force:true)` verification as built, deploy it.** Pushed `4a02dd0` (Day 2 writeup + all pending 2026-09-09 SMS/kiosk work) to `origin/master`; Railway auto-deployed it cleanly (`bf58e654`, `railway deployment list` → SUCCESS). Prewarm hit a transient CF challenge timeout on the DoorDash homepage (non-fatal, matches this file's long-documented pattern — later real navigations don't rely on prewarm succeeding).
+
+**Correction to the "Railway Testing" section below:** `/api/twilio/webhook` validates the Twilio signature (`TWILIO_AUTH_TOKEN` is set on Railway) and calls `sendSMS()` for real — a raw curl POST without a valid signature gets `403`, and a valid one would send an actual SMS. **Use `POST /api/message` instead** (`{phoneNumber, message}` → JSON response, no signature check, no real SMS sent) — same endpoint the 2026-09-09 Pi session used, confirmed working directly against Railway this session.
+
+**Test flow, two fresh numbers (`+15550199010`, `+15550199011`):** onboarding Step 1 (plain text, no markdown, asks to link DoorDash first) → `[SETUP_DOORDASH] testclaudemail762@gmail.com S@ltcode8!` — deliberately the SAME account already logged into Railway's shared browser via cookies, specifically so `login(force:true)` wouldn't evict a *different* session — verified successfully both times (`"DoorDash account linked and verified"`) → address saved → search → select.
+
+**Blocked here, two new bugs, session paused before reaching a real checkout preview:**
+1. **`extractMenuItems()` returns 0 items for every restaurant tried on Railway** (Taco Bell, Tacos Los 3 Hermanos, Little Caesars — 3/3). Logs show `Prices detected on page ✓` but both extraction strategies find nothing, Apollo cache has no Menu/Item keys, no SSR `__next_f` fallback fires. Two different restaurants logged the identical `Page height: 7003px`, which looks structural (a Railway-side render/CF/proxy variant DoorDash serves differently than what the Pi sees) rather than per-restaurant flakiness — this session's own Day 2 test showed clean extraction on the Pi for 4/5 restaurants just hours earlier, so this is new and Railway-specific, not a recurrence of a known issue.
+2. **Claude sometimes skips emitting the real `[SELECT: N]` command on a retry and hallucinates a plausible-looking menu from its own training data instead**, leaving server state pointed at the previous (still cached-empty) restaurant. Caught live: after Taco Bell's first select genuinely failed (0 items), replying "8" again produced a full, real-looking Taco Bell menu (correct real items/prices) with **no matching `[SELECT]` log line at all** — the AI just continued the conversation pattern instead of re-invoking the command. `[ADD_ITEM_NUM]` then failed against the restaurant actually in the cache (still 0 items) with an error that flatly contradicted the menu just shown to the user. This is a more serious variant of the already-documented "Claude hallucinating cart/search content" bug class (2026-03-15 CLAUDE.md notes, `SELECT_OPTIONS_TEXT`/cart-duplication era) — same root pattern (LLM free-text response drifting from real backend state), now confirmed to also hit restaurant menus, and specifically triggered by a retry after a failure rather than a fresh request. Reproduced the failure mode (real select → real 0-item failure) cleanly two more times on other restaurants (Tacos Los 3 Hermanos, Little Caesars) without the hallucination — so #2 needs a specific retry-phrasing trigger, not just any failure, to reproduce; exact trigger condition not yet isolated.
+
+Was in the middle of routing around #1 via the kiosk API (`/api/food/search|select|cart/add`, PI_DEVICE_ID user) to reach a real cart item without depending on the broken SMS-path extraction — the kiosk API shares the same global browser/DoorDash session as the SMS test, so an item added there would still show up on a real SMS `[PLACE_ORDER]` checkout preview. Had just saved a kiosk-side test address (`POST /api/address`) when the user paused the session.
+
+**Flagged by the user mid-session, worth carrying forward deliberately:** each real `[SETUP_DOORDASH]` login verification against Railway (2 today) triggers actual DoorDash 2FA/security codes to that account's registered contact info — the user confirmed receiving them live. Not a bug — a direct, expected consequence of today's "keep real verification" decision — but real-world noise per test run, worth minimizing (e.g. testing the login-verification code path itself sparingly, reusing one already-verified session per work session rather than re-triggering it) rather than triggering repeatedly per session.
+
+**Nothing charged.** No `[CONFIRM_ORDER]` was ever sent. `DOORDASH_DRY_RUN=false` on Railway (unlike the Pi, which runs `true`) — real-money risk is live there, not hypothetical, so any future Railway checkout testing needs the same previewOnly-only discipline used this session (confirmed in code: `checkoutCurrentCart({previewOnly:true})` returns before any Place-Order click, regardless of `DOORDASH_DRY_RUN`). Two test SMS numbers now sit on Railway with partial onboarding state (DoorDash linked + address saved, no real cart items, nothing sensitive) — fine to reuse or wipe next session.
+
+**Not yet done:** the actual Day 4 deliverable (verifying the real checkout-page scrape — address/card/total/line-items — against a genuine non-dry-run DoorDash checkout page) was not reached. Full detail and next steps in `reports/2026-09-09-progress.md` (kept as the week's running log).
+
+## Railway Testing
 ```bash
-# Send test message directly (no Twilio signature check)
-curl -X POST "https://messageai-production.up.railway.app/api/twilio/webhook" \
-  -d "From=%2B18018006072&Body=MESSAGE_HERE"
+# Send test message directly — no Twilio signature check, no real SMS sent
+curl -X POST "https://messageai-production.up.railway.app/api/message" \
+  -H "Content-Type: application/json" \
+  -d '{"phoneNumber":"+15550199099","message":"MESSAGE_HERE"}'
 # Check logs
 curl "https://messageai-production.up.railway.app/logs"
 ```
+`/api/twilio/webhook` is the real Twilio-facing route — it validates `x-twilio-signature` (rejects unsigned requests with `403` since `TWILIO_AUTH_TOKEN` is set on Railway) and sends real SMS replies via `sendSMS()`. Don't curl it directly for testing; use `/api/message` above instead.
