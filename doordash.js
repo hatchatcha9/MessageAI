@@ -8866,6 +8866,7 @@ async function readBrowserCart() {
 
         const drawerItems = await evalWithTimeout(page, () => {
             const results = [];
+            const diag = [];
             const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
             for (const el of cartItemEls) {
                 if (el.tagName === 'BUTTON') continue;
@@ -8883,17 +8884,24 @@ async function readBrowserCart() {
                     name = raw.split('\n')[0].split('$')[0].replace(/\s{2,}/g, ' ').trim();
                     name = name.replace(/\d+\s*cal.*$/i, '').replace(/\s+\d+\s*×.*$/i, '').trim();
                     if (name.length > 80) name = '';
+                    // Diagnostic-only: capture what a real row looks like so a name-mash
+                    // can be diagnosed from logs instead of guessing at DOM structure.
+                    diag.push({ outerHTML: (el.outerHTML || '').substring(0, 800), innerText: (el.innerText || '').substring(0, 300), derivedName: name });
                 }
                 const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
                 const priceText = priceEl ? priceEl.textContent.trim() : '';
                 const price = parseFloat((priceText.match(/\$?([\d.]+)/) || [])[1] || '0');
                 if (name && name.length > 1) results.push({ name, quantity: qty, price });
             }
-            return results;
+            return { results, diag };
         }, 8000, 'read cart items from drawer');
 
-        console.log(`[DoorDash] readBrowserCart: found ${drawerItems.length} items after opening drawer`);
-        return drawerItems.length > 0 ? drawerItems : null;
+        const { results: drawerResults, diag: drawerDiag } = drawerItems || { results: [], diag: [] };
+        if (drawerDiag && drawerDiag.length > 0) {
+            console.log('[DoorDash] readBrowserCart fallback-name diagnostic:', JSON.stringify(drawerDiag));
+        }
+        console.log(`[DoorDash] readBrowserCart: found ${drawerResults.length} items after opening drawer`);
+        return drawerResults.length > 0 ? drawerResults : null;
     } catch (e) {
         console.log('[DoorDash] readBrowserCart error:', e.message);
         return null;

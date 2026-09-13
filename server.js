@@ -3327,6 +3327,19 @@ function groupSizeVariants(menuItems) {
     return result;
 }
 
+// Debug: call readBrowserCart() directly and return its result, for verifying
+// the cart-row parser against a real cart without going through the add-item
+// flow (which only calls it as a price-verify fallback, not on every add).
+app.get('/api/debug/read-browser-cart', async (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    try {
+        const items = await doordashUI.readBrowserCart();
+        res.json({ items });
+    } catch (err) {
+        res.status(502).json({ error: err.message || 'readBrowserCart failed.' });
+    }
+});
+
 app.get('/api/food/status', (req, res) => {
     const user = db.getOrCreateUser(PI_DEVICE_ID);
     const address = db.getUserAddress(user.id);
