@@ -1262,19 +1262,36 @@ async function isLoggedIn() {
 }
 
 /**
- * Force-navigate to the real /home page and run isLoggedIn()'s signal check there.
+ * Force-navigate to the real /home page and check for real logged-in evidence there.
  * The 2FA wait loop used to treat the code input simply disappearing as proof of
  * success, which was a false positive whenever the challenge was actually abandoned
  * or expired rather than completed (confirmed live 2026-09-13 — /home and checkout
- * both still showed a logged-out state right after a "verified" login). Evaluating
- * isLoggedIn()'s signals directly on identity.doordash.com's bare auth page isn't
- * meaningful, so this forces the canonical page first.
+ * both still showed a logged-out state right after a "verified" login). isLoggedIn()'s
+ * own cookie signal (dd_session_id present) isn't reliable here either — confirmed
+ * live the same session cookie is set for DoorDash's anonymous marketing homepage too,
+ * so it still reported "logged in" on that exact page. Check for that homepage's own
+ * fingerprint text directly instead, which has been the one reliable negative signal
+ * across every false-positive seen today.
  */
 async function verifyRealLoginSuccess() {
     try {
         await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         await delay(1500);
-        return await isLoggedIn();
+        const result = await Promise.race([
+            page.evaluate(() => {
+                const body = (document.body.innerText || '').substring(0, 2000);
+                const isAnonymousHomepage = /\$0 DELIVERY FEE ON FIRST ORDER|Become a Dasher|Become a Merchant/i.test(body);
+                const hasSignInLink = !!(
+                    document.querySelector('a[href*="/consumer/login"]') ||
+                    document.querySelector('button[data-anchor-id*="SignIn"]')
+                );
+                return { isAnonymousHomepage, hasSignInLink };
+            }),
+            new Promise(r => setTimeout(() => r(null), 8000))
+        ]);
+        console.log('[DoorDash] verifyRealLoginSuccess signals:', JSON.stringify(result));
+        if (!result) return false;
+        return !result.isAnonymousHomepage && !result.hasSignInLink;
     } catch (e) {
         return false;
     }
