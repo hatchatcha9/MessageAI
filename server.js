@@ -1035,9 +1035,19 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             delete prefs.pendingQueuedItems;
                             db.setUserPreferences(user.id, prefs);
 
-                            // Clear cart and menu page when switching restaurants
+                            // Clear local cart state now. The real-browser clearBrowserCart()
+                            // call is deferred until after menu extraction below — it
+                            // internally navigates the shared page to /home, which raced
+                            // against extractMenuItems() reading the just-loaded store page
+                            // when fired here: confirmed live on Railway (2026-09-13) as the
+                            // actual cause of the "extractMenuItems returns 0 items" bug —
+                            // extraction was scraping DoorDash's homepage (identical page
+                            // height across different restaurants, "prices detected" from the
+                            // homepage's own promo banner) because clearBrowserCart() isn't
+                            // lock-serialized against extractMenuItems, only against other
+                            // locked() ops. extractMenuItems() doesn't touch the cart drawer,
+                            // so running clearBrowserCart() after it is equivalent and safe.
                             db.clearCart(user.id);
-                            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
 
                             const restaurantName = menuResult.restaurantName || selectedRestaurant.name;
 
@@ -1045,6 +1055,7 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                             const cachedMenu = db.getCachedRestaurantMenu(user.id, restaurantId);
                             const menuItems = cachedMenu || await doordash.extractMenuItems();
                             console.log(`[DoorDash] ${cachedMenu ? 'Using cached' : 'Extracted'} ${menuItems.length} menu items`);
+                            doordash.clearBrowserCart().catch(e => console.warn('[DoorDash] clearBrowserCart failed:', e.message));
 
                             // Cache the restaurant data WITH menu
                             db.cacheCurrentRestaurant(user.id, {
