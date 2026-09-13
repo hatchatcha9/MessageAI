@@ -1589,7 +1589,13 @@ async function login(email, password, options = {}) {
         await takeScreenshot('login-unknown-state');
         console.log('[DoorDash] Still on login page but no errors found');
 
-        // Check for 2FA / verification code screen
+        // Check for 2FA / verification code screen. Real markup confirmed live
+        // 2026-09-13: six separate <input type="number" autocomplete="one-time-code">
+        // boxes, no name/placeholder — the ongoing stillOn2FA check inside the wait loop
+        // below used to check a DIFFERENT, narrower list that didn't include
+        // autocomplete="one-time-code" at all, so it always missed these and declared
+        // the screen "gone" on the very first check, even while it was genuinely still
+        // sitting there waiting for input. Both checks now share this one list.
         const twoFASelectors = [
             'input[data-anchor-id="VerificationCodeInput"]',
             'input[placeholder*="code"]',
@@ -1599,6 +1605,7 @@ async function login(email, password, options = {}) {
             'input[type="tel"][maxlength="6"]',
             'input[autocomplete="one-time-code"]'
         ];
+        const twoFACombinedSelector = twoFASelectors.join(', ');
 
         let twoFAInput = null;
         for (const selector of twoFASelectors) {
@@ -1644,7 +1651,7 @@ async function login(email, password, options = {}) {
             try {
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // First check if we're already logged in (user entered code manually)
-                const stillOn2FA = await page.$('input[placeholder*="code"], input[placeholder*="Code"], input[name="code"], input[type="tel"][maxlength="6"]');
+                const stillOn2FA = await page.$(twoFACombinedSelector);
                 if (!stillOn2FA || !(await stillOn2FA.isVisible())) {
                     // The field disappearing isn't proof of success on its own — it can also
                     // mean the challenge was abandoned/expired and DoorDash bounced back to a
@@ -1669,8 +1676,12 @@ async function login(email, password, options = {}) {
                 if (code && !codeEntered) {
                     console.log(`[DoorDash] Found code: ${code} - entering it now...`);
 
-                    // DoorDash uses 6 separate input boxes - find them all
-                    const codeInputs = await page.$$('input[type="tel"], input[maxlength="1"], input[data-testid*="code"], input[name*="code"]');
+                    // DoorDash uses 6 separate input boxes - find them all. Real markup
+                    // confirmed live 2026-09-13: <input type="number" autocomplete="one-time-code">,
+                    // no maxlength/name/data-testid — none of which the selectors below matched
+                    // before autocomplete="one-time-code" was added, so this always found 0
+                    // boxes and silently fell through to the single-field fallback instead.
+                    const codeInputs = await page.$$('input[type="tel"], input[maxlength="1"], input[data-testid*="code"], input[name*="code"], input[autocomplete="one-time-code"]');
 
                     if (codeInputs.length >= 6) {
                         // Enter each digit in separate boxes
