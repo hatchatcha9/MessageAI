@@ -8859,7 +8859,21 @@ async function readBrowserCart() {
             return false;
         }, 8000, 'open cart drawer');
         if (!opened) {
-            console.log('[DoorDash] readBrowserCart: no cart icon found on current page');
+            // Diagnostic-only: the hardcoded cart-icon selectors above are stale against
+            // DoorDash's current /home markup — dump candidates so the real one can be
+            // found instead of guessing again.
+            const candidates = await evalWithTimeout(page, () => {
+                const els = document.querySelectorAll('[data-anchor-id*="Cart" i], [data-testid*="cart" i], [class*="cart" i], button[aria-label], a[aria-label]');
+                return Array.from(els).slice(0, 20).map(el => ({
+                    tag: el.tagName,
+                    dataAnchorId: el.getAttribute('data-anchor-id'),
+                    dataTestId: el.getAttribute('data-testid'),
+                    ariaLabel: el.getAttribute('aria-label'),
+                    className: (el.getAttribute('class') || '').substring(0, 100),
+                    text: (el.textContent || '').trim().substring(0, 40),
+                }));
+            }, 6000, 'cart icon candidates').catch(() => []);
+            console.log('[DoorDash] readBrowserCart: no cart icon found — candidates:', JSON.stringify(candidates));
             return null;
         }
         await new Promise(r => setTimeout(r, 1200));
