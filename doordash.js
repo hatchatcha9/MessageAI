@@ -4556,6 +4556,34 @@ async function extractMenuItems() {
             }
         }
 
+        if (menuItems.length === 0) {
+            // Prices were detected but neither extraction strategy found item candidates —
+            // seen live on Railway (2026-09-11) for every restaurant tried, identical page
+            // height across different stores. Dump what's actually on the page so the next
+            // session doesn't have to reproduce blind.
+            try {
+                const diag = await Promise.race([
+                    page.evaluate(() => {
+                        const hasSignInLink = !!(document.querySelector('a[href*="/consumer/login"]') || document.querySelector('button[data-anchor-id*="SignIn"]'));
+                        const hasAccountEl = !!(document.querySelector('[data-anchor-id="AccountMenu"]') || document.querySelector('[data-anchor-id="UserAvatar"]') || document.querySelector('[data-testid="account-button"]'));
+                        return {
+                            hasSignInLink,
+                            hasAccountEl,
+                            menuItemEls: document.querySelectorAll('[data-anchor-id="MenuItem"], [data-testid="menu-item"]').length,
+                            liArticleEls: document.querySelectorAll('li, article').length,
+                            dollarCount: (document.body.innerText.match(/\$\d/g) || []).length,
+                            title: document.title,
+                            bodySample: document.body.innerText.substring(0, 500)
+                        };
+                    }),
+                    new Promise(r => setTimeout(() => r(null), 5000))
+                ]);
+                console.log('[DoorDash] 0-item diagnostic:', JSON.stringify(diag));
+            } catch (e) {
+                console.log('[DoorDash] 0-item diagnostic failed:', e.message);
+            }
+        }
+
         console.log(`[DoorDash] extractMenuItems returning ${menuItems.length} items`);
         await takeScreenshot('extract-menu-done');
         return menuItems;
