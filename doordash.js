@@ -1301,7 +1301,7 @@ async function verifyRealLoginSuccess() {
  * Login to DoorDash
  */
 async function login(email, password, options = {}) {
-    const { force = false } = options;
+    const { force = false, onAwaitingCode = null } = options;
     try {
         console.log('[DoorDash] Starting login...');
 
@@ -1647,6 +1647,9 @@ async function login(email, password, options = {}) {
             let codeEntered = false;
             _awaitingVerificationCode = true;
             _manualVerificationCode = null;
+            // Let the caller notify the human right now, while there's still time to act,
+            // instead of only explaining what happened after the whole thing times out.
+            if (onAwaitingCode) { try { await onAwaitingCode(); } catch (e) {} }
 
             try {
             for (let attempt = 0; attempt < maxAttempts; attempt++) {

@@ -1939,8 +1939,17 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                     await doordash.launchBrowser().catch(() => {});
                 }
                 const r = await Promise.race([
-                    doordash.login(email, password, { force: true }),
-                    new Promise((_, rej) => setTimeout(() => rej(new Error('login timed out')), 90000)),
+                    doordash.login(email, password, {
+                        force: true,
+                        // DoorDash may text a verification code straight to the account's
+                        // own registered phone, not this bot — the bot can't read that, so
+                        // it needs a human to relay it. Tell them the moment it's actually
+                        // needed (not just after everything times out), while there's still
+                        // time to act, and explain exactly what to do: reply with the digits.
+                        onAwaitingCode: () => sendSMS(phoneNumber,
+                            "DoorDash wants to verify it's really you — it just sent (or is about to send) a text with a verification code to the phone/email on that account. If you get it, reply here with just the 6 digits within the next few minutes and I'll finish signing in."),
+                    }),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('login timed out')), 200000)),
                 ]);
                 verified = !!(r && r.success);
                 if (!verified) verifyErr = (r && (r.error || r.message)) || 'sign-in did not complete';
@@ -1953,9 +1962,9 @@ async function processCommands(response, user, phoneNumber, userMsg = '', voiceM
                 additionalContext = `\n\nDoorDash account linked and verified — I signed in successfully. Your password was encrypted the moment it arrived; it's never stored in plain text, written to logs, or shared anywhere. Last step: what's your delivery address?`;
             } else {
                 db.clearDoorDashCredentials(user.id);
-                const wantsCode = /\bcode\b|verif|otp|2fa|two[-\s]?factor/i.test(verifyErr || '');
+                const wantsCode = /\bcode\b|verif|otp|2fa|two[-\s]?factor|abandoned/i.test(verifyErr || '');
                 const hint = wantsCode
-                    ? ` It looks like DoorDash wanted to text you a login code — that sign-in method isn't supported here yet.`
+                    ? ` DoorDash wanted a text verification code and I didn't get it relayed in time — if you got a text with a code, reply with just the 6 digits right after sending the setup command next time, and I'll use it.`
                     : '';
                 additionalContext = `\n\nI couldn't sign in to DoorDash with that email and password, so nothing was saved.${hint} Double-check them and send it again as: setup doordash your@email.com yourpassword`;
             }
@@ -2775,18 +2784,12 @@ function stripSmsMarkdown(text) {
 
 // Handle incoming message
 async function handleMessage(phoneNumber, message, voiceMode = false) {
-    const result = await withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message, voiceMode));
-    if (!voiceMode && result && typeof result.response === 'string') {
-        result.response = stripSmsMarkdown(result.response);
-    }
-    return result;
-}
-
-async function _handleMessage(phoneNumber, message, voiceMode = false) {
     // Intercept a plain 6-digit reply while DoorDash's real 2FA is waiting for one —
-    // the code arrives by SMS to a human's phone, not anywhere the automation can read
-    // it, so this is how a real login actually completes. Checked before anything else
-    // so it can't be shadowed by a restaurant-selection or other numeric intercept.
+    // checked BEFORE the per-user lock below, not inside _handleMessage. The message
+    // that triggered the login (e.g. [SETUP_DOORDASH]) is very likely still in-flight,
+    // holding this exact phone number's lock while it awaits this exact code — routing
+    // the code through withUserLock would queue it behind that in-flight request and
+    // deadlock both forever, since neither can finish without the other.
     const twoFAMatch = message.trim().match(/^\d{4,8}$/);
     if (twoFAMatch && doordash && typeof doordash.isAwaitingVerificationCode === 'function' && doordash.isAwaitingVerificationCode()) {
         const result = doordash.submitVerificationCode(twoFAMatch[0]);
@@ -2796,6 +2799,14 @@ async function _handleMessage(phoneNumber, message, voiceMode = false) {
         return { response: reply, actions: [] };
     }
 
+    const result = await withUserLock(phoneNumber, () => _handleMessage(phoneNumber, message, voiceMode));
+    if (!voiceMode && result && typeof result.response === 'string') {
+        result.response = stripSmsMarkdown(result.response);
+    }
+    return result;
+}
+
+async function _handleMessage(phoneNumber, message, voiceMode = false) {
     const user = db.getOrCreateUser(phoneNumber);
     const userAddress = db.getUserAddress(user.id);
     const preferences = db.getUserPreferences(user.id);
