@@ -2964,6 +2964,17 @@ async function checkoutCurrentCart(options = {}) {
             const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
             console.log('[DoorDash] Checkout page text (first 1000):', pageText.substring(0, 1000));
 
+            // "Sign in or sign up to place order" as an unmet checklist step — seen live
+            // on Railway (2026-09-13) right after a verified-successful login()/force
+            // sign-in, with search/select/cart-add all working fine on the same session.
+            // Checkout apparently re-validates auth more strictly than the browsing
+            // session; distinguish this from the generic payment/address disable reason
+            // below so it doesn't get misdiagnosed as a payment issue next time.
+            const signInRequired = /sign in or sign up to place order/i.test(pageText);
+            if (signInRequired) {
+                console.log('[DoorDash] Checkout requires sign-in despite an authenticated browsing session — real login() success does not appear to satisfy checkout-level auth.');
+            }
+
             // "Order unavailable at selected time" — scheduled time is invalid, switch to ASAP
             if (pageText.includes('unavailable at selected time') || pageText.includes('Order unavailable')) {
                 console.log('[DoorDash] Scheduled time is unavailable — switching to ASAP delivery');
@@ -3009,6 +3020,9 @@ async function checkoutCurrentCart(options = {}) {
 
             if (isDisabled !== null) {
                 await takeScreenshot('checkout-disabled');
+                if (signInRequired) {
+                    return { success: false, error: 'Checkout requires signing in again — the browsing session is authenticated but checkout is not. Try [SETUP_DOORDASH] again.' };
+                }
                 return { success: false, error: 'Checkout button disabled. Check payment method and address in DoorDash app.' };
             }
         }
