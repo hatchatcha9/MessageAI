@@ -1613,6 +1613,29 @@ async function login(email, password, options = {}) {
             console.log('[DoorDash] 2FA code required — waiting for a manually-relayed code (POST /api/doordash/2fa-code, or text the code to the bot number); auto-read from notifications will also be tried but rarely works off Windows.');
             await takeScreenshot('2fa-waiting');
 
+            // Diagnostic-only: this screen has been observed disappearing within moments
+            // of being detected, before any code could ever be entered (confirmed live
+            // 2026-09-13, twice) — capture what it actually contains right now, since by
+            // the time the wait loop's first check runs it may already be gone.
+            try {
+                const screenDump = await Promise.race([
+                    page.evaluate(() => ({
+                        url: location.href,
+                        title: document.title,
+                        bodySample: (document.body.innerText || '').substring(0, 1500),
+                        inputs: Array.from(document.querySelectorAll('input')).map(i => ({
+                            type: i.type, name: i.name, placeholder: i.placeholder,
+                            maxLength: i.maxLength, autocomplete: i.autocomplete,
+                            visible: i.offsetWidth > 0 && i.offsetHeight > 0,
+                        })),
+                    })),
+                    new Promise(r => setTimeout(() => r(null), 5000)),
+                ]);
+                console.log('[DoorDash] 2FA screen dump:', JSON.stringify(screenDump));
+            } catch (e) {
+                console.log('[DoorDash] 2FA screen dump failed:', e.message);
+            }
+
             const maxAttempts = 45; // ~3 minutes — gives a human time to receive + relay the real SMS code
             let codeEntered = false;
             _awaitingVerificationCode = true;
