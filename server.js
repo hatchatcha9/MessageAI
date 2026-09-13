@@ -2783,6 +2783,19 @@ async function handleMessage(phoneNumber, message, voiceMode = false) {
 }
 
 async function _handleMessage(phoneNumber, message, voiceMode = false) {
+    // Intercept a plain 6-digit reply while DoorDash's real 2FA is waiting for one —
+    // the code arrives by SMS to a human's phone, not anywhere the automation can read
+    // it, so this is how a real login actually completes. Checked before anything else
+    // so it can't be shadowed by a restaurant-selection or other numeric intercept.
+    const twoFAMatch = message.trim().match(/^\d{4,8}$/);
+    if (twoFAMatch && doordash && typeof doordash.isAwaitingVerificationCode === 'function' && doordash.isAwaitingVerificationCode()) {
+        const result = doordash.submitVerificationCode(twoFAMatch[0]);
+        const reply = result.success
+            ? 'Got it — verifying now.'
+            : `Couldn't use that code: ${result.error}`;
+        return { response: reply, actions: [] };
+    }
+
     const user = db.getOrCreateUser(phoneNumber);
     const userAddress = db.getUserAddress(user.id);
     const preferences = db.getUserPreferences(user.id);
@@ -3818,6 +3831,17 @@ app.post('/api/doordash/account', async (req, res) => {
         console.error('[Food] /api/doordash/account error:', err.message);
         res.status(502).json({ error: err.message || 'Sign-in failed.' });
     }
+});
+
+// Manual relay for DoorDash's real 2FA code — it arrives by SMS to a human's phone,
+// not anywhere this process can read, so login() waits here instead of guessing.
+// Same entry point works from either device this app runs on (Railway or the Pi).
+app.post('/api/doordash/2fa-code', (req, res) => {
+    if (!doordashUI) return res.status(503).json({ error: 'DoorDash module unavailable on this device.' });
+    const { code } = req.body || {};
+    const result = doordashUI.submitVerificationCode(code);
+    if (!result.success) return res.status(400).json(result);
+    res.json(result);
 });
 
 // Some DoorDash accounts require phone/SMS verification instead of accepting a

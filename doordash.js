@@ -129,6 +129,31 @@ let _capturedItemIds = {};
 // DoorDash cart UUID returned by addCartItemV2; passed back on subsequent adds
 let _activeCartId = '';
 
+// Manual 2FA code relay. getVerificationCodeFromNotifications() reads a Windows
+// notification database and can never find anything on Railway's Linux container
+// (or on the Pi) — login()'s 2FA wait loop used to fall back to declaring success
+// as soon as the code input disappeared, with no real check, which was a false
+// positive most of the time (confirmed live 2026-09-13: /home and checkout both
+// still showed a logged-out state right after a "verified" login). The DoorDash
+// account's real verification code arrives by SMS to a phone a human reads, not
+// anywhere this process can poll — so login() now waits for a human to relay it
+// via submitVerificationCode(), reachable from either an HTTP endpoint or a plain
+// 6-digit SMS reply, on whichever deployment (Railway or the Pi) is running.
+let _awaitingVerificationCode = false;
+let _manualVerificationCode = null;
+
+function isAwaitingVerificationCode() {
+    return _awaitingVerificationCode;
+}
+
+function submitVerificationCode(code) {
+    const digits = String(code || '').trim();
+    if (!/^\d{4,8}$/.test(digits)) return { success: false, error: 'Expected a 4-8 digit code.' };
+    if (!_awaitingVerificationCode) return { success: false, error: 'No verification is currently pending.' };
+    _manualVerificationCode = digits;
+    return { success: true };
+}
+
 /**
  * Parse a DoorDash API response and cache any menu items found for each store ID.
  * Handles search response shapes, store detail shapes, and GraphQL wrappers.
@@ -1237,6 +1262,25 @@ async function isLoggedIn() {
 }
 
 /**
+ * Force-navigate to the real /home page and run isLoggedIn()'s signal check there.
+ * The 2FA wait loop used to treat the code input simply disappearing as proof of
+ * success, which was a false positive whenever the challenge was actually abandoned
+ * or expired rather than completed (confirmed live 2026-09-13 — /home and checkout
+ * both still showed a logged-out state right after a "verified" login). Evaluating
+ * isLoggedIn()'s signals directly on identity.doordash.com's bare auth page isn't
+ * meaningful, so this forces the canonical page first.
+ */
+async function verifyRealLoginSuccess() {
+    try {
+        await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await delay(1500);
+        return await isLoggedIn();
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
  * Login to DoorDash
  */
 async function login(email, password, options = {}) {
@@ -1549,27 +1593,38 @@ async function login(email, password, options = {}) {
         }
 
         if (twoFAInput) {
-            console.log('[DoorDash] 2FA code required - attempting to auto-read from notifications...');
+            console.log('[DoorDash] 2FA code required — waiting for a manually-relayed code (POST /api/doordash/2fa-code, or text the code to the bot number); auto-read from notifications will also be tried but rarely works off Windows.');
             await takeScreenshot('2fa-waiting');
 
-            // Try to automatically get the code from Windows notifications
-            const maxAttempts = 20; // Try for about 60 seconds
+            const maxAttempts = 45; // ~3 minutes — gives a human time to receive + relay the real SMS code
             let codeEntered = false;
+            _awaitingVerificationCode = true;
+            _manualVerificationCode = null;
 
+            try {
             for (let attempt = 0; attempt < maxAttempts; attempt++) {
                 // First check if we're already logged in (user entered code manually)
                 const stillOn2FA = await page.$('input[placeholder*="code"], input[placeholder*="Code"], input[name="code"], input[type="tel"][maxlength="6"]');
                 if (!stillOn2FA || !(await stillOn2FA.isVisible())) {
-                    await delay(2000);
-                    console.log('[DoorDash] 2FA screen gone - checking login status...');
-                    // Give it a moment to settle
-                    await delay(2000);
-                    return { success: true, message: '2FA completed' };
+                    // The field disappearing isn't proof of success on its own — it can also
+                    // mean the challenge was abandoned/expired and DoorDash bounced back to a
+                    // logged-out page. Verify for real before declaring success.
+                    await delay(1000);
+                    const reallyLoggedIn = await verifyRealLoginSuccess();
+                    console.log(`[DoorDash] 2FA screen gone — real login check: ${reallyLoggedIn}`);
+                    if (reallyLoggedIn) return { success: true, message: '2FA completed' };
+                    return { success: false, error: '2FA_ABANDONED', message: 'The verification screen closed without actually completing sign-in.' };
                 }
 
-                // Try to get code from notifications
+                // Prefer a manually-relayed code over the (usually futile) notification read
                 console.log(`[DoorDash] Checking for verification code (attempt ${attempt + 1}/${maxAttempts})...`);
-                const code = await getVerificationCodeFromNotifications();
+                let code = _manualVerificationCode;
+                if (code) {
+                    _manualVerificationCode = null;
+                    console.log('[DoorDash] Using manually-relayed verification code');
+                } else {
+                    code = await getVerificationCodeFromNotifications();
+                }
 
                 if (code && !codeEntered) {
                     console.log(`[DoorDash] Found code: ${code} - entering it now...`);
@@ -1635,19 +1690,21 @@ async function login(email, password, options = {}) {
 
                 await delay(3000); // Wait before next check
             }
-
-            // Check final state
-            const finalCheck = await page.$('input[placeholder*="code"], input[placeholder*="Code"], input[name="code"]');
-            if (!finalCheck || !(await finalCheck.isVisible())) {
-                return { success: true, message: '2FA completed' };
+            } finally {
+                _awaitingVerificationCode = false;
+                _manualVerificationCode = null;
             }
 
-            // Timeout - code was not found or entered incorrectly
+            // Timed out waiting for a code. Still worth a real check — the code may have
+            // gone through on the last attempt just before the field-visibility check ran.
+            const reallyLoggedIn = await verifyRealLoginSuccess();
+            if (reallyLoggedIn) return { success: true, message: '2FA completed' };
+
             await takeScreenshot('2fa-timeout');
             return {
                 success: false,
                 error: '2FA_TIMEOUT',
-                message: 'Could not automatically enter verification code. Please try again or enter manually.'
+                message: 'No verification code was relayed in time. Submit it via POST /api/doordash/2fa-code or by texting it to the bot, then try again.'
             };
         }
 
@@ -9048,6 +9105,8 @@ module.exports = {
     closeBrowser,
     openForManualLogin,
     login,
+    submitVerificationCode,
+    isAwaitingVerificationCode,
     sendPhoneLoginCode,
     submitPhoneLoginCode,
     setAddress,
