@@ -1,0 +1,190 @@
+WEEKLY REPORT - frog / MessageAI
+Week of Sep 8  |  reporting Sat Sep 13
+
+THIS WEEK: three sessions (Tue 9/9, Thu 9/11, Sat 9/13).
+3 of 5 plan days landed. Day 4's blocking bug was found and fixed today, but
+the actual deliverable - a verified pre-charge checkout scrape - is still
+blocked by a new issue found today. Day 5 didn't start.
+
+
+PLAN VS. ACTUAL
+  Day 1 - Saved-order record from the real cart .................. DONE (de404ca)
+  Day 2 - Multi-restaurant smoke test + triage .................... DONE (4a02dd0)
+  Day 3 - SMS SELECT not updating current restaurant .............. DONE (ed9247a)
+  Day 4 - Verify pre-charge scrape end-to-end (Railway) ....... BLOCKER FIXED,
+                                                              deliverable still blocked
+  Day 5 - readBrowserCart() proper fix .......................... NOT STARTED
+
+  Plus unplanned work: kiosk pre-charge confirmation, a full SMS data wipe for
+  a real user, SMS plain-text + onboarding reorder, and two real DoorDash bugs
+  root-caused and fixed today.
+
+
+DAY 1 - SAVED-ORDER RECORD FROM THE REAL CART  (de404ca, Sep 9)
+
+The checkout handlers built the saved order record's item list from the local
+cart instead of the real DoorDash cart just checked out - if the two drifted,
+the record wouldn't match what was charged. Now scrapes the checkout page's
+real itemized list and builds the record from that, falling back to the local
+cart when the scrape is empty. 9 unit cases pass.
+NOT verified going in: the checkout-page scrape itself - rode with Day 4.
+
+
+DAY 2 - MULTI-RESTAURANT SMOKE TEST  (4a02dd0, Sep 11, findings only)
+
+Search/select/add across 5 restaurants, verified against the real cart. 4 of 5
+added cleanly, no hangs, no wrong-adds, no charge risk.
+New finding: the known Costa-Vida hidden-required-option-group bug is wider
+than thought - two Wingstop items hit it too, both the HTTP and DOM paths only
+ever surface the FIRST required option group.
+
+
+DAY 3 - SMS SELECT SPLIT-BRAIN  (ed9247a, Sep 9, verified live)
+
+A second SELECT in one SMS session didn't update the current restaurant - the
+SMS handler only wrote it on menu-load success, while the cache write only ran
+on scrape success, so a failed 2nd select left the two disagreeing and later
+adds hit the wrong restaurant. Fixed to persist both together the moment the
+selection resolves, matching the touchscreen handler. Verified both success
+and scrape-fail cases live.
+
+
+DAY 4 - PRE-CHARGE SCRAPE VERIFICATION: BLOCKER FOUND AND FIXED, NEW ONE HIT
+
+Sep 11: deployed to Railway, hit two new bugs before reaching a checkout
+preview - extractMenuItems() returned 0 items for every restaurant tried, and
+Claude sometimes skipped the real SELECT command on a retry and hallucinated a
+fake menu instead. Paused, nothing charged.
+
+Sep 13 - ROOT-CAUSED AND FIXED THE 0-ITEMS BUG. Added a diagnostic dump for
+the specific case where prices are detected but extraction finds nothing,
+deployed, reproduced immediately. The dump caught it: the page was DoorDash's
+logged-out marketing HOMEPAGE, not the store page - despite the URL bar
+showing the store URL correctly. Traced to a race: the SMS/voice select
+handler fired clearBrowserCart() WITHOUT awaiting it, immediately before
+extractMenuItems(). clearBrowserCart() internally navigates the shared browser
+page to /home to reach the real cart drawer; extractMenuItems() isn't
+serialized against it, so it sometimes read /home mid-navigation instead of
+the store page. Explained every symptom: identical page height across
+different restaurants (home is always the same page), "prices detected" (from
+home's own promo banner), 0 real items.
+FIXED by deferring the cart-clear until after menu extraction completes.
+VERIFIED LIVE: the exact restaurant that returned 0 items twice before the fix
+returned a real, correct 108-item menu right after, from a fresh select.
+
+Also confirmed the Claude-hallucination bug is WORSE than documented - it
+fired on fresh first-try selects today (3 for 3 on one test number), not just
+retries as previously thought. Makes SMS unreliable as a test tool on its own;
+real verification now needs the kiosk API or a log check for a real SELECT
+line. Still open, needs a system-prompt fix.
+
+New minor finding: a fresh search can resolve SELECT against a stale cached
+search-results list from an earlier query. Not investigated yet.
+
+REACHED THE ACTUAL DAY 4 GOAL AND HIT A NEW BLOCKER. Via the kiosk API:
+searched and selected Subway (real 108-item menu), added a Tuna sub with a
+real size selection (real ingredient scrape back). The checkout preview then
+failed - the checkout page's own text still said "sign in or sign up to place
+order" as an unmet step, even though search/select/add all worked fine
+moments earlier on the same session. A fresh, verified-successful real login
+right before retrying didn't fix it, and reset the in-progress cart as a side
+effect ("server restarted"). Browsing-level auth and checkout-level auth
+appear to be different, and only the latter is failing. Added a clearer error
+message for this case; root cause not yet found - this is the real remaining
+Day 4 blocker.
+
+
+UNPLANNED WORK THIS WEEK
+
+  Kiosk pre-charge confirmation (Sep 9) - food.html's Place Order now loads
+  the real checkout page and shows delivery address + card last-4 + real
+  total before charging, matching what SMS already had. Verified the gate and
+  UI; the real successful preview needed Railway (see Day 4, still blocked).
+
+  Full SMS data wipe for a real user (Sep 9) - a real user's DoorDash-linked
+  data was on Railway, cleared via the app plus a manual SSH session for what
+  the app doesn't touch. Reusable wipe script added.
+
+  SMS plain-text + onboarding reorder (Sep 9) - SMS replies were showing
+  literal markdown characters, now stripped (SMS only). Onboarding links
+  DoorDash first with an encryption reassurance, address after; setup now
+  runs a real sign-in and only confirms success once verified.
+
+  Decided Sep 11: ship the real sign-in verification as built, accepting a
+  couple of known rough edges (false failures on OTP-gated accounts, session
+  eviction if verifying a different account).
+
+
+REPO / DEPLOY STATE
+
+  - All this week's work pushed to origin/master and deployed to Railway.
+  - Two test SMS numbers exist on Railway with partial onboarding state
+    (DoorDash linked, no real cart items) - fine to reuse or wipe.
+  - Note for next session: each real login call resets the in-progress real
+    DoorDash cart and sends a real 2FA code to the test account - minimize
+    calls.
+
+
+STILL OPEN (carried into next week)
+
+  - Checkout-level auth mismatch - the real remaining Day 4 blocker.
+  - Claude skipping SELECT and hallucinating a menu, now confirmed on fresh
+    first-try selects - needs a system-prompt fix.
+  - Stale search-cache misattribution - not yet investigated.
+  - Day 5 - readBrowserCart() proper fix, not started.
+  - The wider hidden-required-option-group bug (Day 2 finding).
+
+
+======================================================================
+
+
+QUANT TRADING SYSTEM - separate track, same reporting window
+
+One long session Sep 9, picked back up Sep 11. User said "keep going" for
+Phases 2-4 - the explain-out-loud gate was waived, but tickets were still
+committed one at a time with the reasoning explained first.
+
+  Phase 2 - honest backtester + SMA baseline ......... DONE (v0.2-backtest)
+  Phase 3 - feature store + trained model ............ DONE (v0.3-model)
+  Phase 4 - agent ensemble ............................ DONE (v0.4-ensemble)
+
+THROUGH-LINE: nothing has an edge, and that's the honest finding, not a
+failure. SMA doesn't beat buy-and-hold; the trained model is worse than a
+coin flip; the agent ensemble's apparent win is explained by trading only
+6.3% of the time on a below-chance rule agent during a bad BTC stretch -
+suppressing losses by barely trading, not finding signal.
+
+PHASE 2 - bar-by-bar backtester, fills at the next bar's open, costs on by
+default, a lookahead cheat-test confirms the strategy interface structurally
+can't see the future. Baseline: buy-and-hold +1958%/-77% drawdown vs.
+sma_cross +1286%/-59% - the SMA trades return for a calmer ride, no real
+edge. Three real bugs found and fixed in a deep math review (a silent NaN
+corrupting the portfolio, duplicate-timestamp rows accepted, wrong Sharpe
+annualization).
+
+PHASE 3 - trained classifier, 13 features, rolling walk-forward. Holdout
+ROC-AUC 0.48 - BELOW CHANCE. As a strategy: -6.9%/-38% drawdown, losing to
+buy-and-hold while churning fees. Correctly calls the real-money gate a
+no-go on this evidence.
+
+PHASE 4 - agent ensemble (sandboxed tools clipped to the current bar, an LLM
+math agent restricted to numeric-only tools so it stays backtestable, a
+deterministic rule agent, a consensus gate requiring unanimous long +
+confidence). Evaluated: ensemble +0.5%/-5.4% vs. buy-and-hold -4.3%/-53.1% -
+beats it on paper, but the gate only went long 33 of 521 times (~94% cash)
+and the rule agent's own hit rate on those was 0.455, below chance. Written
+up, tagged, pushed, CI green.
+
+ALSO THIS WINDOW: created a real Anthropic API key (30-day expiry set by
+user - ROTATE ON OR AFTER OCT 11). Extended the local dashboard with an
+Overview tab and an Agents tab; found and fixed two real bugs live in the
+browser (a UI library defaulting a bad metric to a green up-arrow, and a
+live replay accidentally scoring in-sample data and showing a misleadingly
+good number that contradicted the honest holdout result).
+
+STATE: tags v0.0-scaffold..v0.4-ensemble, 258 tests, all checks green. Still
+no edge anywhere, still five phases from any real money.
+
+NEXT: Phase 5 - real paper trading against Alpaca's crypto sandbox, plus the
+crypto agent's only honest (forward-only) evaluation. Needs Alpaca paper API
+keys, not yet created.
