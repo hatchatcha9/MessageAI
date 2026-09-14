@@ -8992,41 +8992,51 @@ async function readBrowserCart() {
         const drawerItems = await evalWithTimeout(page, () => {
             const results = [];
             const diag = [];
+            // Row markup confirmed live 2026-09-14: role="listitem" data-anchor-id="OrderCartItem"
+            // with an aria-label "click to open modal and edit item: <name>" — DoorDash's own
+            // accessibility label, clean and unrelated to the row's obfuscated styled-components
+            // class names (e.g. "sc-935e0fe8-4 eKcMSh") that change across deploys/A-B tests and
+            // are what the old name/price/qty text-walk kept silently mismatching.
             const cartItemEls = document.querySelectorAll('[data-anchor-id*="CartItem"]');
             for (const el of cartItemEls) {
                 if (el.tagName === 'BUTTON') continue;
-                const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"], [data-anchor-id*="ItemName"], h3, h4')
-                    || el.querySelector('span[class*="name"], p[class*="name"]');
-                const qtyEl = el.querySelector('[data-anchor-id*="CartItemQuantity"], [data-anchor-id*="quantity"]');
-                const priceEl = el.querySelector('[data-anchor-id*="CartItemPrice"], [data-testid*="price"]');
-                let name = nameEl ? nameEl.textContent.trim() : '';
+
+                let name = '';
+                const ariaLabel = el.getAttribute('aria-label') || '';
+                const ariaMatch = ariaLabel.match(/edit item:\s*(.+)$/i);
+                if (ariaMatch) name = ariaMatch[1].trim();
+
                 if (!name) {
-                    // No name node — derive from the row text without swallowing the
-                    // options / price / quantity-stepper text (DoorDash sometimes
-                    // renders the whole row with no newlines, so split('\n')[0] used
-                    // to return the entire concatenated string as the "name").
+                    const nameEl = el.querySelector('[data-anchor-id*="CartItemName"], [data-testid*="item-name"], [data-anchor-id*="ItemName"], h3, h4')
+                        || el.querySelector('span[class*="name"], p[class*="name"]');
+                    name = nameEl ? nameEl.textContent.trim() : '';
+                }
+
+                if (!name) {
+                    // Last-resort fallback + diagnostic, in case a future markup change drops
+                    // the aria-label pattern too — capture enough to re-diagnose from logs.
                     const raw = (el.textContent || '').trim();
                     name = raw.split('\n')[0].split('$')[0].replace(/\s{2,}/g, ' ').trim();
                     name = name.replace(/\d+\s*cal.*$/i, '').replace(/\s+\d+\s*×.*$/i, '').trim();
                     if (name.length > 80) name = '';
-                    // TEMP Day-2 diagnostic (2026-09-14, to be removed before commit): full
-                    // row structure — aria-label, all $-bearing text, all button aria-labels
-                    // (quantity steppers usually expose count there), and un-truncated HTML.
-                    const dollarEls = Array.from(el.querySelectorAll('*')).filter(n => n.children.length === 0 && /\$[\d.]/.test(n.textContent || ''));
-                    diag.push({
-                        ariaLabel: el.getAttribute('aria-label'),
-                        dataItemId: el.getAttribute('data-item-id'),
-                        dataOrderItemId: el.getAttribute('data-order-item-id'),
-                        buttonAriaLabels: Array.from(el.querySelectorAll('button[aria-label]')).map(b => b.getAttribute('aria-label')),
-                        dollarLeafTexts: dollarEls.map(n => n.textContent.trim()),
-                        innerText: (el.innerText || ''),
-                        outerHTML: (el.outerHTML || '').substring(0, 4000),
-                        derivedName: name,
-                    });
+                    diag.push({ ariaLabel, innerText: (el.innerText || '').substring(0, 300), outerHTML: (el.outerHTML || '').substring(0, 1200), derivedName: name });
                 }
-                const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
+
+                // Quantity lives in the stepper's data-testid="QuantityContainer" — its
+                // textContent duplicates "N ×" once per accessible + visual copy, so just
+                // take the first match rather than relying on a single dedicated node.
+                const qtyContainer = el.querySelector('[data-testid="QuantityContainer"]');
+                const qtyMatch = qtyContainer ? (qtyContainer.textContent || '').match(/(\d+)\s*×/) : null;
+                const qty = qtyMatch ? (parseInt(qtyMatch[1], 10) || 1) : 1;
+
+                // DoorDash's cart drawer doesn't render a per-item price as text at all
+                // (confirmed live: zero "$"-bearing leaf nodes anywhere in the row) — only
+                // the order summary/checkout page has real per-item prices. Leave 0 here
+                // rather than mining for something that isn't in this view's DOM.
+                const priceEl = el.querySelector('[data-anchor-id*="CartItemPrice"], [data-testid*="price"]');
                 const priceText = priceEl ? priceEl.textContent.trim() : '';
                 const price = parseFloat((priceText.match(/\$?([\d.]+)/) || [])[1] || '0');
+
                 if (name && name.length > 1) results.push({ name, quantity: qty, price });
             }
             return { results, diag };
@@ -9034,10 +9044,12 @@ async function readBrowserCart() {
 
         const { results: drawerResults, diag: drawerDiag } = drawerItems || { results: [], diag: [] };
         if (drawerDiag && drawerDiag.length > 0) {
-            console.log('[DoorDash] readBrowserCart fallback-name diagnostic:', JSON.stringify(drawerDiag));
+            console.log('[DoorDash] readBrowserCart: aria-label name match failed, fallback diagnostic:', JSON.stringify(drawerDiag));
         }
-        console.log(`[DoorDash] readBrowserCart: found ${drawerResults.length} items after opening drawer`);
-        return drawerResults.length > 0 ? drawerResults : null;
+        // Node-boundary cleanup, same pattern as extractMenuItems()/extractRequiredOptions().
+        const cleanedResults = drawerResults.map(item => ({ ...item, name: cleanScrapedName(item.name) }));
+        console.log(`[DoorDash] readBrowserCart: found ${cleanedResults.length} items after opening drawer`);
+        return cleanedResults.length > 0 ? cleanedResults : null;
     } catch (e) {
         console.log('[DoorDash] readBrowserCart error:', e.message);
         return null;
