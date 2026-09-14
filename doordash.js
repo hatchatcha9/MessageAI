@@ -9009,9 +9009,20 @@ async function readBrowserCart() {
                     name = raw.split('\n')[0].split('$')[0].replace(/\s{2,}/g, ' ').trim();
                     name = name.replace(/\d+\s*cal.*$/i, '').replace(/\s+\d+\s*×.*$/i, '').trim();
                     if (name.length > 80) name = '';
-                    // Diagnostic-only: capture what a real row looks like so a name-mash
-                    // can be diagnosed from logs instead of guessing at DOM structure.
-                    diag.push({ outerHTML: (el.outerHTML || '').substring(0, 800), innerText: (el.innerText || '').substring(0, 300), derivedName: name });
+                    // TEMP Day-2 diagnostic (2026-09-14, to be removed before commit): full
+                    // row structure — aria-label, all $-bearing text, all button aria-labels
+                    // (quantity steppers usually expose count there), and un-truncated HTML.
+                    const dollarEls = Array.from(el.querySelectorAll('*')).filter(n => n.children.length === 0 && /\$[\d.]/.test(n.textContent || ''));
+                    diag.push({
+                        ariaLabel: el.getAttribute('aria-label'),
+                        dataItemId: el.getAttribute('data-item-id'),
+                        dataOrderItemId: el.getAttribute('data-order-item-id'),
+                        buttonAriaLabels: Array.from(el.querySelectorAll('button[aria-label]')).map(b => b.getAttribute('aria-label')),
+                        dollarLeafTexts: dollarEls.map(n => n.textContent.trim()),
+                        innerText: (el.innerText || ''),
+                        outerHTML: (el.outerHTML || '').substring(0, 4000),
+                        derivedName: name,
+                    });
                 }
                 const qty = qtyEl ? parseInt(qtyEl.textContent.trim()) || 1 : 1;
                 const priceText = priceEl ? priceEl.textContent.trim() : '';
