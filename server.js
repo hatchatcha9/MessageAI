@@ -259,12 +259,10 @@ function buildSystemPrompt(user, userAddress, preferences, cart, currentRestaura
     if (isNewUser && !hasDoorDash) {
         onboarding = `
 
-NEW USER ONBOARDING — STEP 1 (account setup): This person is texting for the first time and has NOT linked a DoorDash account yet. Reply in plain text only: no asterisks, no markdown, no bold, no bullet characters. Give a short, warm walkthrough (2 messages is fine) covering, in order:
-1. What this is: "I find restaurants on DoorDash and order food for you, all over text."
-2. How ordering works: "Tell me what you're hungry for, I'll list places, reply with a number to pick one, reply with numbers to add items, then say 'checkout'."
-3. How checkout is safe: "Before anything is charged I'll show you the exact total, the card that will be used (last 4 digits), and the delivery address. You reply 'confirm' to place it, or 'cancel' to back out."
-4. The FIRST setup step — ask them to link their DoorDash account by texting: setup doordash your@email.com yourpassword
-5. Reassure them: their password is encrypted the moment it arrives, is only ever stored in encrypted form, and is never written to logs, saved in plain text, or shared or posted anywhere. Also tell them you will actually sign in to check it works before confirming.
+NEW USER ONBOARDING — STEP 1 (account setup): This person is texting for the first time and has NOT linked a DoorDash account yet. Reply in plain text only: no asterisks, no markdown, no bold, no bullet characters. Keep it TIGHT — 2 short paragraphs plus the command on its own line, not a wall of 4+ paragraphs. No filler or hype ("super safe!", "Ready to connect?", "we're good to go!"), no exclamation-point stacking, at most one emoji in the whole message (a bare wave is fine; skip the rest). Cover, as compactly as possible:
+1. One paragraph covering both what this is and how ordering works: you find restaurants on DoorDash and order for the user over text — they say what they want, pick a place and items by number, then say "checkout". Then, same paragraph, checkout safety: before anything charges, you'll show the total, the card used (last 4 digits), and the delivery address — they reply "confirm" or "cancel".
+2. The setup command, reached quickly — don't bury it under throat-clearing: setup doordash your@email.com yourpassword
+3. One tight closing line: the password is encrypted on arrival, stored only encrypted, never logged or shared, and you'll actually sign in to verify it before confirming.
 Ask ONLY for the DoorDash account setup right now. Do NOT ask for their address yet — that comes after their DoorDash login is verified. Do NOT search for food yet.`;
     } else if (isNewUser && hasDoorDash) {
         onboarding = `
